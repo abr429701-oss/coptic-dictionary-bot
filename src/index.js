@@ -1,11 +1,10 @@
 import records from "../data/dictionary.json" with { type: "json" };
+import welcomeImageBase64 from "./welcome-image.js";
 
 const BOT_TITLE = "📖 القاموس القبطي البحيري";
 const PAGE_SIZE = 1;
 const MAX_MESSAGE_LENGTH = 3900;
 const CALLBACK_DATA_MAX_BYTES = 64;
-const DEFAULT_WELCOME_PHOTO_URL =
-  "https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/main/assets/welcome.jpg";
 const FIRST_TIME_TEXT =
   "مرحبًا بك! يبدو أنك تستخدم البوت لأول مرة, الرجاء إدخال اسمك ثلاثي للبدء في استخدام القاموس القبطي الناطق";
 const NAME_RETRY_TEXT = "الرجاء إدخال اسمك ثلاثيًا (ثلاث كلمات على الأقل) بالحروف فقط، مثل: مينا جرجس بشرى.";
@@ -319,13 +318,25 @@ function isValidFullName(value) {
 async function sendWelcome(env, chatId, name) {
   const caption =
     `مرحبًا بك يا ${escapeHtml(name)} في القاموس الرقمي الناطق للغة القبطية, تفضل الان بكتابة أي كلمة للبحث عنها`;
-  const photo = await telegram(env, "sendPhoto", {
-    chat_id: chatId,
-    photo: env.WELCOME_PHOTO_URL || DEFAULT_WELCOME_PHOTO_URL,
-    caption,
-    parse_mode: "HTML",
-  });
-  if (!photo?.ok) await telegram(env, "sendMessage", { chat_id: chatId, text: caption, parse_mode: "HTML" });
+  try {
+    // Upload the bundled image bytes directly: no dependency on Telegram fetching an external URL.
+    const bytes = Uint8Array.from(atob(welcomeImageBase64), (char) => char.charCodeAt(0));
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    form.append("caption", caption);
+    form.append("parse_mode", "HTML");
+    form.append("photo", new Blob([bytes], { type: "image/jpeg" }), "welcome.jpg");
+    const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, {
+      method: "POST",
+      body: form,
+    });
+    const result = await response.json().catch(() => ({}));
+    if (response.ok && result.ok) return;
+    console.error("Telegram sendPhoto failed", result.description ?? response.status);
+  } catch (error) {
+    console.error("Welcome photo failed", error instanceof Error ? error.message : "unknown error");
+  }
+  await telegram(env, "sendMessage", { chat_id: chatId, text: caption, parse_mode: "HTML" });
 }
 
 async function handleUpdate(update, env) {

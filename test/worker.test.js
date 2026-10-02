@@ -9,7 +9,9 @@ const env = { TELEGRAM_BOT_TOKEN: token, WEBHOOK_SECRET: secret };
 
 function fakeTelegramApi(calls) {
   globalThis.fetch = async (url, options = {}) => {
-    calls.push({ url: String(url), options, payload: options.body ? JSON.parse(options.body) : null });
+    const body = options.body;
+    const payload = !body ? null : typeof body === "string" ? JSON.parse(body) : Object.fromEntries(body.entries());
+    calls.push({ url: String(url), options, payload });
     return Response.json({ ok: true, result: true });
   };
 }
@@ -211,7 +213,8 @@ test("/start asks a new user for a three-part name, then welcomes with a photo",
   calls = await say(kvEnv, 21, "مينا جرجس بشرى");
   const photo = calls.find((call) => call.url.endsWith("/sendPhoto")).payload;
   assert.equal(photo.caption, "مرحبًا بك يا مينا جرجس بشرى في القاموس الرقمي الناطق للغة القبطية, تفضل الان بكتابة أي كلمة للبحث عنها");
-  assert.ok(photo.photo.startsWith("https://"));
+  assert.ok(photo.photo instanceof Blob && photo.photo.size > 1000);
+  assert.equal(photo.parse_mode, "HTML");
 });
 
 test("/start greets a returning user by the saved name with the photo", async () => {
@@ -228,7 +231,7 @@ test("if the photo cannot be sent the welcome falls back to text", async () => {
   kvEnv.USERS.store.set("user:23", { name: "أبانوب سمير حنا" });
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
-    calls.push({ url: String(url), payload: options.body ? JSON.parse(options.body) : null });
+    calls.push({ url: String(url), payload: typeof options.body === "string" ? JSON.parse(options.body) : null });
     if (String(url).endsWith("/sendPhoto")) return Response.json({ ok: false, description: "bad url" }, { status: 400 });
     return Response.json({ ok: true, result: true });
   };
