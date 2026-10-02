@@ -13,6 +13,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 import urllib.request
 from pathlib import Path
 
@@ -22,6 +23,7 @@ SHEET_ID = os.environ.get("SHEET_ID", "1kXVA3CNgETqym5Vz3lBUu_2gZ01QNdx7ROtGVnIJ
 SHEET_GID = os.environ.get("SHEET_GID", "")
 CSV_FILE = os.environ.get("SHEET_CSV_FILE", "")  # local file, for tests only
 OUT = Path(os.environ.get("OUT_JSON", ROOT / "data" / "dictionary.json"))
+IDS_FILE = Path(os.environ.get("WORD_IDS_JSON", ROOT / "data" / "word_ids.json"))
 MIN_RECORDS = int(os.environ.get("MIN_RECORDS", "8000"))
 
 # Columns: A coptic, B greek, C pronunciation, D english, E phonetic, F kind,
@@ -42,6 +44,63 @@ def clean_coptic(value: str) -> str:
     """
     text = _JINKIM_BEFORE_LETTER.sub(lambda match: match.group(1) + JINKIM, value)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def word_key(coptic: str) -> str:
+    """Identity of a word for its permanent id: the cleaned spelling, ignoring letter case."""
+    return unicodedata.normalize("NFC", coptic).casefold().strip()
+
+
+def load_registry(path: Path = IDS_FILE) -> dict:
+    if path.exists():
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return {"next": int(data["next"]), "ids": dict(data["ids"])}
+    return {"next": 1, "ids": {}}
+
+
+def assign_ids(records: list[dict], registry: dict) -> int:
+    """Give every word a permanent number and return how many new numbers were issued.
+
+    The registry is append-only: a number, once issued, always belongs to that spelling. It is never
+    reused and never changes when other rows are added, deleted, moved or edited in the sheet. Rows
+    that share a spelling share the number (one pronunciation per spelling).
+    """
+    issued = 0
+    for record in records:
+        key = word_key(record["coptic"])
+        if not key:
+            record.pop("id", None)
+            continue
+        if key not in registry["ids"]:
+            registry["ids"][key] = registry["next"]
+            registry["next"] += 1
+            issued += 1
+        record["id"] = registry["ids"][key]
+    return issued
+
+
+def save_registry(registry: dict, path: Path = IDS_FILE) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(registry, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+
+
+def with_id_first(record: dict) -> dict:
+    return ({"id": record["id"]} if "id" in record else {}) | {k: v for k, v in record.items() if k != "id"}
+
+
+def reindex_existing() -> None:
+    """One-off/repair: re-clean and re-number the dictionary.json already in the repository."""
+    records = json.loads(OUT.read_text(encoding="utf-8"))
+    for record in records:
+        record["coptic"] = clean_coptic(record["coptic"])
+    registry = load_registry()
+    issued = assign_ids(records, registry)
+    OUT.write_text(
+        json.dumps([with_id_first(r) for r in records], ensure_ascii=False, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    save_registry(registry)
+    print(f"Re-indexed {len(records):,} records; issued {issued:,} new ids (next id {registry['next']}).")
 
 
 def download() -> str:
@@ -96,10 +155,21 @@ def main() -> None:
     if len(records) < MIN_RECORDS:
         raise SystemExit(f"Only {len(records)} records found (< {MIN_RECORDS}); refusing to overwrite the data.")
 
+    registry = load_registry()
+    issued = assign_ids(records, registry)
+
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps(records, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+    OUT.write_text(
+        json.dumps([with_id_first(r) for r in records], ensure_ascii=False, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    save_registry(registry)
+    print(f"Issued {issued:,} new word ids (next id {registry['next']}).")
     print(f"Wrote {len(records):,} records ({OUT.stat().st_size / 1e6:.2f} MB) to {OUT}")
 
 
 if __name__ == "__main__":
-    main()
+    if "--reindex" in sys.argv:
+        reindex_existing()
+    else:
+        main()

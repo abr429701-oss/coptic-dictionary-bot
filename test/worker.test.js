@@ -94,10 +94,11 @@ test("admin records a real Telegram voice file word by word and search reuses it
   await worker.fetch(updateRequest({ message: { text: "/record", chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
   const prompt = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
   assert.match(prompt, /تسجيل نطق كلمة جديدة/u);
-  const index = kvEnv.USERS.store.get(`user:${ADMIN}`).voiceRec.index;
+  const id = kvEnv.USERS.store.get(`user:${ADMIN}`).voiceRec.id;
+  assert.ok(Number.isInteger(id));
   calls.length = 0;
   await worker.fetch(updateRequest({ message: { voice: { file_id: "telegram-voice-1", duration: 2 }, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
-  assert.equal(kvEnv.USERS.store.get(`voice:${index}`).fileId, "telegram-voice-1");
+  assert.equal(kvEnv.USERS.store.get(`voiceid:${id}`).fileId, "telegram-voice-1");
   assert.match(calls.find((call) => call.url.endsWith("/sendMessage")).payload.text, /تم حفظ تسجيل/u);
 });
 
@@ -105,9 +106,9 @@ test("recorded voice is sent as the original Telegram file instead of TTS", asyn
   const kvEnv = { ...env, USERS: fakeKv() };
   const calls = [];
   fakeTelegramApi(calls);
-  const index = records.findIndex((record) => (record.english || "").toLowerCase() === "abagini");
-  assert.ok(index >= 0);
-  kvEnv.USERS.store.set(`voice:${index}`, { fileId: "original-file-id" });
+  const record = records.find((item) => (item.english || "").toLowerCase() === "abagini");
+  assert.ok(record && Number.isInteger(record.id));
+  kvEnv.USERS.store.set(`voiceid:${record.id}`, { fileId: "original-file-id" });
   await worker.fetch(updateRequest({ message: { text: "abagini", chat: { id: 11 }, from: { id: 11 } } }), kvEnv);
   const voice = calls.find((call) => call.url.endsWith("/sendVoice"));
   assert.ok(voice);
@@ -542,4 +543,33 @@ test("the keyboard jinkim key puts one combining mark on the previous letter", a
   assert.match(edits(calls)[0].text, /▸ ⲥ\u0300▏/u);
   calls = await kbSay(kvEnv, "◌̀");
   assert.equal(edits(calls).length, 0);
+});
+
+test("every word has a permanent id; the same spelling shares one id and different spellings never do", () => {
+  const byKey = new Map();
+  for (const record of records) {
+    const word = String(record.coptic ?? "").trim();
+    if (!word) { assert.equal(record.id, undefined); continue; }
+    assert.ok(Number.isInteger(record.id) && record.id > 0, word);
+    const key = word.normalize("NFC").toLowerCase();
+    if (byKey.has(key)) assert.equal(byKey.get(key), record.id, word);
+    byKey.set(key, record.id);
+  }
+  assert.equal(new Set(byKey.values()).size, byKey.size);
+});
+
+test("old row-number recordings are moved to the word's id and keep working after rows move", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const index = records.findIndex((record) => (record.english || "").toLowerCase() === "abagini");
+  const id = records[index].id;
+  kvEnv.USERS.store.set(`voice:${index}`, { fileId: "legacy-file" });
+  kvEnv.USERS.store.set("voice:cursor", 5);
+  await kvEnv.USERS.object.migrateLegacyVoices();
+  assert.equal(kvEnv.USERS.store.get(`voiceid:${id}`).fileId, "legacy-file");
+  assert.equal(kvEnv.USERS.store.get(`voice:${index}`), undefined);
+  assert.equal(kvEnv.USERS.store.get("voice:cursor"), undefined);
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: "abagini", chat: { id: 12 }, from: { id: 12 } } }), kvEnv);
+  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.voice, "legacy-file");
 });

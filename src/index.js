@@ -43,6 +43,17 @@ function lazy(build) {
 // Search only the sheet's own text; never derived/generated fields.
 const SEARCH_FIELDS = ["coptic", "greek", "pronunciation", "english", "phonetic"];
 
+// Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
+const VOICE_PREFIX = "voiceid:";
+const voiceKey = (id) => `${VOICE_PREFIX}${id}`;
+const recordIndexById = lazy(() => {
+  const map = new Map();
+  records.forEach((record, index) => {
+    if (record.id != null && !map.has(record.id)) map.set(record.id, index);
+  });
+  return map;
+});
+
 const ARABIC_LETTER = /[\u0600-\u06ff]/u;
 
 // Lowercase/strip marks, then keep only letters/digits separated by single spaces.
@@ -242,11 +253,11 @@ function spokenText(record) {
 }
 
 // Starts the lookup (admin recording) or speech generation right away, so it is ready when the text is sent.
-function prepareWordVoice(env, record, recordIndex = -1) {
+function prepareWordVoice(env, record) {
   return (async () => {
-    if (env.USERS && recordIndex >= 0) {
+    if (env.USERS && record?.id != null) {
       try {
-        const saved = await storeCall(env, { op: "get", key: `voice:${recordIndex}` });
+        const saved = await storeCall(env, { op: "get", key: voiceKey(record.id) });
         if (saved?.value?.fileId) return { fileId: saved.value.fileId };
       } catch (error) {
         console.error("Recorded voice lookup failed", error instanceof Error ? error.message : "unknown error");
@@ -284,8 +295,8 @@ async function sendPreparedVoice(env, chatId, record, prepared) {
   }
 }
 
-async function sendWordVoice(env, chatId, record, recordIndex = -1) {
-  return sendPreparedVoice(env, chatId, record, prepareWordVoice(env, record, recordIndex));
+async function sendWordVoice(env, chatId, record) {
+  return sendPreparedVoice(env, chatId, record, prepareWordVoice(env, record));
 }
 
 async function showTyping(env, chatId, delayMs = TYPING_DELAY_MS) {
@@ -317,7 +328,7 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
     return deliver({ text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup });
   }
   const record = records[matches[0]];
-  const voice = prepareWordVoice(env, record, matches[0]);
+  const voice = prepareWordVoice(env, record);
   const text = formatRecord(record, matchedPartIndex(record, normalizedQuery)).slice(0, MAX_MESSAGE_LENGTH);
   const response = await deliver({ text, parse_mode: "HTML" });
   await sendPreparedVoice(env, chatId, record, voice);
@@ -327,7 +338,7 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
 async function sendRecord(env, chatId, index, partIndex = -1) {
   const record = records[index];
   if (!record) return;
-  const voice = prepareWordVoice(env, record, index);
+  const voice = prepareWordVoice(env, record);
   await telegram(env, "sendMessage", {
     chat_id: chatId,
     text: formatRecord(record, partIndex).slice(0, MAX_MESSAGE_LENGTH),
@@ -341,6 +352,24 @@ export class UserStore {
   constructor(state, env) {
     this.state = state;
     this.env = env;
+    // Run the one-time conversion before any request is served.
+    state.blockConcurrencyWhile?.(() => this.migrateLegacyVoices());
+  }
+
+  // Recordings used to be stored as voice:<row number>, which breaks when rows move. Re-key them by word id.
+  async migrateLegacyVoices() {
+    const storage = this.state.storage;
+    if (await storage.get("voice-ids-migrated")) return;
+    const legacy = await storage.list({ prefix: "voice:" });
+    for (const [key, value] of legacy) {
+      const suffix = key.slice("voice:".length);
+      if (/^\d+$/u.test(suffix)) {
+        const id = records[Number(suffix)]?.id;
+        if (id != null && !(await storage.get(voiceKey(id)))) await storage.put(voiceKey(id), value);
+      }
+      await storage.delete(key);
+    }
+    await storage.put("voice-ids-migrated", true);
   }
 
   async recipients(exclude = []) {
@@ -420,18 +449,19 @@ export class UserStore {
       return Response.json(job ? { running: true, total: job.total, sent: job.sent, failed: job.failed } : { running: false });
     }
     if (op === "voiceNext") {
-      const cursor = Math.max(0, Number(await storage.get("voice:cursor")) || 0);
-      for (let index = cursor; index < records.length; index += 1) {
-        if (!(await storage.get(`voice:${index}`))) {
-          const record = records[index];
-          return Response.json({
-            index,
-            coptic: record.coptic ?? "",
-            pronunciation: record.pronunciation ?? "",
-            english: record.english ?? "",
-            meaning: record.meaning ?? "",
-          });
-        }
+      const voiced = await storage.list({ prefix: VOICE_PREFIX });
+      for (let index = 0; index < records.length; index += 1) {
+        const record = records[index];
+        if (record.id == null || voiced.has(voiceKey(record.id))) continue;
+        return Response.json({
+          id: record.id,
+          coptic: record.coptic ?? "",
+          pronunciation: record.pronunciation ?? "",
+          english: record.english ?? "",
+          meaning: record.meaning ?? "",
+          recorded: voiced.size,
+          total: recordIndexById().size,
+        });
       }
       return Response.json(null);
     }
@@ -668,6 +698,7 @@ function voicePrompt(item) {
     "🎙️ تسجيل نطق كلمة جديدة",
     `الكلمة: <b>${escapeHtml(item.coptic || "—")}</b>`,
   ];
+  if (item.total) lines.push(`المسجّل: ${item.recorded ?? 0} من ${item.total}`);
   if (item.pronunciation) lines.push(`النطق المكتوب: ${escapeHtml(item.pronunciation)}`);
   if (item.english) lines.push(`الإنجليزية: ${escapeHtml(item.english)}`);
   if (item.meaning) lines.push(`المعنى: ${escapeHtml(String(item.meaning).split(/\s*[،,]\s*/u)[0])}`);
@@ -682,7 +713,7 @@ async function nextVoicePrompt(env, chatId, userId, user) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: voicePrompt(null), parse_mode: "HTML" });
     return;
   }
-  await saveUser(env, userId, { ...user, voiceRec: { index: item.index } });
+  await saveUser(env, userId, { ...user, voiceRec: { id: item.id } });
   await telegram(env, "sendMessage", { chat_id: chatId, text: voicePrompt(item), parse_mode: "HTML" });
 }
 
@@ -695,19 +726,21 @@ async function captureVoiceRecording(env, message, userId, user) {
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "أرسل تسجيلًا كـ Voice من تيليجرام، وليس ملف Audio." });
     return;
   }
-  const index = Number(user.voiceRec?.index);
-  if (!Number.isInteger(index) || index < 0 || index >= records.length) {
+  // Older sessions stored a row number; map it to the word's permanent id once.
+  const id = user.voiceRec?.id ?? records[Number(user.voiceRec?.index)]?.id;
+  const record = records[recordIndexById().get(id)];
+  if (id == null || !record) {
     await beginVoiceRecording(env, message.chat.id, userId, user);
     return;
   }
   await storeCall(env, {
     op: "put",
-    key: `voice:${index}`,
+    key: voiceKey(id),
     value: { fileId: message.voice.file_id, duration: message.voice.duration ?? null, savedAt: new Date().toISOString() },
   });
   await telegram(env, "sendMessage", {
     chat_id: message.chat.id,
-    text: `✅ تم حفظ تسجيل <b>${escapeHtml(records[index].coptic ?? "الكلمة")}</b>.`,
+    text: `✅ تم حفظ تسجيل <b>${escapeHtml(record.coptic ?? "الكلمة")}</b>.`,
     parse_mode: "HTML",
   });
   await nextVoicePrompt(env, message.chat.id, userId, user);
