@@ -328,6 +328,11 @@ async function handleUpdate(update, env) {
   const text = String(message.text ?? "").trim();
   const userId = message.from?.id ?? message.chat.id;
   if (text === "/start" || text.startsWith("/start ")) {
+    if (!env.USERS) {
+      // No KV namespace bound yet: registration is unavailable, so fall back to the plain help text.
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: HELP_TEXT });
+      return;
+    }
     const user = await getUser(env, userId);
     if (user?.name) {
       await sendWelcome(env, message.chat.id, user.name);

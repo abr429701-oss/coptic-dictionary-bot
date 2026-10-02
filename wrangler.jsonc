@@ -4,9 +4,6 @@
   "main": "src/index.js",
   "compatibility_date": "2026-10-02",
   "workers_dev": true,
-  "kv_namespaces": [
-    { "binding": "USERS" }
-  ],
   "observability": {
     "enabled": true
   }
