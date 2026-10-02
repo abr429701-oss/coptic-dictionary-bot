@@ -171,6 +171,8 @@ function render(query, matches, requestedPage) {
   };
 }
 
+const TYPING_DELAY_MS = 900;
+
 async function telegram(env, method, payload) {
   const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
     method: "POST",
@@ -213,6 +215,11 @@ async function sendWordVoice(env, chatId, record) {
   } catch (error) {
     console.error("Voice failed", error instanceof Error ? error.message : "unknown error");
   }
+}
+
+async function showTyping(env, chatId, delayMs = TYPING_DELAY_MS) {
+  await telegram(env, "sendChatAction", { chat_id: chatId, action: "typing" });
+  if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
@@ -314,7 +321,10 @@ async function handleUpdate(update, env) {
     });
     return;
   }
-  if (text) await sendSearch(env, message.chat.id, text);
+  if (text) {
+    await showTyping(env, message.chat.id);
+    await sendSearch(env, message.chat.id, text);
+  }
 }
 
 export default {
