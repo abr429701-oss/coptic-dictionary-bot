@@ -1,0 +1,3 @@
+# Copy to .dev.vars for local-only testing; do not commit the actual .dev.vars file.
+TELEGRAM_BOT_TOKEN=replace-with-a-test-bot-token
+WEBHOOK_SECRET=replace-with-a-random-long-value

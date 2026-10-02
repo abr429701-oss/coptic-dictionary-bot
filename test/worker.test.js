@@ -1,0 +1,84 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import worker from "../src/index.js";
+
+const token = "test-token";
+const secret = "test-secret-should-be-long-enough";
+const env = { TELEGRAM_BOT_TOKEN: token, WEBHOOK_SECRET: secret };
+
+function fakeTelegramApi(calls) {
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), options, payload: options.body ? JSON.parse(options.body) : null });
+    return Response.json({ ok: true, result: true });
+  };
+}
+
+function updateRequest(update, headers = {}) {
+  return new Request("https://bot.test/webhook", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-telegram-bot-api-secret-token": secret,
+      ...headers,
+    },
+    body: JSON.stringify(update),
+  });
+}
+
+test("health endpoint is public and returns ready", async () => {
+  const response = await worker.fetch(new Request("https://bot.test/health"), env);
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /ready/u);
+});
+
+test("rejects webhook calls with an invalid secret", async () => {
+  const response = await worker.fetch(updateRequest({ message: { text: "/start", chat: { id: 7 } } }, {
+    "x-telegram-bot-api-secret-token": "wrong",
+  }), env);
+  assert.equal(response.status, 403);
+});
+
+test("/stats returns the number of dictionary records", async () => {
+  const calls = [];
+  fakeTelegramApi(calls);
+  const response = await worker.fetch(updateRequest({ message: { text: "/stats", chat: { id: 7 } } }), env);
+  assert.equal(response.status, 200);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].payload.chat_id, 7);
+  assert.match(calls[0].payload.text, /16,297/u);
+});
+
+test("text search returns a match and pagination keyboard", async () => {
+  const calls = [];
+  fakeTelegramApi(calls);
+  const response = await worker.fetch(updateRequest({ message: { text: "ⲁ", chat: { id: 8 } } }), env);
+  assert.equal(response.status, 200);
+  const message = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload;
+  assert.ok(message);
+  assert.match(message.text, /نتائج البحث عن/u);
+  assert.match(message.text, /ⲁ/u);
+  assert.ok(message.reply_markup?.inline_keyboard?.[0]?.some((button) => button.callback_data === "p|1"));
+});
+
+test("callback pagination edits the result message for the next page", async () => {
+  const calls = [];
+  fakeTelegramApi(calls);
+  const response = await worker.fetch(updateRequest({
+    callback_query: {
+      id: "callback-1",
+      data: "p|1",
+      message: {
+        message_id: 34,
+        chat: { id: 9 },
+        text: "📖 القاموس القبطي البحيري\n🔎 نتائج البحث عن: ⲁ\nالنتائج: 4 | الصفحة: 1/4\n\n1. ⲁ",
+      },
+    },
+  }), env);
+  assert.equal(response.status, 200);
+  assert.ok(calls.some((call) => call.url.endsWith("/answerCallbackQuery")));
+  const edit = calls.find((call) => call.url.endsWith("/editMessageText"))?.payload;
+  assert.ok(edit);
+  assert.equal(edit.chat_id, 9);
+  assert.equal(edit.message_id, 34);
+  assert.match(edit.text, /الصفحة:<\/b> 2\//u);
+});

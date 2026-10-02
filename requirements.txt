@@ -1,0 +1,7 @@
+python-telegram-bot>=21.0,<22
+rapidfuzz>=3.9,<4
+gTTS>=2.5,<3
+Pillow>=10,<12
+arabic-reshaper>=3,<4
+python-bidi>=0.4,<1
+playwright>=1.40,<2

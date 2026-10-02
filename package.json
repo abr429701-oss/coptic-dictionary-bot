@@ -1,0 +1,14 @@
+{
+  "name": "coptic-dictionary-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "setup:webhook": "node scripts/setup-webhook.mjs",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
