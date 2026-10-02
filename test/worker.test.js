@@ -87,6 +87,34 @@ test("callback pagination edits the suggestions message using the query in the c
   assert.ok(edit.reply_markup.inline_keyboard.length > 0);
 });
 
+test("admin records a real Telegram voice file word by word and search reuses it", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: "/record", chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+  const prompt = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
+  assert.match(prompt, /تسجيل نطق كلمة جديدة/u);
+  const index = kvEnv.USERS.store.get(`user:${ADMIN}`).voiceRec.index;
+  calls.length = 0;
+  await worker.fetch(updateRequest({ message: { voice: { file_id: "telegram-voice-1", duration: 2 }, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+  assert.equal(kvEnv.USERS.store.get(`voice:${index}`).fileId, "telegram-voice-1");
+  assert.match(calls.find((call) => call.url.endsWith("/sendMessage")).payload.text, /تم حفظ تسجيل/u);
+});
+
+test("recorded voice is sent as the original Telegram file instead of TTS", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const calls = [];
+  fakeTelegramApi(calls);
+  const index = records.findIndex((record) => (record.english || "").toLowerCase() === "abagini");
+  assert.ok(index >= 0);
+  kvEnv.USERS.store.set(`voice:${index}`, { fileId: "original-file-id" });
+  await worker.fetch(updateRequest({ message: { text: "abagini", chat: { id: 11 }, from: { id: 11 } } }), kvEnv);
+  const voice = calls.find((call) => call.url.endsWith("/sendVoice"));
+  assert.ok(voice);
+  assert.equal(voice.payload.voice, "original-file-id");
+  assert.ok(!calls.some((call) => call.url.includes("translate_tts")));
+});
+
 test("search sends a pronunciation voice message after the result", async () => {
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
