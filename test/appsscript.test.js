@@ -7,9 +7,12 @@ import { test } from "node:test";
 const source = fs.readFileSync(new URL("../apps-script/Code.gs", import.meta.url), "utf8");
 
 class FakeSheet {
-  constructor(name, rows = []) { this.name = name; this.data = rows.map((row) => [...row]); }
+  constructor(name, rows = []) { this.name = name; this.data = rows.map((row) => [...row]); this.maxColumns = 65; }
   getName() { return this.name; }
   getLastRow() { return this.data.length; }
+  getLastColumn() { return Math.max(0, ...this.data.map((row) => row.length)); }
+  getMaxColumns() { return this.maxColumns; }
+  insertColumnsAfter(_after, count) { this.maxColumns += count; }
   appendRow(row) { this.data.push([...row]); }
   getRange(row, col, numRows = 1, numCols = 1) {
     const sheet = this;
@@ -102,11 +105,11 @@ test("an upload saves the file as <id>.ogg, logs it in the Voices tab, and links
   assert.equal(voices.data[1][0], "7");
   assert.equal(voices.data[1][2], result.url);
 
-  assert.equal(world.main.data[0][45], "Voice link");
-  assert.equal(world.main.data[2][45], result.url);
-  assert.equal(world.main.data[3][45], result.url);
-  assert.equal(world.main.data[1][45] ?? "", "");
-  assert.equal(world.main.data[4][45] ?? "", "");
+  assert.equal(world.main.data[0][2], "Voice link");
+  assert.equal(world.main.data[2][2], result.url);
+  assert.equal(world.main.data[3][2], result.url);
+  assert.equal(world.main.data[1][2] ?? "", "");
+  assert.equal(world.main.data[4][2] ?? "", "");
 });
 
 test("re-recording a word replaces its row and moves the old file to trash", () => {
@@ -119,7 +122,7 @@ test("re-recording a word replaces its row and moves the old file to trash", () 
   const voices = world.sheets.find((sheet) => sheet.getName() === "Voices");
   assert.equal(voices.data.length, 2);
   assert.equal(voices.data[1][3], second.file_id);
-  assert.equal(world.main.data[1][45], second.url);
+  assert.equal(world.main.data[1][2], second.url);
 });
 
 test("rejects bad input without touching Drive", () => {
@@ -129,7 +132,15 @@ test("rejects bad input without touching Drive", () => {
   assert.equal(world.files.size, 0);
 });
 
-test("the main sheet link column stays outside the columns the bot reads (A..AS)", () => {
-  const column = Number(/MAIN_LINK_COLUMN:\s*(\d+)/u.exec(source)[1]);
-  assert.equal(column, 46); // AT; the build script reads indexes 0..44 (A..AS)
+test("main-sheet voice links use a new column and preserve existing dictionary data in AT", () => {
+  const existingRow = Array(55).fill("");
+  existingRow[0] = "ⲁⲛⲁⲩ";
+  existingRow[45] = "أداة"; // The live sheet already uses AT; never overwrite it.
+  const world = build({ mainRows: [existingRow] });
+  const result = world.post(upload({ id: 9, word: "ⲁⲛⲁⲩ" }));
+
+  assert.equal(result.ok, true);
+  assert.equal(world.main.data[1][45], "أداة");
+  assert.equal(world.main.data[0][55], "Voice link"); // First unused column after existing data.
+  assert.equal(world.main.data[1][55], result.url);
 });

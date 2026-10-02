@@ -19,9 +19,8 @@ const CONFIG = {
   SHEET_ID: "1kXVA3CNgETqym5Vz3lBUu_2gZ01QNdx7ROtGVnIJp0c",
   MAIN_SHEET_NAME: "", // empty = the first tab
   VOICES_TAB: "Voices",
-  // Put the link next to the word in the main sheet. Column AT is free (the bot reads A..AS only).
+  // Put the link next to the word in a new column after the existing dictionary data.
   WRITE_LINK_TO_MAIN_SHEET: true,
-  MAIN_LINK_COLUMN: 46, // 46 = AT
   MAIN_LINK_HEADER: "Voice link",
   MAX_ROWS_LINKED_PER_WORD: 50,
   // Anyone with the link can listen. Keep false to stay private to your Google account.
@@ -159,12 +158,26 @@ function recordInVoicesTab_(spreadsheet, info) {
   }
 }
 
+function voiceLinkColumn_(sheet) {
+  const lastColumn = sheet.getLastColumn();
+  if (lastColumn > 0) {
+    const headers = sheet.getRange(1, 1, 1, lastColumn).getValues()[0];
+    for (let i = 0; i < headers.length; i += 1) {
+      if (String(headers[i] || "").trim() === CONFIG.MAIN_LINK_HEADER) return i + 1;
+    }
+  }
+
+  const column = lastColumn + 1;
+  const maxColumns = sheet.getMaxColumns();
+  if (column > maxColumns) sheet.insertColumnsAfter(maxColumns, column - maxColumns);
+  sheet.getRange(1, column).setValue(CONFIG.MAIN_LINK_HEADER);
+  return column;
+}
+
 function linkInMainSheet_(spreadsheet, word, url) {
   const sheet = mainSheet_(spreadsheet);
   if (!sheet) return 0;
-  if (!sheet.getRange(1, CONFIG.MAIN_LINK_COLUMN).getValue()) {
-    sheet.getRange(1, CONFIG.MAIN_LINK_COLUMN).setValue(CONFIG.MAIN_LINK_HEADER);
-  }
+  const linkColumn = voiceLinkColumn_(sheet);
   const last = sheet.getLastRow();
   if (last < 2) return 0;
   const wanted = wordKey_(word);
@@ -172,7 +185,7 @@ function linkInMainSheet_(spreadsheet, word, url) {
   let linked = 0;
   for (let i = 0; i < values.length && linked < CONFIG.MAX_ROWS_LINKED_PER_WORD; i += 1) {
     if (wordKey_(values[i][0]) === wanted) {
-      sheet.getRange(i + 2, CONFIG.MAIN_LINK_COLUMN).setValue(url);
+      sheet.getRange(i + 2, linkColumn).setValue(url);
       linked += 1;
     }
   }
