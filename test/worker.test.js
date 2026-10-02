@@ -175,3 +175,53 @@ test("Arabic search matches whole words only, never inside a longer word", async
   assert.match(text, /<b>المعنى:<\/b> [^\n]*غراب/u);
   assert.doesNotMatch(text, /الاستغراب/u);
 });
+
+function fakeKv() {
+  const store = new Map();
+  return { store, get: async (key) => store.get(key) ?? null, put: async (key, value) => { store.set(key, value); } };
+}
+
+async function say(envWithKv, userId, text) {
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text, chat: { id: userId }, from: { id: userId } } }), envWithKv);
+  return calls;
+}
+
+test("/start asks a new user for a three-part name, then welcomes with a photo", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  let calls = await say(kvEnv, 21, "/start");
+  const ask = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
+  assert.equal(ask, "مرحبًا بك! يبدو أنك تستخدم البوت لأول مرة, الرجاء إدخال اسمك ثلاثي للبدء في استخدام القاموس القبطي الناطق");
+
+  calls = await say(kvEnv, 21, "مينا");
+  assert.match(calls.find((call) => call.url.endsWith("/sendMessage")).payload.text, /ثلاثيًا/u);
+  assert.ok(!calls.some((call) => call.url.endsWith("/sendPhoto")));
+
+  calls = await say(kvEnv, 21, "مينا جرجس بشرى");
+  const photo = calls.find((call) => call.url.endsWith("/sendPhoto")).payload;
+  assert.equal(photo.caption, "مرحبًا بك يا مينا جرجس بشرى في القاموس الرقمي الناطق للغة القبطية, تفضل الان بكتابة أي كلمة للبحث عنها");
+  assert.ok(photo.photo.startsWith("https://"));
+});
+
+test("/start greets a returning user by the saved name with the photo", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  kvEnv.USERS.store.set("user:22", JSON.stringify({ name: "بيشوي مجدي فرج" }));
+  const calls = await say(kvEnv, 22, "/start");
+  const photo = calls.find((call) => call.url.endsWith("/sendPhoto")).payload;
+  assert.match(photo.caption, /مرحبًا بك يا بيشوي مجدي فرج في القاموس الرقمي الناطق/u);
+  assert.ok(!calls.some((call) => call.url.endsWith("/sendMessage")));
+});
+
+test("if the photo cannot be sent the welcome falls back to text", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  kvEnv.USERS.store.set("user:23", JSON.stringify({ name: "أبانوب سمير حنا" }));
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), payload: options.body ? JSON.parse(options.body) : null });
+    if (String(url).endsWith("/sendPhoto")) return Response.json({ ok: false, description: "bad url" }, { status: 400 });
+    return Response.json({ ok: true, result: true });
+  };
+  await worker.fetch(updateRequest({ message: { text: "/start", chat: { id: 23 }, from: { id: 23 } } }), kvEnv);
+  assert.match(calls.find((call) => call.url.endsWith("/sendMessage")).payload.text, /أبانوب سمير حنا/u);
+});

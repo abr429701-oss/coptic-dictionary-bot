@@ -4,6 +4,12 @@ const BOT_TITLE = "📖 القاموس القبطي البحيري";
 const PAGE_SIZE = 1;
 const MAX_MESSAGE_LENGTH = 3900;
 const CALLBACK_DATA_MAX_BYTES = 64;
+const DEFAULT_WELCOME_PHOTO_URL =
+  "https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/main/assets/welcome.jpg";
+const FIRST_TIME_TEXT =
+  "مرحبًا بك! يبدو أنك تستخدم البوت لأول مرة, الرجاء إدخال اسمك ثلاثي للبدء في استخدام القاموس القبطي الناطق";
+const NAME_RETRY_TEXT = "الرجاء إدخال اسمك ثلاثيًا (ثلاث كلمات على الأقل) بالحروف فقط، مثل: مينا جرجس بشرى.";
+const HELP_TEXT = `${BOT_TITLE}\n\nأهلًا بك في القاموس.\n\nاكتب الكلمة مباشرة، مثل:\nⲁⲛⲁⲩ\nwater\nماء\n\nسأبحث في القبطية والعربية والإنجليزية والنطق والتهجئة.\n\nاكتب حرفًا أو حرفين لتظهر لك اقتراحات بالكلمات التي تبدأ بهما.`;
 
 function normalize(value) {
   return String(value ?? "")
@@ -259,6 +265,47 @@ async function sendRecord(env, chatId, index, partIndex = -1) {
   await sendWordVoice(env, chatId, record);
 }
 
+async function getUser(env, userId) {
+  if (!env.USERS) return null;
+  try {
+    const raw = await env.USERS.get(`user:${userId}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    console.error("User lookup failed", error instanceof Error ? error.message : "unknown error");
+    return null;
+  }
+}
+
+async function saveUser(env, userId, data) {
+  if (!env.USERS) return false;
+  try {
+    await env.USERS.put(`user:${userId}`, JSON.stringify(data));
+    return true;
+  } catch (error) {
+    console.error("User save failed", error instanceof Error ? error.message : "unknown error");
+    return false;
+  }
+}
+
+function isValidFullName(value) {
+  const name = String(value ?? "").replace(/\s+/gu, " ").trim();
+  if (name.length < 5 || name.length > 60) return false;
+  if (!/^[\p{L}\p{M}' .-]+$/u.test(name)) return false;
+  return name.split(" ").filter(Boolean).length >= 3;
+}
+
+async function sendWelcome(env, chatId, name) {
+  const caption =
+    `مرحبًا بك يا ${escapeHtml(name)} في القاموس الرقمي الناطق للغة القبطية, تفضل الان بكتابة أي كلمة للبحث عنها`;
+  const photo = await telegram(env, "sendPhoto", {
+    chat_id: chatId,
+    photo: env.WELCOME_PHOTO_URL || DEFAULT_WELCOME_PHOTO_URL,
+    caption,
+    parse_mode: "HTML",
+  });
+  if (!photo?.ok) await telegram(env, "sendMessage", { chat_id: chatId, text: caption, parse_mode: "HTML" });
+}
+
 async function handleUpdate(update, env) {
   if (update.callback_query) {
     const callback = update.callback_query;
@@ -279,11 +326,19 @@ async function handleUpdate(update, env) {
   const message = update.message;
   if (!message?.chat?.id) return;
   const text = String(message.text ?? "").trim();
-  if (text === "/start" || text.startsWith("/start ") || text === "/help") {
-    await telegram(env, "sendMessage", {
-      chat_id: message.chat.id,
-      text: `${BOT_TITLE}\n\nأهلًا بك في القاموس.\n\nاكتب الكلمة مباشرة، مثل:\nⲁⲛⲁⲩ\nwater\nماء\n\nسأبحث في القبطية والعربية والإنجليزية والنطق والتهجئة.\n\nاكتب حرفًا أو حرفين لتظهر لك اقتراحات بالكلمات التي تبدأ بهما.`,
-    });
+  const userId = message.from?.id ?? message.chat.id;
+  if (text === "/start" || text.startsWith("/start ")) {
+    const user = await getUser(env, userId);
+    if (user?.name) {
+      await sendWelcome(env, message.chat.id, user.name);
+      return;
+    }
+    await saveUser(env, userId, { ...user, awaitingName: true });
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: FIRST_TIME_TEXT });
+    return;
+  }
+  if (text === "/help") {
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: HELP_TEXT });
     return;
   }
   if (text === "/stats") {
@@ -308,6 +363,17 @@ async function handleUpdate(update, env) {
     return;
   }
   if (text) {
+    const user = await getUser(env, userId);
+    if (user?.awaitingName) {
+      if (!isValidFullName(text)) {
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: NAME_RETRY_TEXT });
+        return;
+      }
+      const name = text.replace(/\s+/gu, " ").trim();
+      await saveUser(env, userId, { name, registeredAt: new Date().toISOString() });
+      await sendWelcome(env, message.chat.id, name);
+      return;
+    }
     await showTyping(env, message.chat.id);
     await sendSearch(env, message.chat.id, text);
   }
