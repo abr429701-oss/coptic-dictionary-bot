@@ -238,3 +238,72 @@ test("if the photo cannot be sent the welcome falls back to text", async () => {
   await worker.fetch(updateRequest({ message: { text: "/start", chat: { id: 23 }, from: { id: 23 } } }), kvEnv);
   assert.match(calls.find((call) => call.url.endsWith("/sendMessage")).payload.text, /أبانوب سمير حنا/u);
 });
+
+function keyCallback(data, text, messageId = 50) {
+  return { callback_query: { id: "k1", data, message: { message_id: messageId, chat: { id: 31 }, text } } };
+}
+
+test("/keyboard sends the Coptic keyboard with letters, space, delete, clear, search and close", async () => {
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: "/keyboard", chat: { id: 31 }, from: { id: 31 } } }), env);
+  const payload = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
+  const data = payload.reply_markup.inline_keyboard.flat().map((button) => button.callback_data);
+  for (const key of ["k|ⲁ", "k|ⲱ", "k|ϣ", "k|ϧ", "k|ϯ", "k|sp", "k|bs", "k|cl", "k|go", "k|x"]) assert.ok(data.includes(key), key);
+  assert.ok(data.length <= 100);
+  assert.ok(data.every((item) => new TextEncoder().encode(item).length <= 64));
+});
+
+test("tapping keys builds the word in the message and edits it in place", async () => {
+  let calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest(keyCallback("k|ⲁ", "⌨️ الكيبورد القبطي\n\n▸ ▏")), env);
+  let edit = calls.find((call) => call.url.endsWith("/editMessageText")).payload;
+  assert.equal(edit.message_id, 50);
+  assert.match(edit.text, /▸ ⲁ▏/u);
+  assert.ok(edit.reply_markup.inline_keyboard.length > 5);
+
+  calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest(keyCallback("k|ϣ", edit.text)), env);
+  edit = calls.find((call) => call.url.endsWith("/editMessageText")).payload;
+  assert.match(edit.text, /▸ ⲁϣ▏/u);
+
+  calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest(keyCallback("k|bs", edit.text)), env);
+  assert.match(calls.find((call) => call.url.endsWith("/editMessageText")).payload.text, /▸ ⲁ▏/u);
+
+  calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest(keyCallback("k|cl", "x\n\n▸ ⲁⲃ▏")), env);
+  assert.match(calls.find((call) => call.url.endsWith("/editMessageText")).payload.text, /▸ ▏/u);
+});
+
+test("keyboard search runs the composed word and an empty word shows an alert", async () => {
+  let calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest(keyCallback("k|go", "x\n\n▸ ⲁⲃⲁϫⲓⲛⲓ▏")), env);
+  const result = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
+  assert.equal(result.chat_id, 31);
+  assert.match(result.text, /ⲁⲃⲁϫⲓⲛⲓ/u);
+  assert.ok(calls.some((call) => call.url.endsWith("/sendChatAction")));
+
+  calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest(keyCallback("k|go", "x\n\n▸ ▏")), env);
+  const alert = calls.find((call) => call.url.endsWith("/answerCallbackQuery")).payload;
+  assert.equal(alert.show_alert, true);
+  assert.ok(!calls.some((call) => call.url.endsWith("/sendMessage")));
+});
+
+test("typing plain ⲉ finds headwords written with accented ὲ, and backticks are ignored", async () => {
+  const withGrave = records.find((record) => /ὲ/u.test(record.coptic ?? ""));
+  assert.ok(withGrave);
+  const typed = withGrave.coptic.replace(/ὲ/gu, "ⲉ").replaceAll("`", "");
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: typed, chat: { id: 32 }, from: { id: 32 } } }), env);
+  const message = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
+  assert.doesNotMatch(message.text, /لم أجد نتائج/u);
+});

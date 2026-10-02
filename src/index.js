@@ -5,10 +5,11 @@ const BOT_TITLE = "📖 القاموس القبطي البحيري";
 const PAGE_SIZE = 1;
 const MAX_MESSAGE_LENGTH = 3900;
 const CALLBACK_DATA_MAX_BYTES = 64;
+const WELCOME_MARKUP = { inline_keyboard: [[{ text: "⌨️ الكيبورد القبطي", callback_data: "k|open" }]] };
 const FIRST_TIME_TEXT =
   "مرحبًا بك! يبدو أنك تستخدم البوت لأول مرة, الرجاء إدخال اسمك ثلاثي للبدء في استخدام القاموس القبطي الناطق";
 const NAME_RETRY_TEXT = "الرجاء إدخال اسمك ثلاثيًا (ثلاث كلمات على الأقل) بالحروف فقط، مثل: مينا جرجس بشرى.";
-const HELP_TEXT = `${BOT_TITLE}\n\nأهلًا بك في القاموس.\n\nاكتب الكلمة مباشرة، مثل:\nⲁⲛⲁⲩ\nwater\nماء\n\nسأبحث في القبطية والعربية والإنجليزية والنطق والتهجئة.\n\nاكتب حرفًا أو حرفين لتظهر لك اقتراحات بالكلمات التي تبدأ بهما.`;
+const HELP_TEXT = `${BOT_TITLE}\n\nأهلًا بك في القاموس.\n\nاكتب الكلمة مباشرة، مثل:\nⲁⲛⲁⲩ\nwater\nماء\n\nسأبحث في القبطية والعربية والإنجليزية والنطق والتهجئة.\n\nاكتب حرفًا أو حرفين لتظهر لك اقتراحات بالكلمات التي تبدأ بهما.\n\n⌨️ لا يوجد كيبورد قبطي على جهازك؟ أرسل /keyboard لتكتب الكلمة بالأزرار.`;
 
 function normalize(value) {
   return String(value ?? "")
@@ -17,6 +18,14 @@ function normalize(value) {
     .replace(/[\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06edـ]/gu, "")
     .replace(/[أإآٱ]/gu, "ا")
     .replace(/ى/gu, "ي")
+    .replace(/[ὲέ]/gu, "ⲉ")
+    .replace(/[ὶί]/gu, "ⲓ")
+    .replace(/[ὸό]/gu, "ⲟ")
+    .replace(/[ὼώ]/gu, "ⲱ")
+    .replace(/[ὴή]/gu, "ⲏ")
+    .replace(/[ὰά]/gu, "ⲁ")
+    .replace(/[ὺύ]/gu, "ⲩ")
+    .replace(/`/gu, "")
     .replace(/\s+/gu, " ")
     .trim();
 }
@@ -325,6 +334,7 @@ async function sendWelcome(env, chatId, name) {
     form.append("chat_id", String(chatId));
     form.append("caption", caption);
     form.append("parse_mode", "HTML");
+    form.append("reply_markup", JSON.stringify(WELCOME_MARKUP));
     form.append("photo", new Blob([bytes], { type: "image/jpeg" }), "welcome.jpg");
     const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, {
       method: "POST",
@@ -336,12 +346,95 @@ async function sendWelcome(env, chatId, name) {
   } catch (error) {
     console.error("Welcome photo failed", error instanceof Error ? error.message : "unknown error");
   }
-  await telegram(env, "sendMessage", { chat_id: chatId, text: caption, parse_mode: "HTML" });
+  await telegram(env, "sendMessage", { chat_id: chatId, text: caption, parse_mode: "HTML", reply_markup: WELCOME_MARKUP });
+}
+
+// ---- Coptic on-screen keyboard (stateless: the word being typed lives in the message text) ----
+const COPTIC_KEY_ROWS = [
+  ["ⲁ", "ⲃ", "ⲅ", "ⲇ", "ⲉ", "ⲍ"],
+  ["ⲏ", "ⲑ", "ⲓ", "ⲕ", "ⲗ", "ⲙ"],
+  ["ⲛ", "ⲝ", "ⲟ", "ⲡ", "ⲣ", "ⲥ"],
+  ["ⲧ", "ⲩ", "ⲫ", "ⲭ", "ⲯ", "ⲱ"],
+  ["ϣ", "ϥ", "ϧ", "ϩ", "ϫ", "ϭ", "ϯ"],
+];
+const COPTIC_KEYS = new Set([...COPTIC_KEY_ROWS.flat(), "`"]);
+const KEYBOARD_TITLE = "⌨️ الكيبورد القبطي\nاضغط الحروف لتكوين الكلمة ثم اضغط «بحث»";
+const KEYBOARD_MAX_LENGTH = 40;
+
+function keyboardMarkup() {
+  const rows = COPTIC_KEY_ROWS.map((row) => row.map((key) => ({ text: key, callback_data: `k|${key}` })));
+  rows.push([
+    { text: "`", callback_data: "k|`" },
+    { text: "␣ مسافة", callback_data: "k|sp" },
+    { text: "⌫ حذف", callback_data: "k|bs" },
+    { text: "🗑 مسح", callback_data: "k|cl" },
+  ]);
+  rows.push([
+    { text: "🔎 بحث", callback_data: "k|go" },
+    { text: "✖️ إغلاق", callback_data: "k|x" },
+  ]);
+  return { inline_keyboard: rows };
+}
+
+function keyboardText(word) {
+  return `${KEYBOARD_TITLE}\n\n▸ ${word}▏`;
+}
+
+function wordFromKeyboardMessage(text) {
+  const line = String(text ?? "").split("\n").find((item) => item.startsWith("▸"));
+  return line ? line.replace(/^▸ ?/u, "").replace(/▏$/u, "") : "";
+}
+
+async function sendKeyboard(env, chatId) {
+  await telegram(env, "sendMessage", { chat_id: chatId, text: keyboardText(""), reply_markup: keyboardMarkup() });
+}
+
+async function handleKeyboardCallback(env, callback) {
+  const action = String(callback.data ?? "").slice(2);
+  const chatId = callback.message?.chat?.id;
+  const messageId = callback.message?.message_id;
+  const answer = (extra = {}) => telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, ...extra });
+  if (!chatId) return answer();
+  if (action === "open") {
+    await answer();
+    return sendKeyboard(env, chatId);
+  }
+  if (!messageId) return answer();
+  const current = wordFromKeyboardMessage(callback.message.text);
+  if (action === "go") {
+    const query = current.trim();
+    if (!query) return answer({ text: "اكتب كلمة أولًا باستخدام الحروف", show_alert: true });
+    await answer();
+    await showTyping(env, chatId);
+    return sendSearch(env, chatId, query);
+  }
+  if (action === "x") {
+    await answer();
+    return telegram(env, "deleteMessage", { chat_id: chatId, message_id: messageId });
+  }
+  let word = current;
+  if (action === "bs") word = Array.from(current).slice(0, -1).join("");
+  else if (action === "cl") word = "";
+  else if (action === "sp") word = current && !current.endsWith(" ") ? `${current} ` : current;
+  else if (COPTIC_KEYS.has(action)) word = Array.from(current).length < KEYBOARD_MAX_LENGTH ? current + action : current;
+  else return answer();
+  await answer();
+  if (word === current) return undefined;
+  return telegram(env, "editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
+    text: keyboardText(word),
+    reply_markup: keyboardMarkup(),
+  });
 }
 
 async function handleUpdate(update, env) {
   if (update.callback_query) {
     const callback = update.callback_query;
+    if (String(callback.data ?? "").startsWith("k|")) {
+      await handleKeyboardCallback(env, callback);
+      return;
+    }
     await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
     const pick = /^s\|(\d{1,6})(?:\|(\d{1,3}))?$/u.exec(callback.data ?? "");
     if (pick) {
@@ -375,6 +468,10 @@ async function handleUpdate(update, env) {
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: FIRST_TIME_TEXT });
     return;
   }
+  if (text === "/keyboard" || text === "/k") {
+    await sendKeyboard(env, message.chat.id);
+    return;
+  }
   if (text === "/help") {
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: HELP_TEXT });
     return;
@@ -396,7 +493,7 @@ async function handleUpdate(update, env) {
   if (text.startsWith("/")) {
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
-      text: "اكتب الكلمة مباشرة للبحث، أو استخدم /start للمساعدة و/stats لعدد السجلات.",
+      text: "اكتب الكلمة مباشرة للبحث، أو استخدم /keyboard للكيبورد القبطي و/start للمساعدة و/stats لعدد السجلات.",
     });
     return;
   }
