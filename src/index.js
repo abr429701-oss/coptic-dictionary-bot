@@ -5,6 +5,9 @@ const BOT_TITLE = "📖 القاموس القبطي البحيري";
 const PAGE_SIZE = 1;
 const MAX_MESSAGE_LENGTH = 3900;
 const CALLBACK_DATA_MAX_BYTES = 64;
+const DEFAULT_ADMIN_IDS = "813894692"; // owner chat id from data/owner_chat_id.txt; override with ADMIN_CHAT_ID
+const BROADCAST_BATCH_SIZE = 25;
+const BROADCAST_BATCH_DELAY_MS = 1200;
 const FIRST_TIME_TEXT =
   "مرحبًا بك! يبدو أنك تستخدم البوت لأول مرة, الرجاء إدخال اسمك ثلاثي للبدء في استخدام القاموس القبطي الناطق";
 const NAME_RETRY_TEXT = "الرجاء إدخال اسمك ثلاثيًا (ثلاث كلمات على الأقل) بالحروف فقط، مثل: مينا جرجس بشرى.";
@@ -274,17 +277,84 @@ async function sendRecord(env, chatId, index, partIndex = -1) {
 
 // Registered users live in one SQLite-backed Durable Object (no extra Cloudflare token permission needed).
 export class UserStore {
-  constructor(state) {
+  constructor(state, env) {
     this.state = state;
+    this.env = env;
+  }
+
+  async recipients(exclude = []) {
+    const skip = new Set(exclude.map(String));
+    const users = await this.state.storage.list({ prefix: "user:" });
+    const ids = [];
+    for (const [key, record] of users) {
+      const id = key.slice("user:".length);
+      if (!skip.has(id) && !record?.blocked) ids.push(id);
+    }
+    return ids;
+  }
+
+  async alarm() {
+    const storage = this.state.storage;
+    const job = await storage.get("broadcast");
+    if (!job) return;
+    const batch = job.queue.splice(0, BROADCAST_BATCH_SIZE);
+    let delay = BROADCAST_BATCH_DELAY_MS;
+    for (let i = 0; i < batch.length; i += 1) {
+      const id = batch[i];
+      const result = await telegram(this.env, "copyMessage", {
+        chat_id: id,
+        from_chat_id: job.fromChat,
+        message_id: job.messageId,
+      });
+      if (result?.ok) {
+        job.sent += 1;
+      } else if (result?.error_code === 429) {
+        // Telegram asked us to slow down: put the rest back and wait.
+        job.queue.unshift(...batch.slice(i));
+        delay = ((result.parameters?.retry_after ?? 5) + 1) * 1000;
+        break;
+      } else {
+        job.failed += 1;
+        if (result?.error_code === 403 || result?.error_code === 400) {
+          const record = (await storage.get(`user:${id}`)) ?? {};
+          await storage.put(`user:${id}`, { ...record, blocked: true });
+        }
+      }
+    }
+    if (job.queue.length) {
+      await storage.put("broadcast", job);
+      await storage.setAlarm(Date.now() + delay);
+      return;
+    }
+    await storage.delete("broadcast");
+    await telegram(this.env, "sendMessage", {
+      chat_id: job.adminChat,
+      text: `✅ اكتمل الإرسال الجماعي.\nوصلت إلى: ${job.sent}\nلم تصل (حظروا البوت أو حذفوه): ${job.failed}\nالإجمالي: ${job.total}`,
+    });
   }
 
   async fetch(request) {
-    const { op, key, value, userId, input, kb } = await request.json();
+    const { op, key, value, userId, input, kb, exclude, fromChat, messageId } = await request.json();
     const storage = this.state.storage;
     if (op === "get") return Response.json({ value: (await storage.get(key)) ?? null });
     if (op === "put") {
       await storage.put(key, value);
       return Response.json({ ok: true });
+    }
+    if (op === "bccount") return Response.json({ count: (await this.recipients(exclude)).length });
+    if (op === "bcstatus") {
+      const job = await storage.get("broadcast");
+      return Response.json(job ? { running: true, total: job.total, sent: job.sent, failed: job.failed } : { running: false });
+    }
+    if (op === "bcstart") {
+      if (await storage.get("broadcast")) return Response.json({ busy: true });
+      const queue = await this.recipients(exclude);
+      if (!queue.length) return Response.json({ started: false, total: 0 });
+      await storage.put("broadcast", {
+        queue, total: queue.length, sent: 0, failed: 0, fromChat, messageId, adminChat: fromChat,
+      });
+      await storage.setAlarm(Date.now() + 100);
+      return Response.json({ started: true, total: queue.length });
     }
     const userKey = `user:${userId}`;
     if (op === "kbstep") {
@@ -477,9 +547,90 @@ async function handleKeyboardInput(env, message, userId) {
   }
 }
 
+function adminIds(env) {
+  return String(env.ADMIN_CHAT_ID ?? DEFAULT_ADMIN_IDS).split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function isAdmin(env, userId) {
+  return adminIds(env).includes(String(userId));
+}
+
+const BROADCAST_CONFIRM_MARKUP = {
+  inline_keyboard: [[
+    { text: "✅ تأكيد الإرسال", callback_data: "bc|go" },
+    { text: "❌ إلغاء", callback_data: "bc|no" },
+  ]],
+};
+
+async function beginBroadcast(env, chatId, userId, user) {
+  const status = await storeCall(env, { op: "bcstatus" });
+  if (status.running) {
+    await telegram(env, "sendMessage", {
+      chat_id: chatId,
+      text: `⏳ يوجد إرسال جماعي جارٍ الآن: وصل ${status.sent} من ${status.total}. انتظر اكتماله أولًا.`,
+    });
+    return;
+  }
+  await saveUser(env, userId, { ...user, bc: "await" });
+  await telegram(env, "sendMessage", {
+    chat_id: chatId,
+    text: "📢 أرسل الآن الرسالة التي تريد إرسالها لجميع المستخدمين (نص أو صورة أو ملف…).\nلإلغاء العملية أرسل /cancel",
+  });
+}
+
+async function captureBroadcast(env, message, userId, user) {
+  const { count } = await storeCall(env, { op: "bccount", exclude: adminIds(env) });
+  if (!count) {
+    await saveUser(env, userId, { ...user, bc: undefined });
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "لا يوجد مستخدمون مسجّلون لإرسال الرسالة إليهم بعد." });
+    return;
+  }
+  await saveUser(env, userId, { ...user, bc: { messageId: message.message_id } });
+  await telegram(env, "sendMessage", {
+    chat_id: message.chat.id,
+    reply_to_message_id: message.message_id,
+    text: `سيتم إرسال الرسالة أعلاه إلى ${count.toLocaleString("en-US")} مستخدم.\nهل تريد التأكيد؟`,
+    reply_markup: BROADCAST_CONFIRM_MARKUP,
+  });
+}
+
+async function handleBroadcastCallback(env, callback) {
+  const answer = (extra = {}) => telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, ...extra });
+  const userId = callback.from?.id;
+  const chatId = callback.message?.chat?.id;
+  if (!isAdmin(env, userId) || !chatId) return answer();
+  const user = (await getUser(env, userId)) ?? {};
+  const edit = (text) => telegram(env, "editMessageText", {
+    chat_id: chatId,
+    message_id: callback.message.message_id,
+    text,
+  });
+  if (callback.data === "bc|no" || !user.bc?.messageId) {
+    await saveUser(env, userId, { ...user, bc: undefined });
+    await answer();
+    await edit("تم إلغاء الإرسال الجماعي.");
+    return;
+  }
+  const started = await storeCall(env, {
+    op: "bcstart",
+    exclude: adminIds(env),
+    fromChat: chatId,
+    messageId: user.bc.messageId,
+  });
+  await saveUser(env, userId, { ...user, bc: undefined });
+  await answer();
+  if (started.busy) await edit("⏳ يوجد إرسال جماعي جارٍ بالفعل.");
+  else if (!started.started) await edit("لا يوجد مستخدمون لإرسال الرسالة إليهم.");
+  else await edit(`🚀 بدأ الإرسال إلى ${started.total.toLocaleString("en-US")} مستخدم. سأرسل لك تقريرًا عند الانتهاء.`);
+}
+
 async function handleUpdate(update, env) {
   if (update.callback_query) {
     const callback = update.callback_query;
+    if (String(callback.data ?? "").startsWith("bc|")) {
+      await handleBroadcastCallback(env, callback);
+      return;
+    }
     await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
     const pick = /^s\|(\d{1,6})(?:\|(\d{1,3}))?$/u.exec(callback.data ?? "");
     if (pick) {
@@ -498,6 +649,23 @@ async function handleUpdate(update, env) {
   if (!message?.chat?.id) return;
   const text = String(message.text ?? "").trim();
   const userId = message.from?.id ?? message.chat.id;
+  const isPrivate = (message.chat.type ?? "private") === "private";
+  if (isAdmin(env, userId) && isPrivate) {
+    const admin = await getUser(env, userId);
+    if (text === "/cancel" && admin?.bc) {
+      await saveUser(env, userId, { ...admin, bc: undefined });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "تم إلغاء الإرسال الجماعي." });
+      return;
+    }
+    if (text === "/broadcast") {
+      await beginBroadcast(env, message.chat.id, userId, admin ?? {});
+      return;
+    }
+    if (admin?.bc === "await" && !text.startsWith("/")) {
+      await captureBroadcast(env, message, userId, admin);
+      return;
+    }
+  }
   if (text === "/start" || text.startsWith("/start ")) {
     if (!env.USERS) {
       // No user store bound: registration is unavailable, so fall back to the plain help text.
@@ -544,6 +712,9 @@ async function handleUpdate(update, env) {
   }
   if (text) {
     const user = await getUser(env, userId);
+    if (isPrivate && (!user || user.blocked)) {
+      await saveUser(env, userId, { ...user, blocked: false, firstSeen: user?.firstSeen ?? new Date().toISOString() });
+    }
     if (user?.awaitingName) {
       if (!isValidFullName(text)) {
         await telegram(env, "sendMessage", { chat_id: message.chat.id, text: NAME_RETRY_TEXT });

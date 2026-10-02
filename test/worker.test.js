@@ -180,13 +180,19 @@ test("Arabic search matches whole words only, never inside a longer word", async
 
 function fakeKv() {
   const store = new Map();
+  const alarms = [];
   const storage = {
     get: async (key) => store.get(key),
     put: async (key, value) => { store.set(key, value); },
+    delete: async (key) => store.delete(key),
+    list: async ({ prefix = "" } = {}) => new Map([...store].filter(([key]) => key.startsWith(prefix))),
+    setAlarm: async (when) => { alarms.push(when); },
   };
-  const object = new UserStore({ storage });
+  const object = new UserStore({ storage }, env);
   return {
     store,
+    alarms,
+    object,
     idFromName: (name) => name,
     get: () => ({
       fetch: (url, options) => object.fetch(new Request(url, options)),
@@ -334,4 +340,118 @@ test("typing plain ⲉ finds headwords written with accented ὲ, and backticks 
   await worker.fetch(updateRequest({ message: { text: typed, chat: { id: 32 }, from: { id: 32 } } }), env);
   const message = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
   assert.doesNotMatch(message.text, /لم أجد نتائج/u);
+});
+
+const ADMIN = 813894692;
+
+async function asUser(kvEnv, id, message, extra = {}) {
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { chat: { id }, from: { id }, ...message }, ...extra }), kvEnv);
+  return calls;
+}
+
+async function adminCallback(kvEnv, id, data) {
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({
+    callback_query: { id: "bc1", data, from: { id }, message: { message_id: 600, chat: { id }, text: "x" } },
+  }), kvEnv);
+  return calls;
+}
+
+function seedUsers(kvEnv, ids) {
+  for (const id of ids) kvEnv.USERS.store.set(`user:${id}`, { name: `user ${id}` });
+}
+
+test("only the admin can start a broadcast", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const calls = await asUser(kvEnv, 555, { text: "/broadcast" });
+  assert.doesNotMatch(sent(calls)[0].text, /أرسل الآن الرسالة/u);
+  assert.equal(kvEnv.USERS.store.get(`user:${555}`)?.bc, undefined);
+});
+
+test("admin broadcast: prompt, capture any message, confirm, then deliver in batches with a report", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedUsers(kvEnv, [101, 102, 103, ADMIN]);
+
+  let calls = await asUser(kvEnv, ADMIN, { text: "/broadcast" });
+  assert.match(sent(calls)[0].text, /أرسل الآن الرسالة/u);
+
+  calls = await asUser(kvEnv, ADMIN, { message_id: 77, photo: [{ file_id: "p" }], caption: "إعلان" });
+  const confirm = sent(calls)[0];
+  assert.match(confirm.text, /إلى 3 مستخدم/u);
+  assert.equal(confirm.reply_to_message_id, 77);
+  assert.deepEqual(confirm.reply_markup.inline_keyboard[0].map((b) => b.callback_data), ["bc|go", "bc|no"]);
+
+  calls = await adminCallback(kvEnv, ADMIN, "bc|go");
+  assert.match(edits(calls)[0].text, /بدأ الإرسال إلى 3 مستخدم/u);
+  assert.equal(kvEnv.USERS.alarms.length, 1);
+
+  calls = [];
+  fakeTelegramApi(calls);
+  await kvEnv.USERS.object.alarm();
+  const copies = calls.filter((call) => call.url.endsWith("/copyMessage")).map((call) => call.payload);
+  assert.deepEqual(copies.map((c) => String(c.chat_id)).sort(), ["101", "102", "103"]);
+  assert.ok(copies.every((c) => c.from_chat_id === ADMIN && c.message_id === 77));
+  assert.match(sent(calls).at(-1).text, /اكتمل الإرسال[^]*وصلت إلى: 3/u);
+  assert.equal(kvEnv.USERS.store.get("broadcast"), undefined);
+});
+
+test("broadcast marks blocked users, skips them next time, and backs off on rate limits", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedUsers(kvEnv, [201, 202, 203]);
+  await asUser(kvEnv, ADMIN, { text: "/broadcast" });
+  await asUser(kvEnv, ADMIN, { message_id: 9, text: "مرحبا بالجميع" });
+  await adminCallback(kvEnv, ADMIN, "bc|go");
+
+  const calls = [];
+  let limited = false;
+  globalThis.fetch = async (url, options = {}) => {
+    const payload = options.body ? JSON.parse(options.body) : null;
+    calls.push({ url: String(url), payload });
+    if (String(url).endsWith("/copyMessage")) {
+      if (payload.chat_id === "201") return Response.json({ ok: false, error_code: 403, description: "blocked" }, { status: 403 });
+      if (payload.chat_id === "203" && !limited) {
+        limited = true;
+        return Response.json({ ok: false, error_code: 429, parameters: { retry_after: 3 } }, { status: 429 });
+      }
+    }
+    return Response.json({ ok: true, result: { message_id: 1 } });
+  };
+  await kvEnv.USERS.object.alarm();
+  assert.equal(kvEnv.USERS.store.get("user:201").blocked, true);
+  assert.equal(kvEnv.USERS.store.get("broadcast").queue.length, 1);
+  assert.ok(kvEnv.USERS.alarms.at(-1) - Date.now() >= 3000);
+
+  await kvEnv.USERS.object.alarm();
+  assert.equal(kvEnv.USERS.store.get("broadcast"), undefined);
+  const report = calls.filter((call) => call.url.endsWith("/sendMessage")).at(-1).payload.text;
+  assert.match(report, /وصلت إلى: 2[^]*لم تصل[^]*: 1/u);
+
+  await asUser(kvEnv, ADMIN, { text: "/broadcast" });
+  const again = await asUser(kvEnv, ADMIN, { message_id: 10, text: "again" });
+  assert.match(sent(again)[0].text, /إلى 2 مستخدم/u);
+});
+
+test("cancel and non-admin confirmation do nothing harmful", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedUsers(kvEnv, [301]);
+  await asUser(kvEnv, ADMIN, { text: "/broadcast" });
+  await asUser(kvEnv, ADMIN, { message_id: 5, text: "رسالة" });
+
+  let calls = await adminCallback(kvEnv, 999, "bc|go");
+  assert.ok(!calls.some((call) => call.url.endsWith("/editMessageText")));
+  assert.equal(kvEnv.USERS.store.get("broadcast"), undefined);
+
+  calls = await adminCallback(kvEnv, ADMIN, "bc|no");
+  assert.match(edits(calls)[0].text, /تم إلغاء/u);
+  assert.equal(kvEnv.USERS.store.get("broadcast"), undefined);
+  assert.equal(kvEnv.USERS.alarms.length, 0);
+});
+
+test("anyone who messages the bot is registered so broadcasts can reach them", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await asUser(kvEnv, 401, { text: "abagini" });
+  assert.ok(kvEnv.USERS.store.get("user:401").firstSeen);
 });
