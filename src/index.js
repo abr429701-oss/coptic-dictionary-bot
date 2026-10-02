@@ -25,18 +25,30 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;");
 }
 
-function formatRecord(record) {
+function formatRecord(record, query = "") {
+  const parts = String(record.meaning ?? "").split(/\s*[،,]\s*/u).map((part) => part.trim()).filter(Boolean);
+  const normalizedQuery = normalize(query);
+  let meaning = parts.join("، ");
+  let related = [];
+  if (normalizedQuery && parts.length > 1) {
+    const matched = parts.filter((part) => normalize(part).includes(normalizedQuery));
+    if (matched.length && matched.length < parts.length) {
+      meaning = matched.join("، ");
+      related = parts.filter((part) => !matched.includes(part));
+    }
+  }
   const fields = [
-    ["الكلمة", "coptic"],
-    ["المعنى", "meaning"],
-    ["النوع", "kind"],
-    ["الأصل", "origin"],
+    ["الكلمة", record.coptic],
+    ["المعنى", meaning],
+    ["النوع", record.kind],
+    ["الأصل", record.origin],
   ];
   const lines = [];
-  for (const [label, key] of fields) {
-    const value = String(record[key] ?? "").trim();
+  for (const [label, raw] of fields) {
+    const value = String(raw ?? "").trim();
     if (value) lines.push(`<b>${label}:</b> ${escapeHtml(value)}`);
   }
+  if (related.length) lines.push("", `🔗 <b>كلمات مرتبطة:</b> ${escapeHtml(related.join("، "))}`);
   return lines.join("\n");
 }
 
@@ -57,7 +69,7 @@ function render(query, matches, requestedPage) {
   const record = records[matches[start]];
   const heading = `${BOT_TITLE}\n🔎 <b>نتائج البحث عن:</b> ${escapeHtml(query)}\n` +
     `<b>النتائج:</b> ${matches.length.toLocaleString("en-US")} | <b>الصفحة:</b> ${page + 1}/${totalPages}\n\n`;
-  const text = `${heading}${formatRecord(record)}`.slice(0, MAX_MESSAGE_LENGTH);
+  const text = `${heading}${formatRecord(record, query)}`.slice(0, MAX_MESSAGE_LENGTH);
   const navigation = [];
   if (page > 0) navigation.push({ text: "السابق", callback_data: `p|${page - 1}` });
   if (page < totalPages - 1) navigation.push({ text: "التالي", callback_data: `p|${page + 1}` });

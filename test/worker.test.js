@@ -125,3 +125,12 @@ test("result shows only word, meaning, kind and origin", async () => {
   assert.match(text, /<b>الأصل:<\/b> /u);
   assert.doesNotMatch(text, /اليونانية|النطق|التهجئة|الجنس|الإنجليزية/u);
 });
+
+test("searching a meaning shows only that meaning and lists the others as related", async () => {
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: "كوبري", chat: { id: 14 } } }), env);
+  const text = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
+  assert.match(text, /<b>المعنى:<\/b> [^،\n]*كوبري[^،\n]*\n/u);
+  assert.match(text, /كلمات مرتبطة:<\/b> /u);
+});
