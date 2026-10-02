@@ -573,3 +573,128 @@ test("old row-number recordings are moved to the word's id and keep working afte
   await worker.fetch(updateRequest({ message: { text: "abagini", chat: { id: 12 }, from: { id: 12 } } }), kvEnv);
   assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.voice, "legacy-file");
 });
+
+// ---- Drive archive (Google Apps Script) ----
+const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbTESTID/exec";
+
+function driveWorld({ scriptReply } = {}) {
+  const calls = [];
+  const state = { reply: scriptReply ?? ((body) => ({ ok: true, file_id: `drive-${body.id}`, url: `https://drive.example/${body.id}` })) };
+  globalThis.fetch = async (url, options = {}) => {
+    url = String(url);
+    const body = typeof options.body === "string" ? JSON.parse(options.body) : null;
+    calls.push({ url, payload: body });
+    if (url.includes("/getFile")) return Response.json({ ok: true, result: { file_path: "voice/file_1.oga" } });
+    if (url.includes("/file/bot")) return new Response(new Uint8Array([79, 103, 103, 83, 1, 2, 3, 4]));
+    if (url.startsWith(SCRIPT_URL)) {
+      const reply = state.reply(body);
+      return typeof reply === "string" ? new Response(reply, { status: 200 }) : Response.json(reply);
+    }
+    return Response.json({ ok: true, result: { message_id: 1 } });
+  };
+  return { calls, state };
+}
+
+const adminSay = (kvEnv, message, ctx) =>
+  worker.fetch(updateRequest({ message: { chat: { id: ADMIN }, from: { id: ADMIN }, ...message } }), kvEnv, ctx);
+
+function driveEnv(extra = {}) {
+  return { ...env, USERS: fakeKv(), APPS_SCRIPT_URL: SCRIPT_URL, APPS_SCRIPT_SECRET: "S3CRET", ...extra };
+}
+
+test("a recording is uploaded to Drive with its permanent id and the link is remembered", async () => {
+  const kvEnv = driveEnv();
+  const { calls } = driveWorld();
+  await adminSay(kvEnv, { text: "/record" });
+  const id = kvEnv.USERS.store.get(`user:${ADMIN}`).voiceRec.id;
+  await adminSay(kvEnv, { voice: { file_id: "TG-1", duration: 4 } });
+
+  const post = calls.find((call) => call.url === SCRIPT_URL);
+  assert.equal(post.payload.secret, "S3CRET");
+  assert.equal(post.payload.action, "upload");
+  assert.equal(post.payload.id, id);
+  assert.equal(post.payload.file_id, "TG-1");
+  assert.ok(post.payload.word.length > 0);
+  assert.equal(post.payload.audio_base64, btoa(String.fromCharCode(79, 103, 103, 83, 1, 2, 3, 4)));
+  assert.deepEqual(kvEnv.USERS.store.get(`voiceid:${id}`).drive.url, `https://drive.example/${id}`);
+});
+
+test("uploading runs after the reply when the platform provides waitUntil", async () => {
+  const kvEnv = driveEnv();
+  const { calls } = driveWorld();
+  const pending = [];
+  const ctx = { waitUntil: (promise) => pending.push(promise) };
+  await adminSay(kvEnv, { text: "/record" }, ctx);
+  await adminSay(kvEnv, { voice: { file_id: "TG-2", duration: 1 } }, ctx);
+  const id = [...kvEnv.USERS.store.keys()].find((key) => key.startsWith("voiceid:"));
+  assert.equal(pending.length, 1); // handed to the platform; the webhook does not wait for it
+  await Promise.all(pending);
+  assert.ok(kvEnv.USERS.store.get(id).drive.url);
+  assert.ok(calls.some((call) => call.url === SCRIPT_URL));
+});
+
+test("a failed upload keeps the recording, warns the admin, and /syncdrive retries it", async () => {
+  const kvEnv = driveEnv();
+  const world = driveWorld({ scriptReply: () => ({ ok: false, error: "unauthorized" }) });
+  await adminSay(kvEnv, { text: "/record" });
+  await adminSay(kvEnv, { voice: { file_id: "TG-3", duration: 2 } });
+  const key = [...kvEnv.USERS.store.keys()].find((item) => item.startsWith("voiceid:"));
+  assert.equal(kvEnv.USERS.store.get(key).fileId, "TG-3");
+  assert.equal(kvEnv.USERS.store.get(key).drive, undefined);
+  const warning = world.calls.filter((call) => call.url.endsWith("/sendMessage")).map((call) => call.payload.text).find((text) => /تعذّر رفع/u.test(text));
+  assert.match(warning, /unauthorized/u);
+
+  world.state.reply = (body) => ({ ok: true, file_id: "drive-ok", url: `https://drive.example/${body.id}` });
+  world.calls.length = 0;
+  await adminSay(kvEnv, { text: "/syncdrive" });
+  assert.ok(kvEnv.USERS.store.get(key).drive.url);
+  const report = world.calls.filter((call) => call.url.endsWith("/sendMessage")).at(-1).payload.text;
+  assert.match(report, /تم رفع 1/u);
+  assert.match(report, /كل التسجيلات مرفوعة/u);
+});
+
+test("an HTML answer from Apps Script (wrong deployment) gives a clear reason", async () => {
+  const kvEnv = driveEnv();
+  const world = driveWorld({ scriptReply: () => "<!DOCTYPE html><html>Sign in</html>" });
+  await adminSay(kvEnv, { text: "/record" });
+  await adminSay(kvEnv, { voice: { file_id: "TG-4", duration: 2 } });
+  const warning = world.calls.filter((call) => call.url.endsWith("/sendMessage")).map((call) => call.payload.text).find((text) => /تعذّر رفع/u.test(text));
+  assert.match(warning, /New version/u);
+});
+
+test("without Drive settings nothing is uploaded and no warning is sent", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const world = driveWorld();
+  await adminSay(kvEnv, { text: "/record" });
+  await adminSay(kvEnv, { voice: { file_id: "TG-5", duration: 2 } });
+  assert.ok(!world.calls.some((call) => call.url === SCRIPT_URL));
+  assert.ok(!world.calls.some((call) => /تعذّر رفع/u.test(call.payload?.text ?? "")));
+});
+
+test("/setdrive stores the link, deletes the secret message, and rejects bad input", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const world = driveWorld({ scriptReply: () => ({ ok: true, folder: { name: "Coptic Dictionary Voices", url: "https://drive.example/f" }, sheet: { name: "Dictionary", mainTab: "Sheet1" } }) });
+  await adminSay(kvEnv, { message_id: 321, text: `/setdrive ${SCRIPT_URL} MYSECRET` });
+  assert.ok(world.calls.some((call) => call.url.endsWith("/deleteMessage") && call.payload.message_id === 321));
+  assert.deepEqual(kvEnv.USERS.store.get("drive-config"), { url: SCRIPT_URL, secret: "MYSECRET" });
+  assert.ok(world.calls.some((call) => call.url === SCRIPT_URL && call.payload.action === "ping" && call.payload.secret === "MYSECRET"));
+  const status = world.calls.filter((call) => call.url.endsWith("/sendMessage")).at(-1).payload.text;
+  assert.match(status, /Coptic Dictionary Voices/u);
+
+  const bad = driveWorld();
+  const other = { ...env, USERS: fakeKv() };
+  await adminSay(other, { message_id: 322, text: "/setdrive https://example.com/x secret" });
+  assert.equal(other.USERS.store.get("drive-config"), undefined);
+  assert.ok(bad.calls.some((call) => call.url.endsWith("/deleteMessage")));
+});
+
+test("/drive explains how to connect when nothing is configured, and only the admin can use these commands", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const world = driveWorld();
+  await adminSay(kvEnv, { text: "/drive" });
+  assert.match(world.calls.find((call) => call.url.endsWith("/sendMessage")).payload.text, /\/setdrive/u);
+
+  const stranger = await asUser(kvEnv, 4242, { text: "/setdrive " + SCRIPT_URL + " x" });
+  assert.equal(kvEnv.USERS.store.get("drive-config"), undefined);
+  assert.ok(stranger.length >= 0);
+});

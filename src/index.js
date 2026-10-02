@@ -309,36 +309,159 @@ function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
-async function archiveVoiceRecording(env, message, record) {
-  if (!env.APPS_SCRIPT_URL || !env.APPS_SCRIPT_SECRET || !message?.voice?.file_id) return;
+// ---- Drive archive (Google Apps Script web app) ----
+// Config comes from the APPS_SCRIPT_URL / APPS_SCRIPT_SECRET secrets, or from /setdrive (stored in the user store).
+const DRIVE_CONFIG_KEY = "drive-config";
+const SYNC_DRIVE_BATCH = 5;
+
+async function driveConfig(env) {
+  if (env.APPS_SCRIPT_URL && env.APPS_SCRIPT_SECRET) return { url: env.APPS_SCRIPT_URL, secret: env.APPS_SCRIPT_SECRET };
+  if (!env.USERS) return null;
   try {
-    const fileInfo = await telegram(env, "getFile", { file_id: message.voice.file_id });
+    const saved = (await storeCall(env, { op: "get", key: DRIVE_CONFIG_KEY })).value;
+    return saved?.url && saved?.secret ? saved : null;
+  } catch (error) {
+    console.error("Drive config lookup failed", error instanceof Error ? error.message : "unknown error");
+    return null;
+  }
+}
+
+async function callAppsScript(config, payload) {
+  const response = await fetch(config.url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ secret: config.secret, ...payload }),
+    redirect: "follow",
+    signal: AbortSignal.timeout(30000),
+  });
+  const text = await response.text();
+  let result;
+  try {
+    result = JSON.parse(text);
+  } catch {
+    // Apps Script answers with an HTML page when the deployment is missing, private or outdated.
+    throw new Error(`Apps Script returned ${response.status} (not JSON): check Deploy > New version and "Anyone" access`);
+  }
+  if (!response.ok || !result.ok) throw new Error(result.error || `Apps Script failed: ${response.status}`);
+  return result;
+}
+
+// Uploads one saved recording to Drive and remembers the link. Returns { ok, error }.
+async function uploadVoiceToDrive(env, { id, record, fileId, duration }) {
+  const config = await driveConfig(env);
+  if (!config) return { ok: false, error: "not configured" };
+  try {
+    const fileInfo = await telegram(env, "getFile", { file_id: fileId });
     const filePath = fileInfo?.ok ? fileInfo.result?.file_path : null;
     if (!filePath) throw new Error("Telegram did not return a file path");
     const audioResponse = await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${filePath}`, {
       signal: AbortSignal.timeout(15000),
     });
     if (!audioResponse.ok) throw new Error(`Telegram file download failed: ${audioResponse.status}`);
-    const audio = await audioResponse.arrayBuffer();
-    const archiveResponse = await fetch(env.APPS_SCRIPT_URL, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        secret: env.APPS_SCRIPT_SECRET,
-        audio_base64: arrayBufferToBase64(audio),
-        mime_type: "audio/ogg",
-        word: record?.coptic ?? "",
-        file_id: message.voice.file_id,
-        duration: message.voice.duration ?? "",
-      }),
-      signal: AbortSignal.timeout(30000),
+    const result = await callAppsScript(config, {
+      action: "upload",
+      id,
+      word: record?.coptic ?? "",
+      audio_base64: arrayBufferToBase64(await audioResponse.arrayBuffer()),
+      mime_type: "audio/ogg",
+      file_id: fileId,
+      duration: duration ?? "",
     });
-    const result = await archiveResponse.json().catch(() => ({}));
-    if (!archiveResponse.ok || !result.ok) throw new Error(result.error || `Apps Script failed: ${archiveResponse.status}`);
-    console.log("Voice archived", { word: record?.coptic ?? "", fileId: result.file_id });
+    await storeCall(env, {
+      op: "voicedrive",
+      id,
+      fileId,
+      drive: { url: result.url ?? null, fileId: result.file_id ?? null, at: new Date().toISOString() },
+    });
+    return { ok: true };
   } catch (error) {
-    console.error("Voice archive failed", error instanceof Error ? error.message : "unknown error");
+    const reason = error instanceof Error ? error.message : "unknown error";
+    console.error("Voice archive failed", reason);
+    return { ok: false, error: reason };
   }
+}
+
+// Runs work after the webhook has answered (so recording stays fast); in tests it is simply awaited.
+async function inBackground(ctx, work) {
+  if (ctx?.waitUntil) {
+    ctx.waitUntil(work.catch((error) => console.error("Background task failed", error instanceof Error ? error.message : "unknown error")));
+    return;
+  }
+  await work;
+}
+
+async function archiveAndReport(env, chatId, job) {
+  const outcome = await uploadVoiceToDrive(env, job);
+  if (outcome.ok || outcome.error === "not configured") return;
+  await telegram(env, "sendMessage", {
+    chat_id: chatId,
+    text: `⚠️ تم حفظ التسجيل لكن تعذّر رفع «${job.record?.coptic ?? ""}» إلى درايف:\n${outcome.error}\nسيبقى في قائمة الانتظار، أرسل /syncdrive لإعادة المحاولة.`.slice(0, 1000),
+  });
+}
+
+async function driveStatusText(env) {
+  const config = await driveConfig(env);
+  if (!config) {
+    return "☁️ لم يتم ربط جوجل درايف بعد.\nأرسل: /setdrive رابط_السكريبت كلمة_السر";
+  }
+  const counts = await storeCall(env, { op: "voicepending", limit: 0 });
+  const lines = [
+    "☁️ <b>أرشيف جوجل درايف</b>",
+    `✅ مرفوع: ${counts.uploaded}`,
+    `⏳ في الانتظار: ${counts.pendingTotal}`,
+    `🎙 إجمالي التسجيلات: ${counts.total}`,
+  ];
+  try {
+    const ping = await callAppsScript(config, { action: "ping" });
+    lines.push("", `📁 الفولدر: <a href="${escapeHtml(ping.folder?.url ?? "")}">${escapeHtml(ping.folder?.name ?? "")}</a>`);
+    lines.push(`📄 الشيت: ${escapeHtml(ping.sheet?.name ?? "")}`);
+  } catch (error) {
+    lines.push("", `❌ تعذّر الاتصال بالسكريبت: ${escapeHtml(error instanceof Error ? error.message : "unknown error")}`);
+  }
+  if (counts.pendingTotal) lines.push("", "أرسل /syncdrive لرفع المتبقي.");
+  return lines.join("\n");
+}
+
+async function syncPendingVoices(env, chatId) {
+  const config = await driveConfig(env);
+  if (!config) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "لم يتم ربط جوجل درايف بعد. استخدم /setdrive أولًا." });
+    return;
+  }
+  const batch = await storeCall(env, { op: "voicepending", limit: SYNC_DRIVE_BATCH });
+  let uploaded = 0;
+  let failure = "";
+  for (const item of batch.pending) {
+    const record = records[recordIndexById().get(item.id)];
+    const outcome = await uploadVoiceToDrive(env, { id: item.id, record, fileId: item.fileId, duration: item.duration });
+    if (outcome.ok) uploaded += 1;
+    else {
+      failure = outcome.error;
+      break;
+    }
+  }
+  const left = Math.max(0, batch.pendingTotal - uploaded);
+  const lines = [`☁️ تم رفع ${uploaded} تسجيل.`, `⏳ المتبقي: ${left}`];
+  if (failure) lines.push(`❌ توقف الرفع: ${failure}`);
+  else if (left) lines.push("أرسل /syncdrive مرة أخرى لمتابعة الرفع.");
+  else lines.push("🎉 كل التسجيلات مرفوعة.");
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n") });
+}
+
+async function setDriveConfig(env, message, argument) {
+  const [url, secret] = argument.split(/\s+/u);
+  // The message holds a secret: remove it from the chat either way.
+  await telegram(env, "deleteMessage", { chat_id: message.chat.id, message_id: message.message_id });
+  if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/u.test(url ?? "") || !secret) {
+    await telegram(env, "sendMessage", {
+      chat_id: message.chat.id,
+      text: "الصيغة: /setdrive رابط_الويب_آب_المنتهي_بـ_exec كلمة_السر",
+    });
+    return;
+  }
+  await storeCall(env, { op: "put", key: DRIVE_CONFIG_KEY, value: { url, secret } });
+  await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "تم حفظ إعدادات درايف (وحُذفت رسالتك). جارٍ الاختبار…" });
+  await telegram(env, "sendMessage", { chat_id: message.chat.id, text: await driveStatusText(env), parse_mode: "HTML", disable_web_page_preview: true });
 }
 
 async function showTyping(env, chatId, delayMs = TYPING_DELAY_MS) {
@@ -466,7 +589,7 @@ export class UserStore {
   }
 
   async fetch(request) {
-    const { op, key, value, userId, input, kb, exclude, fromChat, messageId } = await request.json();
+    const { op, key, value, userId, input, kb, exclude, fromChat, messageId, id, fileId, drive, limit } = await request.json();
     const storage = this.state.storage;
     if (op === "get") return Response.json({ value: (await storage.get(key)) ?? null });
     if (op === "put") {
@@ -506,6 +629,25 @@ export class UserStore {
         });
       }
       return Response.json(null);
+    }
+    if (op === "voicedrive") {
+      // Merge the Drive link into the saved recording, unless it was replaced by a newer one meanwhile.
+      const current = await storage.get(voiceKey(id));
+      if (current && current.fileId === fileId) await storage.put(voiceKey(id), { ...current, drive });
+      return Response.json({ ok: Boolean(current) });
+    }
+    if (op === "voicepending") {
+      const voiced = await storage.list({ prefix: VOICE_PREFIX });
+      const pending = [];
+      let pendingTotal = 0;
+      for (const [key, value] of voiced) {
+        if (value?.drive) continue;
+        pendingTotal += 1;
+        if (pending.length < (limit ?? 0)) {
+          pending.push({ id: Number(key.slice(VOICE_PREFIX.length)), fileId: value.fileId, duration: value.duration ?? null });
+        }
+      }
+      return Response.json({ pending, pendingTotal, total: voiced.size, uploaded: voiced.size - pendingTotal });
     }
     if (op === "bcstart") {
       if (await storage.get("broadcast")) return Response.json({ busy: true });
@@ -763,7 +905,7 @@ async function beginVoiceRecording(env, chatId, userId, user) {
   await nextVoicePrompt(env, chatId, userId, user ?? {});
 }
 
-async function captureVoiceRecording(env, message, userId, user) {
+async function captureVoiceRecording(env, message, userId, user, ctx) {
   if (!message.voice) {
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "أرسل تسجيلًا كـ Voice من تيليجرام، وليس ملف Audio." });
     return;
@@ -780,13 +922,19 @@ async function captureVoiceRecording(env, message, userId, user) {
     key: voiceKey(id),
     value: { fileId: message.voice.file_id, duration: message.voice.duration ?? null, savedAt: new Date().toISOString() },
   });
-  await archiveVoiceRecording(env, message, record);
+  const archive = archiveAndReport(env, message.chat.id, {
+    id,
+    record,
+    fileId: message.voice.file_id,
+    duration: message.voice.duration,
+  });
   await telegram(env, "sendMessage", {
     chat_id: message.chat.id,
     text: `✅ تم حفظ تسجيل <b>${escapeHtml(record.coptic ?? "الكلمة")}</b>.`,
     parse_mode: "HTML",
   });
   await nextVoicePrompt(env, message.chat.id, userId, user);
+  await inBackground(ctx, archive);
 }
 
 async function stopVoiceRecording(env, chatId, userId, user) {
@@ -884,7 +1032,7 @@ async function handleBroadcastCallback(env, callback) {
   else await edit(`🚀 بدأ الإرسال إلى ${started.total.toLocaleString("en-US")} مستخدم. سأرسل لك تقريرًا عند الانتهاء.`);
 }
 
-async function handleUpdate(update, env) {
+async function handleUpdate(update, env, ctx) {
   if (update.callback_query) {
     const callback = update.callback_query;
     if (String(callback.data ?? "").startsWith("bc|")) {
@@ -922,6 +1070,23 @@ async function handleUpdate(update, env) {
       await beginBroadcast(env, message.chat.id, userId, admin ?? {});
       return;
     }
+    if (text === "/drive") {
+      await telegram(env, "sendMessage", {
+        chat_id: message.chat.id,
+        text: await driveStatusText(env),
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+      });
+      return;
+    }
+    if (text === "/syncdrive") {
+      await inBackground(ctx, syncPendingVoices(env, message.chat.id));
+      return;
+    }
+    if (text === "/setdrive" || text.startsWith("/setdrive ")) {
+      await setDriveConfig(env, message, text.slice("/setdrive".length).trim());
+      return;
+    }
     if (text === "/record" || text === "/record_voice") {
       await beginVoiceRecording(env, message.chat.id, userId, admin ?? {});
       return;
@@ -931,7 +1096,7 @@ async function handleUpdate(update, env) {
       return;
     }
     if (admin?.voiceRec && (message.voice || message.audio)) {
-      await captureVoiceRecording(env, message, userId, admin);
+      await captureVoiceRecording(env, message, userId, admin, ctx);
       return;
     }
     if (admin?.bc === "await" && !text.startsWith("/")) {
@@ -1013,7 +1178,7 @@ async function handleUpdate(update, env) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
       return new Response("Coptic dictionary bot is ready.", { status: 200 });
@@ -1042,7 +1207,7 @@ export default {
 
     try {
       const update = await request.json();
-      await handleUpdate(update, env);
+      await handleUpdate(update, env, ctx);
       return new Response("ok", { status: 200 });
     } catch (error) {
       console.error("Webhook update failed", error instanceof Error ? error.message : "unknown error");
