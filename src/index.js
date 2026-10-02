@@ -25,22 +25,17 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;");
 }
 
-function formatRecord(record, number) {
-  const lines = [`<b>${number}. ${escapeHtml(record.coptic)}</b>`];
+function formatRecord(record) {
   const fields = [
-    ["اليونانية", "greek"],
-    ["النطق", "pronunciation"],
-    ["الإنجليزية", "english"],
-    ["التهجئة", "phonetic"],
-    ["التعريب المُشكّل", "arabic_pronunciation"],
-    ["النوع", "kind"],
-    ["الجنس", "gender"],
-    ["الأصل", "origin"],
+    ["الكلمة", "coptic"],
     ["المعنى", "meaning"],
+    ["النوع", "kind"],
+    ["الأصل", "origin"],
   ];
+  const lines = [];
   for (const [label, key] of fields) {
     const value = String(record[key] ?? "").trim();
-    if (value) lines.push(`• <b>${label}:</b> ${escapeHtml(value)}`);
+    if (value) lines.push(`<b>${label}:</b> ${escapeHtml(value)}`);
   }
   return lines.join("\n");
 }
@@ -62,7 +57,7 @@ function render(query, matches, requestedPage) {
   const record = records[matches[start]];
   const heading = `${BOT_TITLE}\n🔎 <b>نتائج البحث عن:</b> ${escapeHtml(query)}\n` +
     `<b>النتائج:</b> ${matches.length.toLocaleString("en-US")} | <b>الصفحة:</b> ${page + 1}/${totalPages}\n\n`;
-  const text = `${heading}${formatRecord(record, start + 1)}`.slice(0, MAX_MESSAGE_LENGTH);
+  const text = `${heading}${formatRecord(record)}`.slice(0, MAX_MESSAGE_LENGTH);
   const navigation = [];
   if (page > 0) navigation.push({ text: "السابق", callback_data: `p|${page - 1}` });
   if (page < totalPages - 1) navigation.push({ text: "التالي", callback_data: `p|${page + 1}` });

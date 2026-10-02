@@ -113,3 +113,15 @@ test("a failing TTS service does not break the text result", async () => {
   assert.ok(calls.some((call) => call.url.endsWith("/sendMessage")));
   assert.ok(!calls.some((call) => call.url.endsWith("/sendVoice")));
 });
+
+test("result shows only word, meaning, kind and origin", async () => {
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲏⲧ", chat: { id: 13 } } }), env);
+  const text = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
+  assert.match(text, /<b>الكلمة:<\/b> /u);
+  assert.match(text, /<b>المعنى:<\/b> /u);
+  assert.match(text, /<b>النوع:<\/b> /u);
+  assert.match(text, /<b>الأصل:<\/b> /u);
+  assert.doesNotMatch(text, /اليونانية|النطق|التهجئة|الجنس|الإنجليزية/u);
+});
