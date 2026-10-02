@@ -82,3 +82,33 @@ test("callback pagination edits the result message for the next page", async () 
   assert.equal(edit.message_id, 34);
   assert.match(edit.text, /الصفحة:<\/b> 2\//u);
 });
+
+test("search sends a pronunciation voice message after the result", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    if (String(url).includes("translate_tts")) {
+      return new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "audio/mpeg" } });
+    }
+    return Response.json({ ok: true, result: true });
+  };
+  const response = await worker.fetch(updateRequest({ message: { text: "ⲁ", chat: { id: 11 } } }), env);
+  assert.equal(response.status, 200);
+  assert.ok(calls.some((call) => call.url.endsWith("/sendMessage")));
+  const voice = calls.find((call) => call.url.endsWith("/sendVoice"));
+  assert.ok(voice);
+  assert.equal(voice.options.body.get("chat_id"), "11");
+});
+
+test("a failing TTS service does not break the text result", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    if (String(url).includes("translate_tts")) return new Response("blocked", { status: 403 });
+    return Response.json({ ok: true, result: true });
+  };
+  const response = await worker.fetch(updateRequest({ message: { text: "ⲁ", chat: { id: 12 } } }), env);
+  assert.equal(response.status, 200);
+  assert.ok(calls.some((call) => call.url.endsWith("/sendMessage")));
+  assert.ok(!calls.some((call) => call.url.endsWith("/sendVoice")));
+});

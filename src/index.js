@@ -67,6 +67,7 @@ function render(query, matches, requestedPage) {
   if (page < totalPages - 1) navigation.push({ text: "التالي", callback_data: `p|${page + 1}` });
   return {
     page,
+    record,
     text,
     reply_markup: navigation.length ? { inline_keyboard: [navigation] } : undefined,
   };
@@ -85,6 +86,37 @@ async function telegram(env, method, payload) {
   return result;
 }
 
+async function sendWordVoice(env, chatId, record) {
+  const spoken = String(record?.phonetic || record?.english || "").trim().slice(0, 200);
+  if (!spoken) return;
+  try {
+    const ttsUrl = "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en&q=" +
+      encodeURIComponent(spoken);
+    const ttsResponse = await fetch(ttsUrl, {
+      headers: { "user-agent": "Mozilla/5.0 (compatible; CopticDictionaryBot/1.0)" },
+      signal: AbortSignal.timeout(6000),
+    });
+    const contentType = ttsResponse.headers.get("content-type") ?? "";
+    if (!ttsResponse.ok || !contentType.includes("audio")) {
+      console.error("TTS fetch failed", ttsResponse.status, contentType);
+      return;
+    }
+    const audio = await ttsResponse.arrayBuffer();
+    if (!audio.byteLength) return;
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    form.append("caption", `🔊 ${String(record.coptic ?? "").trim()} — ${spoken}`.slice(0, 1000));
+    form.append("voice", new Blob([audio], { type: "audio/mpeg" }), "word.mp3");
+    const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVoice`, {
+      method: "POST",
+      body: form,
+    });
+    if (!response.ok) console.error("Telegram sendVoice failed", response.status);
+  } catch (error) {
+    console.error("Voice failed", error instanceof Error ? error.message : "unknown error");
+  }
+}
+
 async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
   const cleanQuery = String(query ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, 160);
   const matches = findMatches(cleanQuery);
@@ -96,21 +128,17 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
     return telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text, parse_mode: "HTML" });
   }
   const result = render(cleanQuery, matches, page);
-  if (messageId === undefined) {
-    return telegram(env, "sendMessage", {
-      chat_id: chatId,
-      text: result.text,
-      parse_mode: "HTML",
-      ...(result.reply_markup ? { reply_markup: result.reply_markup } : {}),
-    });
-  }
-  return telegram(env, "editMessageText", {
+  const payload = {
     chat_id: chatId,
-    message_id: messageId,
     text: result.text,
     parse_mode: "HTML",
     ...(result.reply_markup ? { reply_markup: result.reply_markup } : {}),
-  });
+  };
+  const response = messageId === undefined
+    ? await telegram(env, "sendMessage", payload)
+    : await telegram(env, "editMessageText", { ...payload, message_id: messageId });
+  await sendWordVoice(env, chatId, result.record);
+  return response;
 }
 
 function queryFromMessage(message) {
