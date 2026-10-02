@@ -198,7 +198,23 @@ async function telegram(env, method, payload) {
   return result;
 }
 
-async function sendWordVoice(env, chatId, record) {
+async function sendWordVoice(env, chatId, record, recordIndex = -1) {
+  const captionWord = String(record?.coptic ?? "").trim();
+  if (env.USERS && recordIndex >= 0) {
+    try {
+      const saved = await storeCall(env, { op: "get", key: `voice:${recordIndex}` });
+      if (saved?.value?.fileId) {
+        await telegram(env, "sendVoice", {
+          chat_id: chatId,
+          voice: saved.value.fileId,
+          caption: `🔊 ${captionWord}`.slice(0, 1000),
+        });
+        return;
+      }
+    } catch (error) {
+      console.error("Recorded voice lookup failed", error instanceof Error ? error.message : "unknown error");
+    }
+  }
   const spoken = String(record?.phonetic || record?.english || "").trim().slice(0, 200);
   if (!spoken) return;
   try {
@@ -260,7 +276,7 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
   const record = records[matches[0]];
   const text = formatRecord(record, matchedPartIndex(record, normalizedQuery)).slice(0, MAX_MESSAGE_LENGTH);
   const response = await deliver({ text, parse_mode: "HTML" });
-  await sendWordVoice(env, chatId, record);
+  await sendWordVoice(env, chatId, record, matches[0]);
   return response;
 }
 
@@ -272,7 +288,7 @@ async function sendRecord(env, chatId, index, partIndex = -1) {
     text: formatRecord(record, partIndex).slice(0, MAX_MESSAGE_LENGTH),
     parse_mode: "HTML",
   });
-  await sendWordVoice(env, chatId, record);
+  await sendWordVoice(env, chatId, record, index);
 }
 
 // Registered users live in one SQLite-backed Durable Object (no extra Cloudflare token permission needed).
@@ -355,6 +371,22 @@ export class UserStore {
     if (op === "bcstatus") {
       const job = await storage.get("broadcast");
       return Response.json(job ? { running: true, total: job.total, sent: job.sent, failed: job.failed } : { running: false });
+    }
+    if (op === "voiceNext") {
+      const cursor = Math.max(0, Number(await storage.get("voice:cursor")) || 0);
+      for (let index = cursor; index < records.length; index += 1) {
+        if (!(await storage.get(`voice:${index}`))) {
+          const record = records[index];
+          return Response.json({
+            index,
+            coptic: record.coptic ?? "",
+            pronunciation: record.pronunciation ?? "",
+            english: record.english ?? "",
+            meaning: record.meaning ?? "",
+          });
+        }
+      }
+      return Response.json(null);
     }
     if (op === "bcstart") {
       if (await storage.get("broadcast")) return Response.json({ busy: true });
@@ -575,6 +607,62 @@ async function notifyAdmins(env, text) {
   }
 }
 
+function voicePrompt(item) {
+  if (!item) return "✅ اكتمل تسجيل النطق لكل كلمات القاموس.";
+  const lines = [
+    "🎙️ تسجيل نطق كلمة جديدة",
+    `الكلمة: <b>${escapeHtml(item.coptic || "—")}</b>`,
+  ];
+  if (item.pronunciation) lines.push(`النطق المكتوب: ${escapeHtml(item.pronunciation)}`);
+  if (item.english) lines.push(`الإنجليزية: ${escapeHtml(item.english)}`);
+  if (item.meaning) lines.push(`المعنى: ${escapeHtml(String(item.meaning).split(/\s*[،,]\s*/u)[0])}`);
+  lines.push("أرسل الآن Voice من تيليجرام لهذه الكلمة. لإيقاف الجلسة أرسل /record_stop.");
+  return lines.join("\n");
+}
+
+async function nextVoicePrompt(env, chatId, userId, user) {
+  const item = await storeCall(env, { op: "voiceNext" });
+  if (!item) {
+    await saveUser(env, userId, { ...user, voiceRec: undefined });
+    await telegram(env, "sendMessage", { chat_id: chatId, text: voicePrompt(null), parse_mode: "HTML" });
+    return;
+  }
+  await saveUser(env, userId, { ...user, voiceRec: { index: item.index } });
+  await telegram(env, "sendMessage", { chat_id: chatId, text: voicePrompt(item), parse_mode: "HTML" });
+}
+
+async function beginVoiceRecording(env, chatId, userId, user) {
+  await nextVoicePrompt(env, chatId, userId, user ?? {});
+}
+
+async function captureVoiceRecording(env, message, userId, user) {
+  if (!message.voice) {
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "أرسل تسجيلًا كـ Voice من تيليجرام، وليس ملف Audio." });
+    return;
+  }
+  const index = Number(user.voiceRec?.index);
+  if (!Number.isInteger(index) || index < 0 || index >= records.length) {
+    await beginVoiceRecording(env, message.chat.id, userId, user);
+    return;
+  }
+  await storeCall(env, {
+    op: "put",
+    key: `voice:${index}`,
+    value: { fileId: message.voice.file_id, duration: message.voice.duration ?? null, savedAt: new Date().toISOString() },
+  });
+  await telegram(env, "sendMessage", {
+    chat_id: message.chat.id,
+    text: `✅ تم حفظ تسجيل <b>${escapeHtml(records[index].coptic ?? "الكلمة")}</b>.`,
+    parse_mode: "HTML",
+  });
+  await nextVoicePrompt(env, message.chat.id, userId, user);
+}
+
+async function stopVoiceRecording(env, chatId, userId, user) {
+  await saveUser(env, userId, { ...user, voiceRec: undefined });
+  await telegram(env, "sendMessage", { chat_id: chatId, text: "⏸️ تم إيقاف جلسة التسجيل. أرسل /record لاستكمالها من أول كلمة غير مسجلة." });
+}
+
 async function registerOnFirstContact(env, message, userId) {
   if (isAdmin(env, userId) || (message.chat.type ?? "private") !== "private" || !env.USERS) return;
   let result;
@@ -700,6 +788,18 @@ async function handleUpdate(update, env) {
     }
     if (text === "/broadcast") {
       await beginBroadcast(env, message.chat.id, userId, admin ?? {});
+      return;
+    }
+    if (text === "/record" || text === "/record_voice") {
+      await beginVoiceRecording(env, message.chat.id, userId, admin ?? {});
+      return;
+    }
+    if (text === "/record_stop") {
+      await stopVoiceRecording(env, message.chat.id, userId, admin ?? {});
+      return;
+    }
+    if (admin?.voiceRec && (message.voice || message.audio)) {
+      await captureVoiceRecording(env, message, userId, admin);
       return;
     }
     if (admin?.bc === "await" && !text.startsWith("/")) {
