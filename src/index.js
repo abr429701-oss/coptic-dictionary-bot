@@ -18,6 +18,60 @@ function normalize(value) {
 
 const SEARCH_TEXT = records.map((record) => normalize(Object.values(record).join(" ")));
 
+const SUGGESTION_PAGE_SIZE = 10;
+const SUGGESTION_TITLE = "اختر من الاقتراحات التالية:";
+const SHORT_QUERY_MAX = 2;
+
+function splitMeaning(value) {
+  return String(value ?? "").split(/\s*[،,]\s*/u).map((part) => part.trim()).filter(Boolean);
+}
+
+// Normalized "word starts" per record: Coptic/Greek/Latin forms and each Arabic meaning.
+const PREFIX_KEYS = records.map((record) => {
+  const keys = [record.coptic, record.greek, record.english, record.phonetic]
+    .map((value) => normalize(value).replaceAll("`", ""));
+  for (const part of splitMeaning(record.meaning)) keys.push(normalize(part));
+  return keys.filter(Boolean);
+});
+
+function findPrefixMatches(normalizedQuery) {
+  const matches = [];
+  for (let index = 0; index < PREFIX_KEYS.length; index += 1) {
+    const keys = PREFIX_KEYS[index];
+    for (let k = 0; k < keys.length; k += 1) {
+      if (keys[k].startsWith(normalizedQuery)) {
+        matches.push(index);
+        break;
+      }
+    }
+  }
+  return matches;
+}
+
+function suggestionLabel(record, normalizedQuery) {
+  const parts = splitMeaning(record.meaning);
+  const meaning = parts.find((part) => normalize(part).startsWith(normalizedQuery)) ?? parts[0] ?? "";
+  const word = String(record.coptic ?? "").replaceAll("`", "").trim();
+  return (meaning ? `${word} — ${meaning}` : word).slice(0, 48);
+}
+
+function renderSuggestions(query, normalizedQuery, matches, requestedPage) {
+  const totalPages = Math.max(1, Math.ceil(matches.length / SUGGESTION_PAGE_SIZE));
+  const page = Math.max(0, Math.min(requestedPage, totalPages - 1));
+  const slice = matches.slice(page * SUGGESTION_PAGE_SIZE, (page + 1) * SUGGESTION_PAGE_SIZE);
+  const text = `${BOT_TITLE}\n${SUGGESTION_TITLE}\n🔎 <b>نتائج البحث عن:</b> ${escapeHtml(query)}\n` +
+    `<b>النتائج:</b> ${matches.length.toLocaleString("en-US")} | <b>الصفحة:</b> ${page + 1}/${totalPages}`;
+  const keyboard = slice.map((index) => [{
+    text: suggestionLabel(records[index], normalizedQuery),
+    callback_data: `s|${index}`,
+  }]);
+  const navigation = [];
+  if (page > 0) navigation.push({ text: "السابق", callback_data: `p|${page - 1}` });
+  if (page < totalPages - 1) navigation.push({ text: "التالي", callback_data: `p|${page + 1}` });
+  if (navigation.length) keyboard.push(navigation);
+  return { text, reply_markup: { inline_keyboard: keyboard } };
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -26,7 +80,7 @@ function escapeHtml(value) {
 }
 
 function formatRecord(record, query = "") {
-  const parts = String(record.meaning ?? "").split(/\s*[،,]\s*/u).map((part) => part.trim()).filter(Boolean);
+  const parts = splitMeaning(record.meaning);
   const normalizedQuery = normalize(query);
   let meaning = parts.join("، ");
   let related = [];
@@ -127,6 +181,17 @@ async function sendWordVoice(env, chatId, record) {
 
 async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
   const cleanQuery = String(query ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, 160);
+  const normalizedQuery = normalize(cleanQuery);
+  if (normalizedQuery && Array.from(normalizedQuery).length <= SHORT_QUERY_MAX) {
+    const prefixMatches = findPrefixMatches(normalizedQuery);
+    if (prefixMatches.length) {
+      const view = renderSuggestions(cleanQuery, normalizedQuery, prefixMatches, page);
+      const payload = { chat_id: chatId, text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup };
+      return messageId === undefined
+        ? telegram(env, "sendMessage", payload)
+        : telegram(env, "editMessageText", { ...payload, message_id: messageId });
+    }
+  }
   const matches = findMatches(cleanQuery);
   if (!matches.length) {
     const text = `لم أجد نتائج لـ <b>${escapeHtml(cleanQuery)}</b>.\nجرّب القبطية أو العربية أو الإنجليزية أو تهجئة أقرب.`;
@@ -149,6 +214,17 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
   return response;
 }
 
+async function sendRecord(env, chatId, index) {
+  const record = records[index];
+  if (!record) return;
+  await telegram(env, "sendMessage", {
+    chat_id: chatId,
+    text: `${BOT_TITLE}\n\n${formatRecord(record)}`.slice(0, MAX_MESSAGE_LENGTH),
+    parse_mode: "HTML",
+  });
+  await sendWordVoice(env, chatId, record);
+}
+
 function queryFromMessage(message) {
   const text = String(message?.text ?? "");
   const line = text.split("\n").find((item) => item.startsWith(QUERY_PREFIX));
@@ -159,6 +235,11 @@ async function handleUpdate(update, env) {
   if (update.callback_query) {
     const callback = update.callback_query;
     await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
+    const pick = /^s\|(\d{1,6})$/u.exec(callback.data ?? "");
+    if (pick) {
+      if (callback.message?.chat?.id) await sendRecord(env, callback.message.chat.id, Number(pick[1]));
+      return;
+    }
     const match = /^p\|(\d{1,6})$/u.exec(callback.data ?? "");
     const query = queryFromMessage(callback.message);
     if (!match || !query || !callback.message?.chat?.id || !callback.message?.message_id) return;
@@ -172,7 +253,7 @@ async function handleUpdate(update, env) {
   if (text === "/start" || text.startsWith("/start ") || text === "/help") {
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
-      text: `${BOT_TITLE}\n\nأهلًا بك في القاموس.\n\nاكتب الكلمة مباشرة، مثل:\nⲁⲛⲁⲩ\nwater\nماء\n\nسأبحث في القبطية والعربية والإنجليزية والنطق والتهجئة.`,
+      text: `${BOT_TITLE}\n\nأهلًا بك في القاموس.\n\nاكتب الكلمة مباشرة، مثل:\nⲁⲛⲁⲩ\nwater\nماء\n\nسأبحث في القبطية والعربية والإنجليزية والنطق والتهجئة.\n\nاكتب حرفًا أو حرفين لتظهر لك اقتراحات بالكلمات التي تبدأ بهما.`,
     });
     return;
   }

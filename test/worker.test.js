@@ -52,12 +52,12 @@ test("/stats returns the number of dictionary records", async () => {
 test("text search returns a match and pagination keyboard", async () => {
   const calls = [];
   fakeTelegramApi(calls);
-  const response = await worker.fetch(updateRequest({ message: { text: "ⲁ", chat: { id: 8 } } }), env);
+  const response = await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲏⲧ", chat: { id: 8 } } }), env);
   assert.equal(response.status, 200);
   const message = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload;
   assert.ok(message);
   assert.match(message.text, /نتائج البحث عن/u);
-  assert.match(message.text, /ⲁ/u);
+  assert.match(message.text, /ⲁⲃⲏⲧ/u);
   assert.ok(message.reply_markup?.inline_keyboard?.[0]?.some((button) => button.callback_data === "p|1"));
 });
 
@@ -93,7 +93,7 @@ test("search sends a pronunciation voice message after the result", async () => 
     }
     return Response.json({ ok: true, result: true });
   };
-  const response = await worker.fetch(updateRequest({ message: { text: "ⲁ", chat: { id: 11 } } }), env);
+  const response = await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲏⲧ", chat: { id: 11 } } }), env);
   assert.equal(response.status, 200);
   assert.ok(calls.some((call) => call.url.endsWith("/sendMessage")));
   const voice = calls.find((call) => call.url.endsWith("/sendVoice"));
@@ -108,7 +108,7 @@ test("a failing TTS service does not break the text result", async () => {
     if (String(url).includes("translate_tts")) return new Response("blocked", { status: 403 });
     return Response.json({ ok: true, result: true });
   };
-  const response = await worker.fetch(updateRequest({ message: { text: "ⲁ", chat: { id: 12 } } }), env);
+  const response = await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲏⲧ", chat: { id: 12 } } }), env);
   assert.equal(response.status, 200);
   assert.ok(calls.some((call) => call.url.endsWith("/sendMessage")));
   assert.ok(!calls.some((call) => call.url.endsWith("/sendVoice")));
@@ -133,4 +133,29 @@ test("searching a meaning shows only that meaning and lists the others as relate
   const text = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
   assert.match(text, /<b>المعنى:<\/b> [^،\n]*كوبري[^،\n]*\n/u);
   assert.match(text, /كلمات مرتبطة:<\/b> /u);
+});
+
+test("one or two letters show 10 tappable suggestions per page", async () => {
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: "ⲁⲃ", chat: { id: 15 } } }), env);
+  const message = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
+  assert.match(message.text, /اختر من الاقتراحات التالية:/u);
+  assert.match(message.text, /🔎 <b>نتائج البحث عن:<\/b> ⲁⲃ/u);
+  const rows = message.reply_markup.inline_keyboard;
+  const wordRows = rows.filter((row) => row[0].callback_data.startsWith("s|"));
+  assert.equal(wordRows.length, 10);
+  assert.ok(rows.at(-1).some((button) => button.callback_data === "p|1"));
+  assert.ok(!calls.some((call) => call.url.endsWith("/sendVoice")));
+});
+
+test("tapping a suggestion sends the full entry", async () => {
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({
+    callback_query: { id: "c2", data: "s|3", message: { message_id: 5, chat: { id: 16 }, text: "x" } },
+  }), env);
+  const message = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
+  assert.equal(message.chat_id, 16);
+  assert.match(message.text, /<b>الكلمة:<\/b> /u);
 });
