@@ -94,7 +94,10 @@ jobs:
       - name: Deploy Worker and detect its URL
         run: |
           set -o pipefail
-          npx wrangler deploy 2>&1 | tee /tmp/wrangler-deploy.log
+          if ! npx wrangler deploy 2>&1 | tee /tmp/wrangler-deploy.log; then
+            echo "::error title=wrangler deploy failed::$(sed 's/\x1b\[[0-9;]*[A-Za-z]//g' /tmp/wrangler-deploy.log | tail -30 | tr '\n' ' ' | cut -c1-1500)"
+            exit 1
+          fi
           clean_log="$(sed 's/\x1b\[[0-9;]*[A-Za-z]//g' /tmp/wrangler-deploy.log)"
           worker_url="$(printf '%s' "$clean_log" | grep -Eo 'https://[A-Za-z0-9.-]+\.workers\.dev' | tail -n 1 || true)"
           if [ -z "$worker_url" ]; then
