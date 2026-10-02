@@ -49,30 +49,27 @@ test("/stats returns the number of dictionary records", async () => {
   assert.ok(calls[0].payload.text.includes(records.length.toLocaleString("en-US")));
 });
 
-test("text search returns a match and pagination keyboard", async () => {
+test("several matches show only the suggestions title and word-only buttons", async () => {
   const calls = [];
   fakeTelegramApi(calls);
   const response = await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲏⲧ", chat: { id: 8 } } }), env);
   assert.equal(response.status, 200);
   const message = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload;
   assert.ok(message);
-  assert.match(message.text, /نتائج البحث عن/u);
-  assert.match(message.text, /ⲁⲃⲏⲧ/u);
-  assert.ok(message.reply_markup?.inline_keyboard?.[0]?.some((button) => button.callback_data === "p|1"));
+  assert.equal(message.text, "اختر من الاقتراحات التالية:");
+  for (const row of message.reply_markup.inline_keyboard) {
+    for (const button of row) assert.doesNotMatch(button.text, /—/u);
+  }
 });
 
-test("callback pagination edits the result message for the next page", async () => {
+test("callback pagination edits the suggestions message using the query in the callback data", async () => {
   const calls = [];
   fakeTelegramApi(calls);
   const response = await worker.fetch(updateRequest({
     callback_query: {
       id: "callback-1",
-      data: "p|1",
-      message: {
-        message_id: 34,
-        chat: { id: 9 },
-        text: "📖 القاموس القبطي البحيري\n🔎 نتائج البحث عن: ⲁ\nالنتائج: 4 | الصفحة: 1/4\n\n1. ⲁ",
-      },
+      data: "p|1|ⲁ",
+      message: { message_id: 34, chat: { id: 9 }, text: "اختر من الاقتراحات التالية:" },
     },
   }), env);
   assert.equal(response.status, 200);
@@ -81,7 +78,8 @@ test("callback pagination edits the result message for the next page", async () 
   assert.ok(edit);
   assert.equal(edit.chat_id, 9);
   assert.equal(edit.message_id, 34);
-  assert.match(edit.text, /الصفحة:<\/b> 2\//u);
+  assert.equal(edit.text, "اختر من الاقتراحات التالية:");
+  assert.ok(edit.reply_markup.inline_keyboard.length > 0);
 });
 
 test("search sends a pronunciation voice message after the result", async () => {
@@ -93,7 +91,7 @@ test("search sends a pronunciation voice message after the result", async () => 
     }
     return Response.json({ ok: true, result: true });
   };
-  const response = await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲏⲧ", chat: { id: 11 } } }), env);
+  const response = await worker.fetch(updateRequest({ message: { text: "abagini", chat: { id: 11 } } }), env);
   assert.equal(response.status, 200);
   assert.ok(calls.some((call) => call.url.endsWith("/sendMessage")));
   const voice = calls.find((call) => call.url.endsWith("/sendVoice"));
@@ -108,31 +106,36 @@ test("a failing TTS service does not break the text result", async () => {
     if (String(url).includes("translate_tts")) return new Response("blocked", { status: 403 });
     return Response.json({ ok: true, result: true });
   };
-  const response = await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲏⲧ", chat: { id: 12 } } }), env);
+  const response = await worker.fetch(updateRequest({ message: { text: "abagini", chat: { id: 12 } } }), env);
   assert.equal(response.status, 200);
   assert.ok(calls.some((call) => call.url.endsWith("/sendMessage")));
   assert.ok(!calls.some((call) => call.url.endsWith("/sendVoice")));
 });
 
-test("result shows only word, meaning, kind and origin", async () => {
+test("a single result shows only word, meaning, kind and origin with no heading", async () => {
   const calls = [];
   fakeTelegramApi(calls);
-  await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲏⲧ", chat: { id: 13 } } }), env);
+  await worker.fetch(updateRequest({ message: { text: "abagini", chat: { id: 13 } } }), env);
   const text = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
-  assert.match(text, /<b>الكلمة:<\/b> /u);
+  assert.ok(text.startsWith("<b>الكلمة:</b> "));
   assert.match(text, /<b>المعنى:<\/b> /u);
-  assert.match(text, /<b>النوع:<\/b> /u);
-  assert.match(text, /<b>الأصل:<\/b> /u);
-  assert.doesNotMatch(text, /اليونانية|النطق|التهجئة|الجنس|الإنجليزية/u);
+  assert.doesNotMatch(text, /القاموس القبطي|نتائج|الصفحة|اليونانية|النطق|التهجئة|الجنس|الإنجليزية|كلمات مرتبطة/u);
 });
 
-test("searching a meaning shows only that meaning and lists the others as related", async () => {
+test("tapping a suggestion from an Arabic search shows only the searched meaning", async () => {
   const calls = [];
   fakeTelegramApi(calls);
   await worker.fetch(updateRequest({ message: { text: "كوبري", chat: { id: 14 } } }), env);
-  const text = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
+  const first = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
+  const single = first.text.startsWith("<b>");
+  const text = single ? first.text : await (async () => {
+    const data = first.reply_markup.inline_keyboard[0][0].callback_data;
+    calls.length = 0;
+    await worker.fetch(updateRequest({ callback_query: { id: "c", data, message: { message_id: 1, chat: { id: 14 }, text: "x" } } }), env);
+    return calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
+  })();
   assert.match(text, /<b>المعنى:<\/b> [^،\n]*كوبري[^،\n]*\n/u);
-  assert.match(text, /كلمات مرتبطة:<\/b> /u);
+  assert.doesNotMatch(text, /كلمات مرتبطة/u);
 });
 
 test("one or two letters show 10 tappable suggestions per page", async () => {
@@ -140,16 +143,15 @@ test("one or two letters show 10 tappable suggestions per page", async () => {
   fakeTelegramApi(calls);
   await worker.fetch(updateRequest({ message: { text: "ⲁⲃ", chat: { id: 15 } } }), env);
   const message = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
-  assert.match(message.text, /اختر من الاقتراحات التالية:/u);
-  assert.match(message.text, /🔎 <b>نتائج البحث عن:<\/b> ⲁⲃ/u);
+  assert.equal(message.text, "اختر من الاقتراحات التالية:");
   const rows = message.reply_markup.inline_keyboard;
   const wordRows = rows.filter((row) => row[0].callback_data.startsWith("s|"));
   assert.equal(wordRows.length, 10);
-  assert.ok(rows.at(-1).some((button) => button.callback_data === "p|1"));
+  assert.ok(rows.at(-1).some((button) => button.callback_data.startsWith("p|1|")));
   assert.ok(!calls.some((call) => call.url.endsWith("/sendVoice")));
 });
 
-test("tapping a suggestion sends the full entry", async () => {
+test("tapping a suggestion sends the entry without a heading", async () => {
   const calls = [];
   fakeTelegramApi(calls);
   await worker.fetch(updateRequest({
@@ -157,13 +159,18 @@ test("tapping a suggestion sends the full entry", async () => {
   }), env);
   const message = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
   assert.equal(message.chat_id, 16);
-  assert.match(message.text, /<b>الكلمة:<\/b> /u);
+  assert.ok(message.text.startsWith("<b>الكلمة:</b> "));
 });
 
 test("Arabic search matches whole words only, never inside a longer word", async () => {
   const calls = [];
   fakeTelegramApi(calls);
   await worker.fetch(updateRequest({ message: { text: "غراب", chat: { id: 17 } } }), env);
+  const message = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
+  assert.equal(message.text, "اختر من الاقتراحات التالية:");
+  const data = message.reply_markup.inline_keyboard[0][0].callback_data;
+  calls.length = 0;
+  await worker.fetch(updateRequest({ callback_query: { id: "c", data, message: { message_id: 1, chat: { id: 17 }, text: "x" } } }), env);
   const text = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
   assert.match(text, /<b>المعنى:<\/b> [^\n]*غراب/u);
   assert.doesNotMatch(text, /الاستغراب/u);

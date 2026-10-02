@@ -3,7 +3,7 @@ import records from "../data/dictionary.json" with { type: "json" };
 const BOT_TITLE = "📖 القاموس القبطي البحيري";
 const PAGE_SIZE = 1;
 const MAX_MESSAGE_LENGTH = 3900;
-const QUERY_PREFIX = "🔎 نتائج البحث عن: ";
+const CALLBACK_DATA_MAX_BYTES = 64;
 
 function normalize(value) {
   return String(value ?? "")
@@ -64,28 +64,56 @@ function findPrefixMatches(normalizedQuery) {
   return matches;
 }
 
-function suggestionLabel(record, normalizedQuery) {
+// Index of the meaning part the query refers to (Arabic searches only); -1 means "show everything".
+function matchedPartIndex(record, normalizedQuery) {
+  if (!ARABIC_LETTER.test(normalizedQuery)) return -1;
+  const needle = tokens(normalizedQuery);
   const parts = splitMeaning(record.meaning);
-  const meaning = parts.find((part) => normalize(part).startsWith(normalizedQuery)) ?? parts[0] ?? "";
+  const exact = parts.findIndex((part) => tokens(part) === needle);
+  if (exact >= 0) return exact;
+  return parts.findIndex((part) => normalize(part).startsWith(normalizedQuery) || hasWholeWords(tokens(part), needle));
+}
+
+// Suggestions show the word only; meanings appear after tapping.
+function suggestionLabel(record) {
   const word = String(record.coptic ?? "").replaceAll("`", "").trim();
-  return (meaning ? `${word} — ${meaning}` : word).slice(0, 48);
+  return (word || String(record.english ?? "").trim() || "—").slice(0, 48);
+}
+
+function truncateBytes(value, maxBytes) {
+  const encoder = new TextEncoder();
+  let out = "";
+  let used = 0;
+  for (const char of String(value)) {
+    const size = encoder.encode(char).length;
+    if (used + size > maxBytes) break;
+    out += char;
+    used += size;
+  }
+  return out;
+}
+
+function pageCallback(page, query) {
+  const prefix = `p|${page}|`;
+  return prefix + truncateBytes(query, CALLBACK_DATA_MAX_BYTES - prefix.length);
 }
 
 function renderSuggestions(query, normalizedQuery, matches, requestedPage) {
   const totalPages = Math.max(1, Math.ceil(matches.length / SUGGESTION_PAGE_SIZE));
   const page = Math.max(0, Math.min(requestedPage, totalPages - 1));
   const slice = matches.slice(page * SUGGESTION_PAGE_SIZE, (page + 1) * SUGGESTION_PAGE_SIZE);
-  const text = `${BOT_TITLE}\n${SUGGESTION_TITLE}\n🔎 <b>نتائج البحث عن:</b> ${escapeHtml(query)}\n` +
-    `<b>النتائج:</b> ${matches.length.toLocaleString("en-US")} | <b>الصفحة:</b> ${page + 1}/${totalPages}`;
-  const keyboard = slice.map((index) => [{
-    text: suggestionLabel(records[index], normalizedQuery),
-    callback_data: `s|${index}`,
-  }]);
+  const keyboard = slice.map((index) => {
+    const part = matchedPartIndex(records[index], normalizedQuery);
+    return [{
+      text: suggestionLabel(records[index]),
+      callback_data: part >= 0 ? `s|${index}|${part}` : `s|${index}`,
+    }];
+  });
   const navigation = [];
-  if (page > 0) navigation.push({ text: "السابق", callback_data: `p|${page - 1}` });
-  if (page < totalPages - 1) navigation.push({ text: "التالي", callback_data: `p|${page + 1}` });
+  if (page > 0) navigation.push({ text: "السابق", callback_data: pageCallback(page - 1, query) });
+  if (page < totalPages - 1) navigation.push({ text: "التالي", callback_data: pageCallback(page + 1, query) });
   if (navigation.length) keyboard.push(navigation);
-  return { text, reply_markup: { inline_keyboard: keyboard } };
+  return { text: SUGGESTION_TITLE, reply_markup: { inline_keyboard: keyboard } };
 }
 
 function escapeHtml(value) {
@@ -95,21 +123,9 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;");
 }
 
-function formatRecord(record, query = "") {
+function formatRecord(record, partIndex = -1) {
   const parts = splitMeaning(record.meaning);
-  const normalizedQuery = normalize(query);
-  let meaning = parts.join("، ");
-  let related = [];
-  if (normalizedQuery && parts.length > 1) {
-    const needle = tokens(normalizedQuery);
-    const matched = ARABIC_LETTER.test(normalizedQuery)
-      ? parts.filter((part) => hasWholeWords(tokens(part), needle))
-      : [];
-    if (matched.length && matched.length < parts.length) {
-      meaning = matched.join("، ");
-      related = parts.filter((part) => !matched.includes(part));
-    }
-  }
+  const meaning = partIndex >= 0 && parts[partIndex] ? parts[partIndex] : parts.join("، ");
   const fields = [
     ["الكلمة", record.coptic],
     ["المعنى", meaning],
@@ -121,7 +137,6 @@ function formatRecord(record, query = "") {
     const value = String(raw ?? "").trim();
     if (value) lines.push(`<b>${label}:</b> ${escapeHtml(value)}`);
   }
-  if (related.length) lines.push("", `🔗 <b>كلمات مرتبطة:</b> ${escapeHtml(related.join("، "))}`);
   return lines.join("\n");
 }
 
@@ -150,25 +165,6 @@ function findMatches(query) {
     if (SEARCH_TEXT[index].includes(normalizedQuery)) matches.push(index);
   }
   return matches;
-}
-
-function render(query, matches, requestedPage) {
-  const totalPages = Math.max(1, Math.ceil(matches.length / PAGE_SIZE));
-  const page = Math.max(0, Math.min(requestedPage, totalPages - 1));
-  const start = page * PAGE_SIZE;
-  const record = records[matches[start]];
-  const heading = `${BOT_TITLE}\n🔎 <b>نتائج البحث عن:</b> ${escapeHtml(query)}\n` +
-    `<b>النتائج:</b> ${matches.length.toLocaleString("en-US")} | <b>الصفحة:</b> ${page + 1}/${totalPages}\n\n`;
-  const text = `${heading}${formatRecord(record, query)}`.slice(0, MAX_MESSAGE_LENGTH);
-  const navigation = [];
-  if (page > 0) navigation.push({ text: "السابق", callback_data: `p|${page - 1}` });
-  if (page < totalPages - 1) navigation.push({ text: "التالي", callback_data: `p|${page + 1}` });
-  return {
-    page,
-    record,
-    text,
-    reply_markup: navigation.length ? { inline_keyboard: [navigation] } : undefined,
-  };
 }
 
 const TYPING_DELAY_MS = 900;
@@ -225,68 +221,58 @@ async function showTyping(env, chatId, delayMs = TYPING_DELAY_MS) {
 async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
   const cleanQuery = String(query ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, 160);
   const normalizedQuery = normalize(cleanQuery);
+  const deliver = (payload) => messageId === undefined
+    ? telegram(env, "sendMessage", { chat_id: chatId, ...payload })
+    : telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, ...payload });
+
   if (normalizedQuery && Array.from(normalizedQuery).length <= SHORT_QUERY_MAX) {
     const prefixMatches = findPrefixMatches(normalizedQuery);
     if (prefixMatches.length) {
       const view = renderSuggestions(cleanQuery, normalizedQuery, prefixMatches, page);
-      const payload = { chat_id: chatId, text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup };
-      return messageId === undefined
-        ? telegram(env, "sendMessage", payload)
-        : telegram(env, "editMessageText", { ...payload, message_id: messageId });
+      return deliver({ text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup });
     }
   }
   const matches = findMatches(cleanQuery);
   if (!matches.length) {
     const text = `لم أجد نتائج لـ <b>${escapeHtml(cleanQuery)}</b>.\nجرّب القبطية أو العربية أو الإنجليزية أو تهجئة أقرب.`;
-    if (messageId === undefined) {
-      return telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML" });
-    }
-    return telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text, parse_mode: "HTML" });
+    return deliver({ text, parse_mode: "HTML" });
   }
-  const result = render(cleanQuery, matches, page);
-  const payload = {
-    chat_id: chatId,
-    text: result.text,
-    parse_mode: "HTML",
-    ...(result.reply_markup ? { reply_markup: result.reply_markup } : {}),
-  };
-  const response = messageId === undefined
-    ? await telegram(env, "sendMessage", payload)
-    : await telegram(env, "editMessageText", { ...payload, message_id: messageId });
-  await sendWordVoice(env, chatId, result.record);
+  if (matches.length > 1) {
+    const view = renderSuggestions(cleanQuery, normalizedQuery, matches, page);
+    return deliver({ text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup });
+  }
+  const record = records[matches[0]];
+  const text = formatRecord(record, matchedPartIndex(record, normalizedQuery)).slice(0, MAX_MESSAGE_LENGTH);
+  const response = await deliver({ text, parse_mode: "HTML" });
+  await sendWordVoice(env, chatId, record);
   return response;
 }
 
-async function sendRecord(env, chatId, index) {
+async function sendRecord(env, chatId, index, partIndex = -1) {
   const record = records[index];
   if (!record) return;
   await telegram(env, "sendMessage", {
     chat_id: chatId,
-    text: `${BOT_TITLE}\n\n${formatRecord(record)}`.slice(0, MAX_MESSAGE_LENGTH),
+    text: formatRecord(record, partIndex).slice(0, MAX_MESSAGE_LENGTH),
     parse_mode: "HTML",
   });
   await sendWordVoice(env, chatId, record);
-}
-
-function queryFromMessage(message) {
-  const text = String(message?.text ?? "");
-  const line = text.split("\n").find((item) => item.startsWith(QUERY_PREFIX));
-  return line ? line.slice(QUERY_PREFIX.length).trim() : "";
 }
 
 async function handleUpdate(update, env) {
   if (update.callback_query) {
     const callback = update.callback_query;
     await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
-    const pick = /^s\|(\d{1,6})$/u.exec(callback.data ?? "");
+    const pick = /^s\|(\d{1,6})(?:\|(\d{1,3}))?$/u.exec(callback.data ?? "");
     if (pick) {
-      if (callback.message?.chat?.id) await sendRecord(env, callback.message.chat.id, Number(pick[1]));
+      if (callback.message?.chat?.id) {
+        await sendRecord(env, callback.message.chat.id, Number(pick[1]), pick[2] === undefined ? -1 : Number(pick[2]));
+      }
       return;
     }
-    const match = /^p\|(\d{1,6})$/u.exec(callback.data ?? "");
-    const query = queryFromMessage(callback.message);
-    if (!match || !query || !callback.message?.chat?.id || !callback.message?.message_id) return;
-    await sendSearch(env, callback.message.chat.id, query, Number(match[1]), callback.message.message_id);
+    const match = /^p\|(\d{1,6})\|(.+)$/su.exec(callback.data ?? "");
+    if (!match || !callback.message?.chat?.id || !callback.message?.message_id) return;
+    await sendSearch(env, callback.message.chat.id, match[2], Number(match[1]), callback.message.message_id);
     return;
   }
 
