@@ -1,54 +1,179 @@
 name: Deploy Coptic Dictionary Bot
 
+
+
 on:
+
   push:
+  
     branches: [main]
+    
   workflow_dispatch:
+  
+
 
 permissions:
+
   contents: read
+  
+
 
 jobs:
+
   deploy:
+  
     if: ${{ github.event_name == 'workflow_dispatch' || vars.CF_DEPLOY_ENABLED == 'true' }}
+    
     runs-on: ubuntu-latest
+    
     env:
+    
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      
     steps:
+    
       - name: Check out repository
+      
         uses: actions/checkout@v4
+        
       - name: Set up Node.js
+      
         uses: actions/setup-node@v4
+        
         with:
+        
           node-version: 22
+          
           cache: npm
+          
       - name: Validate required secrets and variables
+      
         run: |
+        
           for key in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID TELEGRAM_BOT_TOKEN; do
+          
             if [ -z "${!key}" ]; then echo "Missing GitHub secret/variable: $key"; exit 1; fi
+            
           done
+          
       - name: Install dependencies
+      
         run: npm ci
+        
       - name: Deploy Worker and detect its URL
+      
         run: |
+        
           set -o pipefail
+          
           npx wrangler deploy 2>&1 | tee /tmp/wrangler-deploy.log
-          worker_url="$(grep -Eo 'https://[[:alnum:].-]+\.workers\.dev' /tmp/wrangler-deploy.log | tail -n 1)"
+          
+          worker_url="$(grep -Eo 'https://[[:alnum:].-]+\\.workers\\.dev' /tmp/wrangler-deploy.log | tail -n 1)"
+          
           if [ -z "$worker_url" ]; then
+          
             echo "Could not detect the workers.dev URL. Enable workers.dev for this account, then rerun."
+            
             exit 1
+            
           fi
+          
           echo "WORKER_URL=$worker_url" >> "$GITHUB_ENV"
+          
       - name: Generate a random webhook secret
+      
         run: |
+        
           webhook_secret="$(openssl rand -hex 32)"
+          
           echo "::add-mask::$webhook_secret"
+          
           echo "WEBHOOK_SECRET=$webhook_secret" >> "$GITHUB_ENV"
+          
       - name: Store Telegram secrets on the Worker
+      
         run: |
+        
           printf '%s' "$TELEGRAM_BOT_TOKEN" | npx wrangler secret put TELEGRAM_BOT_TOKEN --name=coptic-dictionary-bot
+          
           printf '%s' "$WEBHOOK_SECRET" | npx wrangler secret put WEBHOOK_SECRET --name=coptic-dictionary-bot
+          
       - name: Register Telegram webhook
-        run: npm run setup:webhook
+      
+        run: |
+        
+          set -euo pipefail
+          
+          response="$(curl -sS --fail-with-body -X POST \
+          
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+            
+            --data-urlencode "url=${WORKER_URL}/webhook" \
+            
+            --data-urlencode "secret_token=${WEBHOOK_SECRET}" \
+            
+            --data-urlencode 'allowed_updates=["message","callback_query"]')"
+            
+          echo "$response"
+          
+          node -e 'const r=JSON.parse(process.argv[1]); if (!r.ok) process.exit(1)' "$response"
+          
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
