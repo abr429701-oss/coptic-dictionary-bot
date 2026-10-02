@@ -19,18 +19,16 @@
 
 ## النشر التلقائي من GitHub
 
-الملفات جاهزة للنشر بـ GitHub Actions (`.github/workflows/deploy.yml`). أنشأت المستودع الخاص: [abr429701-oss/coptic-dictionary-bot](https://github.com/abr429701-oss/coptic-dictionary-bot).
+المستودع الخاص: [abr429701-oss/coptic-dictionary-bot](https://github.com/abr429701-oss/coptic-dictionary-bot). ملفات النشر موجودة في `.github/workflows/deploy.yml`.
 
-1. افتح [صفحة إنشاء Cloudflare API Token](https://dash.cloudflare.com/profile/api-tokens)، وأنشئ token مخصصًا بصلاحية **Edit Cloudflare Workers** للحساب المطلوب، وفعّل عنوان `workers.dev` للحساب مرة واحدة. خذ `Account ID` من لوحة Cloudflare.
-2. افتح [صفحة أسرار GitHub Actions للمستودع](https://github.com/abr429701-oss/coptic-dictionary-bot/settings/secrets/actions) وأضف السرّين التاليين:
-   - `CLOUDFLARE_API_TOKEN` — التوكن المخصص لـ Workers.
+1. أنشئ API Token من [صفحة Cloudflare API Tokens](https://dash.cloudflare.com/profile/api-tokens) بصلاحية **Edit Cloudflare Workers** للحساب المطلوب، وفعّل عنوان `workers.dev` للحساب مرة واحدة. خذ `Account ID` من لوحة Cloudflare.
+2. افتح [صفحة أسرار GitHub Actions للمستودع](https://github.com/abr429701-oss/coptic-dictionary-bot/settings/secrets/actions) وأضف:
+   - `CLOUDFLARE_API_TOKEN` — التوكن المحدود لـ Workers.
    - `TELEGRAM_BOT_TOKEN` — توكين البوت من BotFather.
-3. من تبويب **Variables** في صفحة GitHub نفسها أضف:
-   - `CLOUDFLARE_ACCOUNT_ID` — معرّف الحساب.
-   - `CF_DEPLOY_ENABLED` بقيمة `true`.
-4. شغّل GitHub Actions → **Deploy Coptic Dictionary Bot** → **Run workflow**. سيُنشر Worker، ويولّد سير العمل سرّ webhook عشوائيًا، ويضبط أسرار Worker ويسجل webhook لدى Telegram. بعد ذلك كل دفع إلى فرع `main` ينشر التغييرات تلقائيًا.
+3. من تبويب **Variables** في صفحة الإعدادات نفسها أضف `CLOUDFLARE_ACCOUNT_ID` بمعرّف الحساب.
+4. بعد إضافة القيم، يمكن تشغيل GitHub Actions → **Deploy Coptic Dictionary Bot** → **Run workflow**. سيُنشر Worker، ويولّد سرّ webhook عشوائيًا، ويضبط الأسرار ويسجل webhook لدى Telegram. بعد نجاح النشر تُفعّل إعادة النشر التلقائية عند كل دفع إلى `main`.
 
-أسرار GitHub مشفّرة ولا تظهر لي. لا ترسل التوكنات في المحادثة ولا تضعها في الملفات. عنوان Worker يُستخرج تلقائيًا من نتيجة النشر، ولا تحتاج إدخاله يدويًا.
+أسرار GitHub مشفّرة ولا تظهر لي. لا ترسل التوكنات في المحادثة ولا تضعها في الملفات. عنوان Worker وسرّ webhook يُنشآن تلقائيًا.
 
 ## الاختبار محليًا
 

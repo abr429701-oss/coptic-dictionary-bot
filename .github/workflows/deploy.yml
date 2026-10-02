@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   deploy:
-    if: ${{ vars.CF_DEPLOY_ENABLED == 'true' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.CF_DEPLOY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
