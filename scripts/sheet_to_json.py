@@ -10,6 +10,7 @@ import csv
 import io
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -26,6 +27,21 @@ MIN_RECORDS = int(os.environ.get("MIN_RECORDS", "8000"))
 # Columns: A coptic, B greek, C pronunciation, D english, E phonetic, F kind,
 # G gender, H origin, I..AS Arabic meanings (one per column).
 MEANING_FIRST, MEANING_LAST = 8, 44
+
+
+JINKIM = "\u0300"  # combining grave: the real jinkim, drawn over the letter it follows
+_JINKIM_BEFORE_LETTER = re.compile(r"`([^\W\d_])")
+
+
+def clean_coptic(value: str) -> str:
+    """Write the jinkim as a combining mark instead of a spaced ASCII backtick.
+
+    The sheet types the jinkim as ` *before* the letter it sits on ("ⲁⲧ`ⲥϧⲁⲓ"), which shows as a
+    stray gap. Here it becomes a mark on that letter ("ⲁⲧⲥ̀ϧⲁⲓ"), so a single word stays one
+    unbroken word. Real spaces between the words of a phrase are kept (only runs are collapsed).
+    """
+    text = _JINKIM_BEFORE_LETTER.sub(lambda match: match.group(1) + JINKIM, value)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def download() -> str:
@@ -63,7 +79,7 @@ def main() -> None:
             if value and value not in meanings:
                 meanings.append(value)
         record = {
-            "coptic": cell(0),
+            "coptic": clean_coptic(cell(0)),
             "greek": cell(1),
             "pronunciation": cell(2),
             "english": cell(3),

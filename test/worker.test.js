@@ -298,7 +298,7 @@ test("/keyboard sends a reply keyboard (not inline) with letters and controls", 
   assert.equal(message.reply_markup.inline_keyboard, undefined);
   assert.equal(message.reply_markup.resize_keyboard, true);
   const labels = message.reply_markup.keyboard.flat().map((button) => button.text);
-  for (const key of ["ⲁ", "ⲱ", "ϣ", "ϧ", "ϯ", "`", "␣ مسافة", "⌫ حذف", "🗑 مسح", "🔎 بحث", "✖️ إغلاق"]) {
+  for (const key of ["ⲁ", "ⲱ", "ϣ", "ϧ", "ϯ", "◌̀", "␣ مسافة", "⌫ حذف", "🗑 مسح", "🔎 بحث", "✖️ إغلاق"]) {
     assert.ok(labels.includes(key), key);
   }
   assert.equal(kvEnv.USERS.store.get("user:31").kb.msgId, 900);
@@ -512,4 +512,34 @@ test("admin gets the registered name when a user completes registration; the adm
 
   const own = await asUser(kvEnv, ADMIN, { text: "abagini", from: { id: ADMIN, first_name: "owner" } });
   assert.equal(own.notices, undefined);
+});
+
+test("the dictionary writes the jinkim as a combining mark, never as a spaced backtick, and keeps phrase spaces", () => {
+  const coptic = records.map((record) => String(record.coptic ?? ""));
+  assert.equal(coptic.filter((word) => word.includes("`")).length, 0);
+  assert.ok(coptic.includes("ⲁⲧⲥ̀ϧⲁⲓ"));
+  assert.ok(coptic.some((word) => /\S \S/u.test(word)));
+  assert.equal(coptic.filter((word) => /\s{2,}|^\s|\s$/u.test(word)).length, 0);
+});
+
+test("searching without the jinkim, with a backtick, or with the combining mark finds the same word", async () => {
+  for (const typed of ["ⲁⲧⲥϧⲁⲓ", "ⲁⲧ`ⲥϧⲁⲓ", "ⲁⲧⲥ̀ϧⲁⲓ"]) {
+    const calls = [];
+    fakeTelegramApi(calls);
+    await worker.fetch(updateRequest({ message: { text: typed, chat: { id: 811 }, from: { id: 811 } } }), env);
+    const text = sent(calls)[0].text;
+    assert.doesNotMatch(text, /لم أجد نتائج/u, typed);
+  }
+});
+
+test("the keyboard jinkim key puts one combining mark on the previous letter", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await kbSay(kvEnv, "/keyboard");
+  let calls = await kbSay(kvEnv, "◌̀");
+  assert.equal(edits(calls).length, 0);
+  await kbSay(kvEnv, "ⲥ");
+  calls = await kbSay(kvEnv, "◌̀");
+  assert.match(edits(calls)[0].text, /▸ ⲥ\u0300▏/u);
+  calls = await kbSay(kvEnv, "◌̀");
+  assert.equal(edits(calls).length, 0);
 });

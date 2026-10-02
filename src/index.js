@@ -20,7 +20,7 @@ function normalize(value) {
   return String(value ?? "")
     .normalize("NFKC")
     .toLowerCase()
-    .replace(/[\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06edـ]/gu, "")
+    .replace(/[\u0300-\u036f\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06edـ]/gu, "")
     .replace(/[أإآٱى]/gu, (char) => ALEF_MAP[char])
     .replace(/[ὲέὶίὸόὼώὴήὰάὺύ`]/gu, (char) => ACCENT_MAP[char] ?? "")
     .replace(/\s+/gu, " ")
@@ -533,7 +533,9 @@ const COPTIC_KEY_ROWS = [
   ["ⲧ", "ⲩ", "ⲫ", "ⲭ", "ⲯ", "ⲱ"],
   ["ϣ", "ϥ", "ϧ", "ϩ", "ϫ", "ϭ", "ϯ"],
 ];
-const COPTIC_KEYS = new Set([...COPTIC_KEY_ROWS.flat(), "`"]);
+const JINKIM_COMBINING = "\u0300";
+const KEY_JINKIM = "◌̀"; // dotted circle + combining grave: shows how the jinkim sits on a letter
+const COPTIC_KEYS = new Set([...COPTIC_KEY_ROWS.flat(), "`", KEY_JINKIM]);
 const KEY_SPACE = "␣ مسافة";
 const KEY_BACK = "⌫ حذف";
 const KEY_CLEAR = "🗑 مسح";
@@ -545,7 +547,7 @@ const KEYBOARD_MAX_LENGTH = 40;
 
 function keyboardReplyMarkup() {
   const rows = COPTIC_KEY_ROWS.map((row) => row.map((text) => ({ text })));
-  rows.push([{ text: "`" }, { text: KEY_SPACE }, { text: KEY_BACK }, { text: KEY_CLEAR }]);
+  rows.push([{ text: KEY_JINKIM }, { text: KEY_SPACE }, { text: KEY_BACK }, { text: KEY_CLEAR }]);
   rows.push([{ text: KEY_SEARCH }, { text: KEY_CLOSE }]);
   return {
     keyboard: rows,
@@ -568,6 +570,12 @@ function applyKeyboardAction(word, input) {
   if (input === KEY_BACK) return Array.from(current).slice(0, -1).join("");
   if (input === KEY_CLEAR) return "";
   if (input === KEY_SPACE) return current && !current.endsWith(" ") ? `${current} ` : current;
+  if (input === KEY_JINKIM || input === "`") {
+    // The jinkim marks the letter before it, and only once.
+    return /[^\s\u0300]$/u.test(current) && Array.from(current).length < KEYBOARD_MAX_LENGTH
+      ? current + JINKIM_COMBINING
+      : current;
+  }
   if (COPTIC_KEYS.has(input)) return Array.from(current).length < KEYBOARD_MAX_LENGTH ? current + input : current;
   return current;
 }
