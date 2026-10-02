@@ -47,3 +47,7 @@ npm run dev
 ## أمان التوكن
 
 إذا سبق مشاركة توكين Telegram في محادثة أو مستودع أو سجل بناء، ألغِه من `@BotFather` عبر `/revoke`، ثم أضف التوكن البديل إلى GitHub Actions Secrets فقط. لا ترسله في الرسائل.
+
+## مزامنة القاموس من Google Sheets
+
+مصدر البيانات الآن شيت عام (`SHEET_ID` داخل `scripts/sheet_to_json.py`). يعمل GitHub Actions كل 30 دقيقة: ينزّل الشيت كـ CSV ويحوّله إلى `data/dictionary.json`، وإذا تغيّرت البيانات يحفظها وينشر الـ Worker تلقائيًا. لا يتغيّر شيء في الـ Worker نفسه أثناء الطلبات، فلا تتأثر حدود الاستخدام ولا السرعة. تشغيل يدوي: Actions ← Deploy Coptic Dictionary Bot ← Run workflow.

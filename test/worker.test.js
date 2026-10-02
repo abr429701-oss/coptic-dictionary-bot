@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import worker from "../src/index.js";
+import records from "../data/dictionary.json" with { type: "json" };
 
 const token = "test-token";
 const secret = "test-secret-should-be-long-enough";
@@ -45,7 +46,7 @@ test("/stats returns the number of dictionary records", async () => {
   assert.equal(response.status, 200);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].payload.chat_id, 7);
-  assert.match(calls[0].payload.text, /16,297/u);
+  assert.ok(calls[0].payload.text.includes(records.length.toLocaleString("en-US")));
 });
 
 test("text search returns a match and pagination keyboard", async () => {

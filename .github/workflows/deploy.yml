@@ -3,22 +3,73 @@ name: Deploy Coptic Dictionary Bot
 on:
   push:
     branches: [main]
+  schedule:
+    - cron: "*/30 * * * *"
   workflow_dispatch:
+    inputs:
+      setup_webhook:
+        description: "Re-create secrets and Telegram webhook (true/false)"
+        default: "true"
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
 
 jobs:
+  sync:
+    # Pushes only run when CF_DEPLOY_ENABLED=true; schedule/manual always run.
+    if: ${{ github.event_name != 'push' || vars.CF_DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      deploy: ${{ steps.decide.outputs.deploy }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build dictionary.json from the Google Sheet
+        run: python3 scripts/sheet_to_json.py
+
+      - name: Commit data if it changed
+        id: commit
+        run: |
+          if git diff --quiet -- data/dictionary.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add data/dictionary.json
+            git commit -m "Sync dictionary from Google Sheet"
+            git push
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Decide whether to deploy
+        id: decide
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ steps.commit.outputs.changed }}" != "true" ]; then
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            echo "Sheet unchanged; nothing to deploy."
+          else
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          fi
+
   deploy:
-    if: ${{ github.event_name == 'workflow_dispatch' || vars.CF_DEPLOY_ENABLED == 'true' }}
+    needs: sync
+    if: ${{ needs.sync.outputs.deploy == 'true' }}
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      SETUP_WEBHOOK: ${{ github.event_name == 'workflow_dispatch' && inputs.setup_webhook != 'false' }}
     steps:
-      - name: Check out repository
+      - name: Check out repository (latest main)
         uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -28,7 +79,9 @@ jobs:
 
       - name: Validate required secrets and variables
         run: |
-          for key in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID TELEGRAM_BOT_TOKEN; do
+          keys="CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID"
+          if [ "$SETUP_WEBHOOK" = "true" ]; then keys="$keys TELEGRAM_BOT_TOKEN"; fi
+          for key in $keys; do
             if [ -z "${!key}" ]; then echo "Missing GitHub secret/variable: $key"; exit 1; fi
           done
 
@@ -51,17 +104,20 @@ jobs:
           echo "WORKER_URL=$worker_url" >> "$GITHUB_ENV"
 
       - name: Generate a random webhook secret
+        if: ${{ env.SETUP_WEBHOOK == 'true' }}
         run: |
           webhook_secret="$(openssl rand -hex 32)"
           echo "::add-mask::$webhook_secret"
           echo "WEBHOOK_SECRET=$webhook_secret" >> "$GITHUB_ENV"
 
       - name: Store Telegram secrets on the Worker
+        if: ${{ env.SETUP_WEBHOOK == 'true' }}
         run: |
           printf '%s' "$TELEGRAM_BOT_TOKEN" | npx wrangler secret put TELEGRAM_BOT_TOKEN --name coptic-dictionary-bot
           printf '%s' "$WEBHOOK_SECRET" | npx wrangler secret put WEBHOOK_SECRET --name coptic-dictionary-bot
 
       - name: Register Telegram webhook
+        if: ${{ env.SETUP_WEBHOOK == 'true' }}
         run: |
           set -euo pipefail
           response="$(curl -sS --fail-with-body -X POST \
@@ -74,6 +130,7 @@ jobs:
           node -e 'const r=JSON.parse(process.argv[1]); if (!r.ok) process.exit(1)' "$response"
 
       - name: Show webhook status
+        if: ${{ env.SETUP_WEBHOOK == 'true' }}
         run: |
           curl -sS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo" \
             | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=JSON.parse(s).result||{};console.log({url:r.url,pending:r.pending_update_count,last_error:r.last_error_message||null})})'

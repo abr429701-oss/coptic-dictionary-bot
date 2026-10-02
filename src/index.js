@@ -35,6 +35,7 @@ function formatRecord(record, number) {
     ["التعريب المُشكّل", "arabic_pronunciation"],
     ["النوع", "kind"],
     ["الجنس", "gender"],
+    ["الأصل", "origin"],
     ["المعنى", "meaning"],
   ];
   for (const [label, key] of fields) {
