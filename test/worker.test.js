@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import worker from "../src/index.js";
+import worker, { UserStore } from "../src/index.js";
 import records from "../data/dictionary.json" with { type: "json" };
 
 const token = "test-token";
@@ -12,7 +12,7 @@ function fakeTelegramApi(calls) {
     const body = options.body;
     const payload = !body ? null : typeof body === "string" ? JSON.parse(body) : Object.fromEntries(body.entries());
     calls.push({ url: String(url), options, payload });
-    return Response.json({ ok: true, result: true });
+    return Response.json({ ok: true, result: { message_id: 900 } });
   };
 }
 
@@ -180,15 +180,16 @@ test("Arabic search matches whole words only, never inside a longer word", async
 
 function fakeKv() {
   const store = new Map();
+  const storage = {
+    get: async (key) => store.get(key),
+    put: async (key, value) => { store.set(key, value); },
+  };
+  const object = new UserStore({ storage });
   return {
     store,
     idFromName: (name) => name,
     get: () => ({
-      fetch: async (_url, options) => {
-        const { op, key, value } = JSON.parse(options.body);
-        if (op === "put") { store.set(key, value); return Response.json({ ok: true }); }
-        return Response.json({ value: store.get(key) ?? null });
-      },
+      fetch: (url, options) => object.fetch(new Request(url, options)),
     }),
   };
 }
@@ -239,62 +240,89 @@ test("if the photo cannot be sent the welcome falls back to text", async () => {
   assert.match(calls.find((call) => call.url.endsWith("/sendMessage")).payload.text, /أبانوب سمير حنا/u);
 });
 
-function keyCallback(data, text, messageId = 50) {
-  return { callback_query: { id: "k1", data, message: { message_id: messageId, chat: { id: 31 }, text } } };
-}
+const KB_USER = 31;
 
-test("/keyboard sends the Coptic keyboard with letters, space, delete, clear, search and close", async () => {
+async function kbSay(kvEnv, text, messageId = 5) {
   const calls = [];
   fakeTelegramApi(calls);
-  await worker.fetch(updateRequest({ message: { text: "/keyboard", chat: { id: 31 }, from: { id: 31 } } }), env);
-  const payload = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
-  const data = payload.reply_markup.inline_keyboard.flat().map((button) => button.callback_data);
-  for (const key of ["k|ⲁ", "k|ⲱ", "k|ϣ", "k|ϧ", "k|ϯ", "k|sp", "k|bs", "k|cl", "k|go", "k|x"]) assert.ok(data.includes(key), key);
-  assert.ok(data.length <= 100);
-  assert.ok(data.every((item) => new TextEncoder().encode(item).length <= 64));
+  await worker.fetch(updateRequest({
+    message: { message_id: messageId, text, chat: { id: KB_USER }, from: { id: KB_USER } },
+  }), kvEnv);
+  return calls;
+}
+
+const edits = (calls) => calls.filter((call) => call.url.endsWith("/editMessageText")).map((call) => call.payload);
+const sent = (calls) => calls.filter((call) => call.url.endsWith("/sendMessage")).map((call) => call.payload);
+
+test("/keyboard sends a reply keyboard (not inline) with letters and controls", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const calls = await kbSay(kvEnv, "/keyboard");
+  const message = sent(calls)[0];
+  assert.equal(message.reply_markup.inline_keyboard, undefined);
+  assert.equal(message.reply_markup.resize_keyboard, true);
+  const labels = message.reply_markup.keyboard.flat().map((button) => button.text);
+  for (const key of ["ⲁ", "ⲱ", "ϣ", "ϧ", "ϯ", "`", "␣ مسافة", "⌫ حذف", "🗑 مسح", "🔎 بحث", "✖️ إغلاق"]) {
+    assert.ok(labels.includes(key), key);
+  }
+  assert.equal(kvEnv.USERS.store.get("user:31").kb.msgId, 900);
 });
 
-test("tapping keys builds the word in the message and edits it in place", async () => {
-  let calls = [];
-  fakeTelegramApi(calls);
-  await worker.fetch(updateRequest(keyCallback("k|ⲁ", "⌨️ الكيبورد القبطي\n\n▸ ▏")), env);
-  let edit = calls.find((call) => call.url.endsWith("/editMessageText")).payload;
-  assert.equal(edit.message_id, 50);
-  assert.match(edit.text, /▸ ⲁ▏/u);
-  assert.ok(edit.reply_markup.inline_keyboard.length > 5);
+test("tapping keys collects the word, deletes the tap and edits one message", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await kbSay(kvEnv, "/keyboard");
+  let calls = await kbSay(kvEnv, "ⲁ", 11);
+  assert.ok(calls.some((call) => call.url.endsWith("/deleteMessage") && call.payload.message_id === 11));
+  assert.equal(edits(calls)[0].message_id, 900);
+  assert.match(edits(calls)[0].text, /▸ ⲁ▏/u);
+  assert.equal(sent(calls).length, 0);
 
-  calls = [];
-  fakeTelegramApi(calls);
-  await worker.fetch(updateRequest(keyCallback("k|ϣ", edit.text)), env);
-  edit = calls.find((call) => call.url.endsWith("/editMessageText")).payload;
-  assert.match(edit.text, /▸ ⲁϣ▏/u);
-
-  calls = [];
-  fakeTelegramApi(calls);
-  await worker.fetch(updateRequest(keyCallback("k|bs", edit.text)), env);
-  assert.match(calls.find((call) => call.url.endsWith("/editMessageText")).payload.text, /▸ ⲁ▏/u);
-
-  calls = [];
-  fakeTelegramApi(calls);
-  await worker.fetch(updateRequest(keyCallback("k|cl", "x\n\n▸ ⲁⲃ▏")), env);
-  assert.match(calls.find((call) => call.url.endsWith("/editMessageText")).payload.text, /▸ ▏/u);
+  calls = await kbSay(kvEnv, "ϣ", 12);
+  assert.match(edits(calls)[0].text, /▸ ⲁϣ▏/u);
+  calls = await kbSay(kvEnv, "␣ مسافة", 13);
+  assert.match(edits(calls)[0].text, /▸ ⲁϣ ▏/u);
+  calls = await kbSay(kvEnv, "ⲃ", 14);
+  assert.match(edits(calls)[0].text, /▸ ⲁϣ ⲃ▏/u);
+  calls = await kbSay(kvEnv, "⌫ حذف", 15);
+  assert.match(edits(calls)[0].text, /▸ ⲁϣ ▏/u);
+  calls = await kbSay(kvEnv, "🗑 مسح", 16);
+  assert.match(edits(calls)[0].text, /▸ ▏/u);
 });
 
-test("keyboard search runs the composed word and an empty word shows an alert", async () => {
-  let calls = [];
-  fakeTelegramApi(calls);
-  await worker.fetch(updateRequest(keyCallback("k|go", "x\n\n▸ ⲁⲃⲁϫⲓⲛⲓ▏")), env);
-  const result = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
-  assert.equal(result.chat_id, 31);
-  assert.match(result.text, /ⲁⲃⲁϫⲓⲛⲓ/u);
+test("🔎 بحث searches the collected word then opens a fresh composition message", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await kbSay(kvEnv, "/keyboard");
+  for (const letter of "ⲁⲃⲁϫⲓⲛⲓ") await kbSay(kvEnv, letter);
+  const calls = await kbSay(kvEnv, "🔎 بحث", 40);
   assert.ok(calls.some((call) => call.url.endsWith("/sendChatAction")));
+  const messages = sent(calls);
+  assert.match(messages[0].text, /ⲁⲃⲁϫⲓⲛⲓ/u);
+  assert.match(messages.at(-1).text, /▸ ▏/u);
+  assert.equal(kvEnv.USERS.store.get("user:31").kb.word, "");
+});
 
-  calls = [];
-  fakeTelegramApi(calls);
-  await worker.fetch(updateRequest(keyCallback("k|go", "x\n\n▸ ▏")), env);
-  const alert = calls.find((call) => call.url.endsWith("/answerCallbackQuery")).payload;
-  assert.equal(alert.show_alert, true);
-  assert.ok(!calls.some((call) => call.url.endsWith("/sendMessage")));
+test("🔎 بحث with no letters asks for a word and does not search", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await kbSay(kvEnv, "/keyboard");
+  const calls = await kbSay(kvEnv, "🔎 بحث");
+  assert.match(sent(calls)[0].text, /اكتب كلمة أولًا/u);
+  assert.ok(!calls.some((call) => call.url.endsWith("/sendChatAction")));
+});
+
+test("✖️ إغلاق ends the session and removes the keyboard", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await kbSay(kvEnv, "/keyboard");
+  const calls = await kbSay(kvEnv, "✖️ إغلاق");
+  assert.equal(sent(calls)[0].reply_markup.remove_keyboard, true);
+  assert.equal(kvEnv.USERS.store.get("user:31").kb, undefined);
+});
+
+test("without a keyboard session a typed letter is a normal search, and a real word still searches during a session", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  let calls = await kbSay(kvEnv, "ⲁⲃ");
+  assert.equal(sent(calls)[0].text, "اختر من الاقتراحات التالية:");
+  await kbSay(kvEnv, "/keyboard");
+  calls = await kbSay(kvEnv, "abagini");
+  assert.match(sent(calls)[0].text, /ⲁⲃⲁϫⲓⲛⲓ/u);
 });
 
 test("typing plain ⲉ finds headwords written with accented ὲ, and backticks are ignored", async () => {

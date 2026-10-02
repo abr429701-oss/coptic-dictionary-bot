@@ -5,7 +5,6 @@ const BOT_TITLE = "📖 القاموس القبطي البحيري";
 const PAGE_SIZE = 1;
 const MAX_MESSAGE_LENGTH = 3900;
 const CALLBACK_DATA_MAX_BYTES = 64;
-const WELCOME_MARKUP = { inline_keyboard: [[{ text: "⌨️ الكيبورد القبطي", callback_data: "k|open" }]] };
 const FIRST_TIME_TEXT =
   "مرحبًا بك! يبدو أنك تستخدم البوت لأول مرة, الرجاء إدخال اسمك ثلاثي للبدء في استخدام القاموس القبطي الناطق";
 const NAME_RETRY_TEXT = "الرجاء إدخال اسمك ثلاثيًا (ثلاث كلمات على الأقل) بالحروف فقط، مثل: مينا جرجس بشرى.";
@@ -280,11 +279,27 @@ export class UserStore {
   }
 
   async fetch(request) {
-    const { op, key, value } = await request.json();
-    if (op === "get") return Response.json({ value: (await this.state.storage.get(key)) ?? null });
+    const { op, key, value, userId, input, kb } = await request.json();
+    const storage = this.state.storage;
+    if (op === "get") return Response.json({ value: (await storage.get(key)) ?? null });
     if (op === "put") {
-      await this.state.storage.put(key, value);
+      await storage.put(key, value);
       return Response.json({ ok: true });
+    }
+    const userKey = `user:${userId}`;
+    if (op === "kbstep") {
+      // Read-modify-write inside the object so rapid taps never overwrite each other.
+      const user = (await storage.get(userKey)) ?? {};
+      if (!user.kb) return Response.json({ active: false });
+      const word = applyKeyboardAction(user.kb.word, input);
+      await storage.put(userKey, { ...user, kb: { ...user.kb, word } });
+      return Response.json({ active: true, word, previous: user.kb.word, msgId: user.kb.msgId });
+    }
+    if (op === "kbset") {
+      const user = (await storage.get(userKey)) ?? {};
+      const { kb: previous, ...rest } = user;
+      await storage.put(userKey, kb ? { ...rest, kb } : rest);
+      return Response.json({ ok: true, previous: previous ?? null });
     }
     return new Response("Bad request", { status: 400 });
   }
@@ -334,7 +349,6 @@ async function sendWelcome(env, chatId, name) {
     form.append("chat_id", String(chatId));
     form.append("caption", caption);
     form.append("parse_mode", "HTML");
-    form.append("reply_markup", JSON.stringify(WELCOME_MARKUP));
     form.append("photo", new Blob([bytes], { type: "image/jpeg" }), "welcome.jpg");
     const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, {
       method: "POST",
@@ -346,10 +360,13 @@ async function sendWelcome(env, chatId, name) {
   } catch (error) {
     console.error("Welcome photo failed", error instanceof Error ? error.message : "unknown error");
   }
-  await telegram(env, "sendMessage", { chat_id: chatId, text: caption, parse_mode: "HTML", reply_markup: WELCOME_MARKUP });
+  await telegram(env, "sendMessage", { chat_id: chatId, text: caption, parse_mode: "HTML" });
 }
 
-// ---- Coptic on-screen keyboard (stateless: the word being typed lives in the message text) ----
+// ---- Coptic reply keyboard ----
+// Tapping a button on a reply keyboard sends its text as a normal message. While a keyboard session is
+// active, those taps are collected into a word (kept in the user's record), the tap message is deleted,
+// and one "composition" message is edited in place. "بحث" then searches the collected word.
 const COPTIC_KEY_ROWS = [
   ["ⲁ", "ⲃ", "ⲅ", "ⲇ", "ⲉ", "ⲍ"],
   ["ⲏ", "ⲑ", "ⲓ", "ⲕ", "ⲗ", "ⲙ"],
@@ -358,83 +375,111 @@ const COPTIC_KEY_ROWS = [
   ["ϣ", "ϥ", "ϧ", "ϩ", "ϫ", "ϭ", "ϯ"],
 ];
 const COPTIC_KEYS = new Set([...COPTIC_KEY_ROWS.flat(), "`"]);
-const KEYBOARD_TITLE = "⌨️ الكيبورد القبطي\nاضغط الحروف لتكوين الكلمة ثم اضغط «بحث»";
+const KEY_SPACE = "␣ مسافة";
+const KEY_BACK = "⌫ حذف";
+const KEY_CLEAR = "🗑 مسح";
+const KEY_SEARCH = "🔎 بحث";
+const KEY_CLOSE = "✖️ إغلاق";
+const KEYBOARD_CONTROLS = new Set([KEY_SPACE, KEY_BACK, KEY_CLEAR, KEY_SEARCH, KEY_CLOSE]);
+const KEYBOARD_TITLE = "⌨️ الكيبورد القبطي\nاضغط الحروف لتكوين الكلمة ثم اضغط «🔎 بحث»";
 const KEYBOARD_MAX_LENGTH = 40;
 
-function keyboardMarkup() {
-  const rows = COPTIC_KEY_ROWS.map((row) => row.map((key) => ({ text: key, callback_data: `k|${key}` })));
-  rows.push([
-    { text: "`", callback_data: "k|`" },
-    { text: "␣ مسافة", callback_data: "k|sp" },
-    { text: "⌫ حذف", callback_data: "k|bs" },
-    { text: "🗑 مسح", callback_data: "k|cl" },
-  ]);
-  rows.push([
-    { text: "🔎 بحث", callback_data: "k|go" },
-    { text: "✖️ إغلاق", callback_data: "k|x" },
-  ]);
-  return { inline_keyboard: rows };
+function keyboardReplyMarkup() {
+  const rows = COPTIC_KEY_ROWS.map((row) => row.map((text) => ({ text })));
+  rows.push([{ text: "`" }, { text: KEY_SPACE }, { text: KEY_BACK }, { text: KEY_CLEAR }]);
+  rows.push([{ text: KEY_SEARCH }, { text: KEY_CLOSE }]);
+  return {
+    keyboard: rows,
+    resize_keyboard: true,
+    is_persistent: true,
+    input_field_placeholder: "اضغط الحروف ثم 🔎 بحث",
+  };
 }
 
 function keyboardText(word) {
   return `${KEYBOARD_TITLE}\n\n▸ ${word}▏`;
 }
 
-function wordFromKeyboardMessage(text) {
-  const line = String(text ?? "").split("\n").find((item) => item.startsWith("▸"));
-  return line ? line.replace(/^▸ ?/u, "").replace(/▏$/u, "") : "";
+function isKeyboardInput(text) {
+  return COPTIC_KEYS.has(text) || KEYBOARD_CONTROLS.has(text);
 }
 
-async function sendKeyboard(env, chatId) {
-  await telegram(env, "sendMessage", { chat_id: chatId, text: keyboardText(""), reply_markup: keyboardMarkup() });
+function applyKeyboardAction(word, input) {
+  const current = String(word ?? "");
+  if (input === KEY_BACK) return Array.from(current).slice(0, -1).join("");
+  if (input === KEY_CLEAR) return "";
+  if (input === KEY_SPACE) return current && !current.endsWith(" ") ? `${current} ` : current;
+  if (COPTIC_KEYS.has(input)) return Array.from(current).length < KEYBOARD_MAX_LENGTH ? current + input : current;
+  return current;
 }
 
-async function handleKeyboardCallback(env, callback) {
-  const action = String(callback.data ?? "").slice(2);
-  const chatId = callback.message?.chat?.id;
-  const messageId = callback.message?.message_id;
-  const answer = (extra = {}) => telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, ...extra });
-  if (!chatId) return answer();
-  if (action === "open") {
-    await answer();
-    return sendKeyboard(env, chatId);
-  }
-  if (!messageId) return answer();
-  const current = wordFromKeyboardMessage(callback.message.text);
-  if (action === "go") {
-    const query = current.trim();
-    if (!query) return answer({ text: "اكتب كلمة أولًا باستخدام الحروف", show_alert: true });
-    await answer();
-    await showTyping(env, chatId);
-    return sendSearch(env, chatId, query);
-  }
-  if (action === "x") {
-    await answer();
-    return telegram(env, "deleteMessage", { chat_id: chatId, message_id: messageId });
-  }
-  let word = current;
-  if (action === "bs") word = Array.from(current).slice(0, -1).join("");
-  else if (action === "cl") word = "";
-  else if (action === "sp") word = current && !current.endsWith(" ") ? `${current} ` : current;
-  else if (COPTIC_KEYS.has(action)) word = Array.from(current).length < KEYBOARD_MAX_LENGTH ? current + action : current;
-  else return answer();
-  await answer();
-  if (word === current) return undefined;
-  return telegram(env, "editMessageText", {
+async function startKeyboard(env, chatId, userId) {
+  const sent = await telegram(env, "sendMessage", {
     chat_id: chatId,
-    message_id: messageId,
-    text: keyboardText(word),
-    reply_markup: keyboardMarkup(),
+    text: keyboardText(""),
+    reply_markup: keyboardReplyMarkup(),
   });
+  await storeCall(env, { op: "kbset", userId, kb: { word: "", msgId: sent?.result?.message_id ?? null } });
+}
+
+async function handleKeyboardInput(env, message, userId) {
+  const chatId = message.chat.id;
+  const text = String(message.text ?? "").trim();
+  const dropTap = () => telegram(env, "deleteMessage", { chat_id: chatId, message_id: message.message_id });
+
+  if (text === KEY_CLOSE) {
+    const state = await storeCall(env, { op: "kbset", userId, kb: null });
+    await dropTap();
+    if (state?.previous?.msgId) {
+      await telegram(env, "deleteMessage", { chat_id: chatId, message_id: state.previous.msgId });
+    }
+    await telegram(env, "sendMessage", {
+      chat_id: chatId,
+      text: "تم إخفاء الكيبورد القبطي. أرسل /keyboard لإظهاره من جديد.",
+      reply_markup: { remove_keyboard: true },
+    });
+    return;
+  }
+
+  const step = await storeCall(env, { op: "kbstep", userId, input: text });
+  if (!step.active) {
+    // A leftover keyboard button with no active session: start a fresh session.
+    await dropTap();
+    await startKeyboard(env, chatId, userId);
+    return;
+  }
+  await dropTap();
+
+  if (text === KEY_SEARCH) {
+    const query = step.word.trim();
+    if (!query) {
+      await telegram(env, "sendMessage", { chat_id: chatId, text: "اكتب كلمة أولًا باستخدام الحروف ثم اضغط «🔎 بحث»." });
+      return;
+    }
+    await showTyping(env, chatId);
+    await sendSearch(env, chatId, query);
+    // Continue below the results with a fresh, empty composition message.
+    const sent = await telegram(env, "sendMessage", { chat_id: chatId, text: keyboardText("") });
+    await storeCall(env, { op: "kbset", userId, kb: { word: "", msgId: sent?.result?.message_id ?? null } });
+    return;
+  }
+
+  if (step.word === step.previous) return;
+  const edit = await telegram(env, "editMessageText", {
+    chat_id: chatId,
+    message_id: step.msgId,
+    text: keyboardText(step.word),
+  });
+  if (!edit?.ok && !String(edit?.description ?? "").includes("not modified")) {
+    // The composition message was deleted by the user: recreate it.
+    const sent = await telegram(env, "sendMessage", { chat_id: chatId, text: keyboardText(step.word) });
+    await storeCall(env, { op: "kbset", userId, kb: { word: step.word, msgId: sent?.result?.message_id ?? null } });
+  }
 }
 
 async function handleUpdate(update, env) {
   if (update.callback_query) {
     const callback = update.callback_query;
-    if (String(callback.data ?? "").startsWith("k|")) {
-      await handleKeyboardCallback(env, callback);
-      return;
-    }
     await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
     const pick = /^s\|(\d{1,6})(?:\|(\d{1,3}))?$/u.exec(callback.data ?? "");
     if (pick) {
@@ -469,7 +514,7 @@ async function handleUpdate(update, env) {
     return;
   }
   if (text === "/keyboard" || text === "/k") {
-    await sendKeyboard(env, message.chat.id);
+    await startKeyboard(env, message.chat.id, userId);
     return;
   }
   if (text === "/help") {
@@ -507,6 +552,15 @@ async function handleUpdate(update, env) {
       const name = text.replace(/\s+/gu, " ").trim();
       await saveUser(env, userId, { name, registeredAt: new Date().toISOString() });
       await sendWelcome(env, message.chat.id, name);
+      return;
+    }
+    if (user?.kb && isKeyboardInput(text)) {
+      await handleKeyboardInput(env, message, userId);
+      return;
+    }
+    if (KEYBOARD_CONTROLS.has(text)) {
+      // Leftover keyboard button after a restart/close: reopen a session instead of searching the label.
+      await handleKeyboardInput(env, message, userId);
       return;
     }
     await showTyping(env, message.chat.id);
