@@ -16,8 +16,6 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-from build_index import arabic_pronunciation  # noqa: E402
 
 SHEET_ID = os.environ.get("SHEET_ID", "1kXVA3CNgETqym5Vz3lBUu_2gZ01QNdx7ROtGVnIJp0c")
 SHEET_GID = os.environ.get("SHEET_GID", "")
@@ -77,15 +75,11 @@ def main() -> None:
         }
         if not any(record.values()):
             continue
-        record["arabic_pronunciation"] = arabic_pronunciation(record["phonetic"] or record["pronunciation"])
         records.append(record)
 
     if len(records) < MIN_RECORDS:
         raise SystemExit(f"Only {len(records)} records found (< {MIN_RECORDS}); refusing to overwrite the data.")
 
-    ordered_keys = ["coptic", "greek", "pronunciation", "english", "phonetic",
-                    "arabic_pronunciation", "kind", "gender", "origin", "meaning"]
-    records = [{key: record[key] for key in ordered_keys} for record in records]
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps(records, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
     print(f"Wrote {len(records):,} records ({OUT.stat().st_size / 1e6:.2f} MB) to {OUT}")

@@ -159,3 +159,12 @@ test("tapping a suggestion sends the full entry", async () => {
   assert.equal(message.chat_id, 16);
   assert.match(message.text, /<b>الكلمة:<\/b> /u);
 });
+
+test("Arabic search matches whole words only, never inside a longer word", async () => {
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: "غراب", chat: { id: 17 } } }), env);
+  const text = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
+  assert.match(text, /<b>المعنى:<\/b> [^\n]*غراب/u);
+  assert.doesNotMatch(text, /الاستغراب/u);
+});

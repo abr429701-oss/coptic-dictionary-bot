@@ -16,7 +16,21 @@ function normalize(value) {
     .trim();
 }
 
-const SEARCH_TEXT = records.map((record) => normalize(Object.values(record).join(" ")));
+// Search only the sheet's own text; never derived/generated fields.
+const SEARCH_FIELDS = ["coptic", "greek", "pronunciation", "english", "phonetic"];
+const SEARCH_TEXT = records.map((record) => normalize(SEARCH_FIELDS.map((key) => record[key] ?? "").join(" ")));
+
+const ARABIC_LETTER = /[\u0600-\u06ff]/u;
+
+// Lowercase/strip marks, then keep only letters/digits separated by single spaces.
+function tokens(value) {
+  return normalize(value).replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/gu, " ").trim();
+}
+
+// True when `needle` (already tokenized) appears in `text` as whole word(s), never inside a longer word.
+function hasWholeWords(text, needle) {
+  return needle !== "" && ` ${text} `.includes(` ${needle} `);
+}
 
 const SUGGESTION_PAGE_SIZE = 10;
 const SUGGESTION_TITLE = "اختر من الاقتراحات التالية:";
@@ -25,6 +39,8 @@ const SHORT_QUERY_MAX = 2;
 function splitMeaning(value) {
   return String(value ?? "").split(/\s*[،,]\s*/u).map((part) => part.trim()).filter(Boolean);
 }
+
+const MEANING_TOKENS = records.map((record) => splitMeaning(record.meaning).map(tokens));
 
 // Normalized "word starts" per record: Coptic/Greek/Latin forms and each Arabic meaning.
 const PREFIX_KEYS = records.map((record) => {
@@ -85,7 +101,10 @@ function formatRecord(record, query = "") {
   let meaning = parts.join("، ");
   let related = [];
   if (normalizedQuery && parts.length > 1) {
-    const matched = parts.filter((part) => normalize(part).includes(normalizedQuery));
+    const needle = tokens(normalizedQuery);
+    const matched = ARABIC_LETTER.test(normalizedQuery)
+      ? parts.filter((part) => hasWholeWords(tokens(part), needle))
+      : [];
     if (matched.length && matched.length < parts.length) {
       meaning = matched.join("، ");
       related = parts.filter((part) => !matched.includes(part));
@@ -110,6 +129,23 @@ function findMatches(query) {
   const normalizedQuery = normalize(query);
   if (!normalizedQuery) return [];
   const matches = [];
+  if (ARABIC_LETTER.test(normalizedQuery)) {
+    // Arabic: match the sheet's meanings only, as whole words/phrases (never inside a longer word).
+    const needle = tokens(normalizedQuery);
+    if (!needle) return [];
+    const exact = [];
+    for (let index = 0; index < MEANING_TOKENS.length; index += 1) {
+      let found = false;
+      let isExact = false;
+      for (const item of MEANING_TOKENS[index]) {
+        if (item === needle) { isExact = true; break; }
+        if (hasWholeWords(item, needle)) found = true;
+      }
+      if (isExact) exact.push(index);
+      else if (found) matches.push(index);
+    }
+    return exact.concat(matches);
+  }
   for (let index = 0; index < SEARCH_TEXT.length; index += 1) {
     if (SEARCH_TEXT[index].includes(normalizedQuery)) matches.push(index);
   }
