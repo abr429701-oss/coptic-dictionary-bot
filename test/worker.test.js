@@ -178,7 +178,17 @@ test("Arabic search matches whole words only, never inside a longer word", async
 
 function fakeKv() {
   const store = new Map();
-  return { store, get: async (key) => store.get(key) ?? null, put: async (key, value) => { store.set(key, value); } };
+  return {
+    store,
+    idFromName: (name) => name,
+    get: () => ({
+      fetch: async (_url, options) => {
+        const { op, key, value } = JSON.parse(options.body);
+        if (op === "put") { store.set(key, value); return Response.json({ ok: true }); }
+        return Response.json({ value: store.get(key) ?? null });
+      },
+    }),
+  };
 }
 
 async function say(envWithKv, userId, text) {
@@ -206,7 +216,7 @@ test("/start asks a new user for a three-part name, then welcomes with a photo",
 
 test("/start greets a returning user by the saved name with the photo", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  kvEnv.USERS.store.set("user:22", JSON.stringify({ name: "بيشوي مجدي فرج" }));
+  kvEnv.USERS.store.set("user:22", { name: "بيشوي مجدي فرج" });
   const calls = await say(kvEnv, 22, "/start");
   const photo = calls.find((call) => call.url.endsWith("/sendPhoto")).payload;
   assert.match(photo.caption, /مرحبًا بك يا بيشوي مجدي فرج في القاموس الرقمي الناطق/u);
@@ -215,7 +225,7 @@ test("/start greets a returning user by the saved name with the photo", async ()
 
 test("if the photo cannot be sent the welcome falls back to text", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  kvEnv.USERS.store.set("user:23", JSON.stringify({ name: "أبانوب سمير حنا" }));
+  kvEnv.USERS.store.set("user:23", { name: "أبانوب سمير حنا" });
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url: String(url), payload: options.body ? JSON.parse(options.body) : null });

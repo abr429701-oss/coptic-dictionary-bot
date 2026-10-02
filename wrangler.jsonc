@@ -4,9 +4,10 @@
   "main": "src/index.js",
   "compatibility_date": "2026-10-02",
   "workers_dev": true,
-  "kv_namespaces": [
-    { "binding": "USERS" }
-  ],
+  "durable_objects": {
+    "bindings": [{ "name": "USERS", "class_name": "UserStore" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["UserStore"] }],
   "observability": {
     "enabled": true
   }

@@ -265,11 +265,33 @@ async function sendRecord(env, chatId, index, partIndex = -1) {
   await sendWordVoice(env, chatId, record);
 }
 
+// Registered users live in one SQLite-backed Durable Object (no extra Cloudflare token permission needed).
+export class UserStore {
+  constructor(state) {
+    this.state = state;
+  }
+
+  async fetch(request) {
+    const { op, key, value } = await request.json();
+    if (op === "get") return Response.json({ value: (await this.state.storage.get(key)) ?? null });
+    if (op === "put") {
+      await this.state.storage.put(key, value);
+      return Response.json({ ok: true });
+    }
+    return new Response("Bad request", { status: 400 });
+  }
+}
+
+async function storeCall(env, payload) {
+  const stub = env.USERS.get(env.USERS.idFromName("users"));
+  const response = await stub.fetch("https://user-store/", { method: "POST", body: JSON.stringify(payload) });
+  return response.json();
+}
+
 async function getUser(env, userId) {
   if (!env.USERS) return null;
   try {
-    const raw = await env.USERS.get(`user:${userId}`);
-    return raw ? JSON.parse(raw) : null;
+    return (await storeCall(env, { op: "get", key: `user:${userId}` })).value ?? null;
   } catch (error) {
     console.error("User lookup failed", error instanceof Error ? error.message : "unknown error");
     return null;
@@ -279,7 +301,7 @@ async function getUser(env, userId) {
 async function saveUser(env, userId, data) {
   if (!env.USERS) return false;
   try {
-    await env.USERS.put(`user:${userId}`, JSON.stringify(data));
+    await storeCall(env, { op: "put", key: `user:${userId}`, value: data });
     return true;
   } catch (error) {
     console.error("User save failed", error instanceof Error ? error.message : "unknown error");
@@ -329,7 +351,7 @@ async function handleUpdate(update, env) {
   const userId = message.from?.id ?? message.chat.id;
   if (text === "/start" || text.startsWith("/start ")) {
     if (!env.USERS) {
-      // No KV namespace bound yet: registration is unavailable, so fall back to the plain help text.
+      // No user store bound: registration is unavailable, so fall back to the plain help text.
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: HELP_TEXT });
       return;
     }
