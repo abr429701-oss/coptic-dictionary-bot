@@ -11,7 +11,10 @@ function fakeTelegramApi(calls) {
   globalThis.fetch = async (url, options = {}) => {
     const body = options.body;
     const payload = !body ? null : typeof body === "string" ? JSON.parse(body) : Object.fromEntries(body.entries());
-    calls.push({ url: String(url), options, payload });
+    const isNotice = String(url).endsWith("/sendMessage") && String(payload?.chat_id) === "813894692" &&
+      /^(🆕|✅ أكمل التسجيل)/u.test(payload?.text ?? "");
+    if (isNotice) (calls.notices ??= []).push(payload);
+    else calls.push({ url: String(url), options, payload });
     return Response.json({ ok: true, result: { message_id: 900 } });
   };
 }
@@ -454,4 +457,31 @@ test("anyone who messages the bot is registered so broadcasts can reach them", a
   const kvEnv = { ...env, USERS: fakeKv() };
   await asUser(kvEnv, 401, { text: "abagini" });
   assert.ok(kvEnv.USERS.store.get("user:401").firstSeen);
+});
+
+test("admin is told when a new user joins, once, with name, username and total", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const first = await asUser(kvEnv, 701, { text: "abagini", from: { id: 701, first_name: "مينا", last_name: "جرجس", username: "mina_g" } });
+  assert.equal(first.notices.length, 1);
+  assert.match(first.notices[0].text, /انضم مستخدم جديد/u);
+  assert.match(first.notices[0].text, /مينا جرجس/u);
+  assert.match(first.notices[0].text, /@mina_g/u);
+  assert.match(first.notices[0].text, /<code>701<\/code>/u);
+  assert.match(first.notices[0].text, /إجمالي المستخدمين: 1/u);
+
+  const again = await asUser(kvEnv, 701, { text: "abagini", from: { id: 701, first_name: "مينا" } });
+  assert.equal(again.notices, undefined);
+
+  const second = await asUser(kvEnv, 702, { text: "/start", from: { id: 702, first_name: "بيشوي" } });
+  assert.match(second.notices[0].text, /إجمالي المستخدمين: 2/u);
+});
+
+test("admin gets the registered name when a user completes registration; the admin's own messages announce nothing", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await asUser(kvEnv, 703, { text: "/start", from: { id: 703, first_name: "x" } });
+  const done = await asUser(kvEnv, 703, { text: "أبانوب سمير حنا", from: { id: 703, first_name: "x" } });
+  assert.match(done.notices[0].text, /أكمل التسجيل: <b>أبانوب سمير حنا<\/b>/u);
+
+  const own = await asUser(kvEnv, ADMIN, { text: "abagini", from: { id: ADMIN, first_name: "owner" } });
+  assert.equal(own.notices, undefined);
 });

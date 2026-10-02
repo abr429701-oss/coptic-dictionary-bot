@@ -341,6 +341,16 @@ export class UserStore {
       await storage.put(key, value);
       return Response.json({ ok: true });
     }
+    if (op === "register") {
+      // Atomic "first contact" check so two quick messages never announce the same user twice.
+      const existing = await storage.get(`user:${userId}`);
+      if (!existing) {
+        await storage.put(`user:${userId}`, { firstSeen: new Date().toISOString() });
+        return Response.json({ created: true, total: (await storage.list({ prefix: "user:" })).size });
+      }
+      if (existing.blocked) await storage.put(`user:${userId}`, { ...existing, blocked: false });
+      return Response.json({ created: false });
+    }
     if (op === "bccount") return Response.json({ count: (await this.recipients(exclude)).length });
     if (op === "bcstatus") {
       const job = await storage.get("broadcast");
@@ -555,6 +565,36 @@ function isAdmin(env, userId) {
   return adminIds(env).includes(String(userId));
 }
 
+function displayName(person) {
+  return [person?.first_name, person?.last_name].filter(Boolean).join(" ").trim() || "بدون اسم";
+}
+
+async function notifyAdmins(env, text) {
+  for (const id of adminIds(env)) {
+    await telegram(env, "sendMessage", { chat_id: id, text, parse_mode: "HTML" });
+  }
+}
+
+async function registerOnFirstContact(env, message, userId) {
+  if (isAdmin(env, userId) || (message.chat.type ?? "private") !== "private" || !env.USERS) return;
+  let result;
+  try {
+    result = await storeCall(env, { op: "register", userId });
+  } catch (error) {
+    console.error("Register failed", error instanceof Error ? error.message : "unknown error");
+    return;
+  }
+  if (!result?.created) return;
+  const from = message.from ?? {};
+  await notifyAdmins(env, [
+    "🆕 <b>انضم مستخدم جديد إلى البوت</b>",
+    `👤 الاسم: ${escapeHtml(displayName(from))}`,
+    `🔗 المعرّف: ${from.username ? `@${escapeHtml(from.username)}` : "—"}`,
+    `🆔 الرقم: <code>${escapeHtml(userId)}</code>`,
+    `👥 إجمالي المستخدمين: ${Number(result.total ?? 0).toLocaleString("en-US")}`,
+  ].join("\n"));
+}
+
 const BROADCAST_CONFIRM_MARKUP = {
   inline_keyboard: [[
     { text: "✅ تأكيد الإرسال", callback_data: "bc|go" },
@@ -650,6 +690,7 @@ async function handleUpdate(update, env) {
   const text = String(message.text ?? "").trim();
   const userId = message.from?.id ?? message.chat.id;
   const isPrivate = (message.chat.type ?? "private") === "private";
+  await registerOnFirstContact(env, message, userId);
   if (isAdmin(env, userId) && isPrivate) {
     const admin = await getUser(env, userId);
     if (text === "/cancel" && admin?.bc) {
@@ -712,17 +753,17 @@ async function handleUpdate(update, env) {
   }
   if (text) {
     const user = await getUser(env, userId);
-    if (isPrivate && (!user || user.blocked)) {
-      await saveUser(env, userId, { ...user, blocked: false, firstSeen: user?.firstSeen ?? new Date().toISOString() });
-    }
     if (user?.awaitingName) {
       if (!isValidFullName(text)) {
         await telegram(env, "sendMessage", { chat_id: message.chat.id, text: NAME_RETRY_TEXT });
         return;
       }
       const name = text.replace(/\s+/gu, " ").trim();
-      await saveUser(env, userId, { name, registeredAt: new Date().toISOString() });
+      await saveUser(env, userId, { ...user, name, awaitingName: undefined, registeredAt: new Date().toISOString() });
       await sendWelcome(env, message.chat.id, name);
+      if (!isAdmin(env, userId)) {
+        await notifyAdmins(env, `✅ أكمل التسجيل: <b>${escapeHtml(name)}</b> (🆔 <code>${escapeHtml(userId)}</code>)`);
+      }
       return;
     }
     if (user?.kb && isKeyboardInput(text)) {
