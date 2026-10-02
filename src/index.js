@@ -299,6 +299,48 @@ async function sendWordVoice(env, chatId, record) {
   return sendPreparedVoice(env, chatId, record, prepareWordVoice(env, record));
 }
 
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length)));
+  }
+  return btoa(binary);
+}
+
+async function archiveVoiceRecording(env, message, record) {
+  if (!env.APPS_SCRIPT_URL || !env.APPS_SCRIPT_SECRET || !message?.voice?.file_id) return;
+  try {
+    const fileInfo = await telegram(env, "getFile", { file_id: message.voice.file_id });
+    const filePath = fileInfo?.ok ? fileInfo.result?.file_path : null;
+    if (!filePath) throw new Error("Telegram did not return a file path");
+    const audioResponse = await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${filePath}`, {
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!audioResponse.ok) throw new Error(`Telegram file download failed: ${audioResponse.status}`);
+    const audio = await audioResponse.arrayBuffer();
+    const archiveResponse = await fetch(env.APPS_SCRIPT_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        secret: env.APPS_SCRIPT_SECRET,
+        audio_base64: arrayBufferToBase64(audio),
+        mime_type: "audio/ogg",
+        word: record?.coptic ?? "",
+        file_id: message.voice.file_id,
+        duration: message.voice.duration ?? "",
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+    const result = await archiveResponse.json().catch(() => ({}));
+    if (!archiveResponse.ok || !result.ok) throw new Error(result.error || `Apps Script failed: ${archiveResponse.status}`);
+    console.log("Voice archived", { word: record?.coptic ?? "", fileId: result.file_id });
+  } catch (error) {
+    console.error("Voice archive failed", error instanceof Error ? error.message : "unknown error");
+  }
+}
+
 async function showTyping(env, chatId, delayMs = TYPING_DELAY_MS) {
   await telegram(env, "sendChatAction", { chat_id: chatId, action: "typing" });
   if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -738,6 +780,7 @@ async function captureVoiceRecording(env, message, userId, user) {
     key: voiceKey(id),
     value: { fileId: message.voice.file_id, duration: message.voice.duration ?? null, savedAt: new Date().toISOString() },
   });
+  await archiveVoiceRecording(env, message, record);
   await telegram(env, "sendMessage", {
     chat_id: message.chat.id,
     text: `✅ تم حفظ تسجيل <b>${escapeHtml(record.coptic ?? "الكلمة")}</b>.`,

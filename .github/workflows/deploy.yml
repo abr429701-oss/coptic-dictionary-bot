@@ -64,6 +64,8 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+      APPS_SCRIPT_SECRET: ${{ secrets.APPS_SCRIPT_SECRET }}
       SETUP_WEBHOOK: ${{ github.event_name == 'workflow_dispatch' && inputs.setup_webhook != 'false' }}
     steps:
       - name: Check out repository (latest main)
@@ -79,7 +81,7 @@ jobs:
 
       - name: Validate required secrets and variables
         run: |
-          keys="CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID"
+          keys="CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID APPS_SCRIPT_URL APPS_SCRIPT_SECRET"
           if [ "$SETUP_WEBHOOK" = "true" ]; then keys="$keys TELEGRAM_BOT_TOKEN"; fi
           for key in $keys; do
             if [ -z "${!key}" ]; then echo "Missing GitHub secret/variable: $key"; exit 1; fi
@@ -118,6 +120,11 @@ jobs:
         run: |
           printf '%s' "$TELEGRAM_BOT_TOKEN" | npx wrangler secret put TELEGRAM_BOT_TOKEN --name coptic-dictionary-bot
           printf '%s' "$WEBHOOK_SECRET" | npx wrangler secret put WEBHOOK_SECRET --name coptic-dictionary-bot
+
+      - name: Store Apps Script archive secrets on the Worker
+        run: |
+          printf '%s' "$APPS_SCRIPT_URL" | npx wrangler secret put APPS_SCRIPT_URL --name coptic-dictionary-bot
+          printf '%s' "$APPS_SCRIPT_SECRET" | npx wrangler secret put APPS_SCRIPT_SECRET --name coptic-dictionary-bot
 
       - name: Register Telegram webhook
         if: ${{ env.SETUP_WEBHOOK == 'true' }}
