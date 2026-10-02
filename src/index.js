@@ -13,34 +13,45 @@ const FIRST_TIME_TEXT =
 const NAME_RETRY_TEXT = "الرجاء إدخال اسمك ثلاثيًا (ثلاث كلمات على الأقل) بالحروف فقط، مثل: مينا جرجس بشرى.";
 const HELP_TEXT = `${BOT_TITLE}\n\nأهلًا بك في القاموس.\n\nاكتب الكلمة مباشرة، مثل:\nⲁⲛⲁⲩ\nwater\nماء\n\nسأبحث في القبطية والعربية والإنجليزية والنطق والتهجئة.\n\nاكتب حرفًا أو حرفين لتظهر لك اقتراحات بالكلمات التي تبدأ بهما.\n\n⌨️ لا يوجد كيبورد قبطي على جهازك؟ أرسل /keyboard لتكتب الكلمة بالأزرار.`;
 
+const ACCENT_MAP = { ὲ: "ⲉ", έ: "ⲉ", ὶ: "ⲓ", ί: "ⲓ", ὸ: "ⲟ", ό: "ⲟ", ὼ: "ⲱ", ώ: "ⲱ", ὴ: "ⲏ", ή: "ⲏ", ὰ: "ⲁ", ά: "ⲁ", ὺ: "ⲩ", ύ: "ⲩ" };
+const ALEF_MAP = { أ: "ا", إ: "ا", آ: "ا", ٱ: "ا", ى: "ي" };
+
 function normalize(value) {
   return String(value ?? "")
     .normalize("NFKC")
     .toLowerCase()
     .replace(/[\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06edـ]/gu, "")
-    .replace(/[أإآٱ]/gu, "ا")
-    .replace(/ى/gu, "ي")
-    .replace(/[ὲέ]/gu, "ⲉ")
-    .replace(/[ὶί]/gu, "ⲓ")
-    .replace(/[ὸό]/gu, "ⲟ")
-    .replace(/[ὼώ]/gu, "ⲱ")
-    .replace(/[ὴή]/gu, "ⲏ")
-    .replace(/[ὰά]/gu, "ⲁ")
-    .replace(/[ὺύ]/gu, "ⲩ")
-    .replace(/`/gu, "")
+    .replace(/[أإآٱى]/gu, (char) => ALEF_MAP[char])
+    .replace(/[ὲέὶίὸόὼώὴήὰάὺύ`]/gu, (char) => ACCENT_MAP[char] ?? "")
     .replace(/\s+/gu, " ")
     .trim();
 }
 
+// Build heavy structures only when first needed (cold starts and the user store never pay for them).
+function lazy(build) {
+  let value;
+  let ready = false;
+  return () => {
+    if (!ready) {
+      value = build();
+      ready = true;
+    }
+    return value;
+  };
+}
+
 // Search only the sheet's own text; never derived/generated fields.
 const SEARCH_FIELDS = ["coptic", "greek", "pronunciation", "english", "phonetic"];
-const SEARCH_TEXT = records.map((record) => normalize(SEARCH_FIELDS.map((key) => record[key] ?? "").join(" ")));
 
 const ARABIC_LETTER = /[\u0600-\u06ff]/u;
 
 // Lowercase/strip marks, then keep only letters/digits separated by single spaces.
+function toTokens(normalized) {
+  return normalized.replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/gu, " ").trim();
+}
+
 function tokens(value) {
-  return normalize(value).replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/gu, " ").trim();
+  return toTokens(normalize(value));
 }
 
 // True when `needle` (already tokenized) appears in `text` as whole word(s), never inside a longer word.
@@ -56,20 +67,26 @@ function splitMeaning(value) {
   return String(value ?? "").split(/\s*[،,]\s*/u).map((part) => part.trim()).filter(Boolean);
 }
 
-const MEANING_TOKENS = records.map((record) => splitMeaning(record.meaning).map(tokens));
-
-// Normalized "word starts" per record: Coptic/Greek/Latin forms and each Arabic meaning.
-const PREFIX_KEYS = records.map((record) => {
-  const keys = [record.coptic, record.greek, record.english, record.phonetic]
-    .map((value) => normalize(value).replaceAll("`", ""));
-  for (const part of splitMeaning(record.meaning)) keys.push(normalize(part));
-  return keys.filter(Boolean);
+// Normalized text, tokenized meanings and "word starts" per record, built once per isolate on first search.
+const searchIndex = lazy(() => {
+  const text = [];
+  const meaning = [];
+  const prefix = [];
+  for (const record of records) {
+    text.push(normalize(SEARCH_FIELDS.map((key) => record[key] ?? "").join(" ")));
+    const parts = splitMeaning(record.meaning).map(normalize);
+    meaning.push(parts.map(toTokens));
+    const keys = [record.coptic, record.greek, record.english, record.phonetic].map(normalize);
+    prefix.push(keys.concat(parts).filter(Boolean));
+  }
+  return { text, meaning, prefix };
 });
 
 function findPrefixMatches(normalizedQuery) {
   const matches = [];
-  for (let index = 0; index < PREFIX_KEYS.length; index += 1) {
-    const keys = PREFIX_KEYS[index];
+  const { prefix } = searchIndex();
+  for (let index = 0; index < prefix.length; index += 1) {
+    const keys = prefix[index];
     for (let k = 0; k < keys.length; k += 1) {
       if (keys[k].startsWith(normalizedQuery)) {
         matches.push(index);
@@ -165,10 +182,11 @@ function findMatches(query) {
     const needle = tokens(normalizedQuery);
     if (!needle) return [];
     const exact = [];
-    for (let index = 0; index < MEANING_TOKENS.length; index += 1) {
+    const { meaning: meaningTokens } = searchIndex();
+    for (let index = 0; index < meaningTokens.length; index += 1) {
       let found = false;
       let isExact = false;
-      for (const item of MEANING_TOKENS[index]) {
+      for (const item of meaningTokens[index]) {
         if (item === needle) { isExact = true; break; }
         if (hasWholeWords(item, needle)) found = true;
       }
@@ -177,13 +195,14 @@ function findMatches(query) {
     }
     return exact.concat(matches);
   }
-  for (let index = 0; index < SEARCH_TEXT.length; index += 1) {
-    if (SEARCH_TEXT[index].includes(normalizedQuery)) matches.push(index);
+  const { text: allText } = searchIndex();
+  for (let index = 0; index < allText.length; index += 1) {
+    if (allText[index].includes(normalizedQuery)) matches.push(index);
   }
   return matches;
 }
 
-const TYPING_DELAY_MS = 900;
+const TYPING_DELAY_MS = 0; // raise (e.g. 400) for a longer visible "typing…"
 
 async function telegram(env, method, payload) {
   const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
@@ -198,28 +217,9 @@ async function telegram(env, method, payload) {
   return result;
 }
 
-async function sendWordVoice(env, chatId, record, recordIndex = -1) {
-  const captionWord = String(record?.coptic ?? "").trim();
-  if (env.USERS && recordIndex >= 0) {
-    try {
-      const saved = await storeCall(env, { op: "get", key: `voice:${recordIndex}` });
-      if (saved?.value?.fileId) {
-        await telegram(env, "sendVoice", {
-          chat_id: chatId,
-          voice: saved.value.fileId,
-          caption: `🔊 ${captionWord}`.slice(0, 1000),
-        });
-        return;
-      }
-    } catch (error) {
-      console.error("Recorded voice lookup failed", error instanceof Error ? error.message : "unknown error");
-    }
-  }
-  const spoken = String(record?.phonetic || record?.english || "").trim().slice(0, 200);
-  if (!spoken) return;
+async function fetchSpeech(spoken) {
   try {
-    const ttsUrl = "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en&q=" +
-      encodeURIComponent(spoken);
+    const ttsUrl = "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en&q=" + encodeURIComponent(spoken);
     const ttsResponse = await fetch(ttsUrl, {
       headers: { "user-agent": "Mozilla/5.0 (compatible; CopticDictionaryBot/1.0)" },
       signal: AbortSignal.timeout(6000),
@@ -227,22 +227,65 @@ async function sendWordVoice(env, chatId, record, recordIndex = -1) {
     const contentType = ttsResponse.headers.get("content-type") ?? "";
     if (!ttsResponse.ok || !contentType.includes("audio")) {
       console.error("TTS fetch failed", ttsResponse.status, contentType);
-      return;
+      return null;
     }
     const audio = await ttsResponse.arrayBuffer();
-    if (!audio.byteLength) return;
+    return audio.byteLength ? audio : null;
+  } catch (error) {
+    console.error("Voice failed", error instanceof Error ? error.message : "unknown error");
+    return null;
+  }
+}
+
+function spokenText(record) {
+  return String(record?.phonetic || record?.english || "").trim().slice(0, 200);
+}
+
+// Starts the lookup (admin recording) or speech generation right away, so it is ready when the text is sent.
+function prepareWordVoice(env, record, recordIndex = -1) {
+  return (async () => {
+    if (env.USERS && recordIndex >= 0) {
+      try {
+        const saved = await storeCall(env, { op: "get", key: `voice:${recordIndex}` });
+        if (saved?.value?.fileId) return { fileId: saved.value.fileId };
+      } catch (error) {
+        console.error("Recorded voice lookup failed", error instanceof Error ? error.message : "unknown error");
+      }
+    }
+    const spoken = spokenText(record);
+    if (!spoken) return null;
+    const audio = await fetchSpeech(spoken);
+    return audio ? { audio, spoken } : null;
+  })();
+}
+
+async function sendPreparedVoice(env, chatId, record, prepared) {
+  let voice = await prepared;
+  if (!voice) return;
+  const word = String(record?.coptic ?? "").trim();
+  if (voice.fileId) {
+    const result = await telegram(env, "sendVoice", { chat_id: chatId, voice: voice.fileId, caption: `🔊 ${word}`.slice(0, 1000) });
+    if (result?.ok) return;
+    // The saved recording could not be sent: fall back to the generated speech.
+    const spoken = spokenText(record);
+    const audio = spoken ? await fetchSpeech(spoken) : null;
+    if (!audio) return;
+    voice = { audio, spoken };
+  }
+  try {
     const form = new FormData();
     form.append("chat_id", String(chatId));
-    form.append("caption", `🔊 ${String(record.coptic ?? "").trim()} — ${spoken}`.slice(0, 1000));
-    form.append("voice", new Blob([audio], { type: "audio/mpeg" }), "word.mp3");
-    const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVoice`, {
-      method: "POST",
-      body: form,
-    });
+    form.append("caption", `🔊 ${word} — ${voice.spoken}`.slice(0, 1000));
+    form.append("voice", new Blob([voice.audio], { type: "audio/mpeg" }), "word.mp3");
+    const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVoice`, { method: "POST", body: form });
     if (!response.ok) console.error("Telegram sendVoice failed", response.status);
   } catch (error) {
     console.error("Voice failed", error instanceof Error ? error.message : "unknown error");
   }
+}
+
+async function sendWordVoice(env, chatId, record, recordIndex = -1) {
+  return sendPreparedVoice(env, chatId, record, prepareWordVoice(env, record, recordIndex));
 }
 
 async function showTyping(env, chatId, delayMs = TYPING_DELAY_MS) {
@@ -274,21 +317,23 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
     return deliver({ text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup });
   }
   const record = records[matches[0]];
+  const voice = prepareWordVoice(env, record, matches[0]);
   const text = formatRecord(record, matchedPartIndex(record, normalizedQuery)).slice(0, MAX_MESSAGE_LENGTH);
   const response = await deliver({ text, parse_mode: "HTML" });
-  await sendWordVoice(env, chatId, record, matches[0]);
+  await sendPreparedVoice(env, chatId, record, voice);
   return response;
 }
 
 async function sendRecord(env, chatId, index, partIndex = -1) {
   const record = records[index];
   if (!record) return;
+  const voice = prepareWordVoice(env, record, index);
   await telegram(env, "sendMessage", {
     chat_id: chatId,
     text: formatRecord(record, partIndex).slice(0, MAX_MESSAGE_LENGTH),
     parse_mode: "HTML",
   });
-  await sendWordVoice(env, chatId, record, index);
+  await sendPreparedVoice(env, chatId, record, voice);
 }
 
 // Registered users live in one SQLite-backed Durable Object (no extra Cloudflare token permission needed).
@@ -361,11 +406,13 @@ export class UserStore {
       // Atomic "first contact" check so two quick messages never announce the same user twice.
       const existing = await storage.get(`user:${userId}`);
       if (!existing) {
-        await storage.put(`user:${userId}`, { firstSeen: new Date().toISOString() });
-        return Response.json({ created: true, total: (await storage.list({ prefix: "user:" })).size });
+        const created = { firstSeen: new Date().toISOString() };
+        await storage.put(`user:${userId}`, created);
+        return Response.json({ created: true, user: created, total: (await storage.list({ prefix: "user:" })).size });
       }
-      if (existing.blocked) await storage.put(`user:${userId}`, { ...existing, blocked: false });
-      return Response.json({ created: false });
+      const user = existing.blocked ? { ...existing, blocked: false } : existing;
+      if (existing.blocked) await storage.put(`user:${userId}`, user);
+      return Response.json({ created: false, user });
     }
     if (op === "bccount") return Response.json({ count: (await this.recipients(exclude)).length });
     if (op === "bcstatus") {
@@ -664,15 +711,15 @@ async function stopVoiceRecording(env, chatId, userId, user) {
 }
 
 async function registerOnFirstContact(env, message, userId) {
-  if (isAdmin(env, userId) || (message.chat.type ?? "private") !== "private" || !env.USERS) return;
+  if (isAdmin(env, userId) || (message.chat.type ?? "private") !== "private" || !env.USERS) return undefined;
   let result;
   try {
     result = await storeCall(env, { op: "register", userId });
   } catch (error) {
     console.error("Register failed", error instanceof Error ? error.message : "unknown error");
-    return;
+    return undefined;
   }
-  if (!result?.created) return;
+  if (!result?.created) return result?.user;
   const from = message.from ?? {};
   await notifyAdmins(env, [
     "🆕 <b>انضم مستخدم جديد إلى البوت</b>",
@@ -681,6 +728,7 @@ async function registerOnFirstContact(env, message, userId) {
     `🆔 الرقم: <code>${escapeHtml(userId)}</code>`,
     `👥 إجمالي المستخدمين: ${Number(result.total ?? 0).toLocaleString("en-US")}`,
   ].join("\n"));
+  return result.user;
 }
 
 const BROADCAST_CONFIRM_MARKUP = {
@@ -778,7 +826,7 @@ async function handleUpdate(update, env) {
   const text = String(message.text ?? "").trim();
   const userId = message.from?.id ?? message.chat.id;
   const isPrivate = (message.chat.type ?? "private") === "private";
-  await registerOnFirstContact(env, message, userId);
+  const known = await registerOnFirstContact(env, message, userId);
   if (isAdmin(env, userId) && isPrivate) {
     const admin = await getUser(env, userId);
     if (text === "/cancel" && admin?.bc) {
@@ -813,7 +861,7 @@ async function handleUpdate(update, env) {
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: HELP_TEXT });
       return;
     }
-    const user = await getUser(env, userId);
+    const user = known ?? await getUser(env, userId);
     if (user?.name) {
       await sendWelcome(env, message.chat.id, user.name);
       return;
@@ -852,7 +900,7 @@ async function handleUpdate(update, env) {
     return;
   }
   if (text) {
-    const user = await getUser(env, userId);
+    const user = known ?? await getUser(env, userId);
     if (user?.awaitingName) {
       if (!isValidFullName(text)) {
         await telegram(env, "sendMessage", { chat_id: message.chat.id, text: NAME_RETRY_TEXT });
