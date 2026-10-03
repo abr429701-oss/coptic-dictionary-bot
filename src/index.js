@@ -82,15 +82,17 @@ function splitMeaning(value) {
 const searchIndex = lazy(() => {
   const text = [];
   const meaning = [];
+  const meaningParts = [];
   const prefix = [];
   for (const record of records) {
     text.push(normalize(SEARCH_FIELDS.map((key) => record[key] ?? "").join(" ")));
     const parts = splitMeaning(record.meaning).map(normalize);
+    meaningParts.push(parts);
     meaning.push(parts.map(toTokens));
     const keys = [record.coptic, record.greek, record.english, record.phonetic].map(normalize);
     prefix.push(keys.concat(parts).filter(Boolean));
   }
-  return { text, meaning, prefix };
+  return { text, meaning, meaningParts, prefix };
 });
 
 function findPrefixMatches(normalizedQuery) {
@@ -108,14 +110,22 @@ function findPrefixMatches(normalizedQuery) {
   return matches;
 }
 
-// Index of the meaning part the query refers to (Arabic searches only); -1 means "show everything".
+function matchingSenseIndices(normalizedParts, normalizedQuery) {
+  const query = normalize(normalizedQuery);
+  if (!query) return [];
+  const exact = [];
+  normalizedParts.forEach((part, index) => { if (part === query) exact.push(index); });
+  if (exact.length) return exact;
+  const needle = tokens(query);
+  if (!needle) return [];
+  return normalizedParts.flatMap((part, index) =>
+    part.startsWith(query) || hasWholeWords(toTokens(part), needle) ? [index] : []);
+}
+
+// Index of the matching meaning part, independent of the script/language used to search.
 function matchedPartIndex(record, normalizedQuery) {
-  if (!ARABIC_LETTER.test(normalizedQuery)) return -1;
-  const needle = tokens(normalizedQuery);
-  const parts = splitMeaning(record.meaning);
-  const exact = parts.findIndex((part) => tokens(part) === needle);
-  if (exact >= 0) return exact;
-  return parts.findIndex((part) => normalize(part).startsWith(normalizedQuery) || hasWholeWords(tokens(part), needle));
+  const parts = splitMeaning(record.meaning).map(normalize);
+  return matchingSenseIndices(parts, normalizedQuery)[0] ?? -1;
 }
 
 // Suggestions show the word only; meanings appear after tapping.
@@ -142,7 +152,7 @@ function pageCallback(page, query) {
   return prefix + truncateBytes(query, CALLBACK_DATA_MAX_BYTES - prefix.length);
 }
 
-function renderSuggestions(query, normalizedQuery, matches, requestedPage) {
+function renderSuggestions(query, normalizedQuery, matches, requestedPage, token = null) {
   const totalPages = Math.max(1, Math.ceil(matches.length / SUGGESTION_PAGE_SIZE));
   const page = Math.max(0, Math.min(requestedPage, totalPages - 1));
   const slice = matches.slice(page * SUGGESTION_PAGE_SIZE, (page + 1) * SUGGESTION_PAGE_SIZE);
@@ -150,7 +160,7 @@ function renderSuggestions(query, normalizedQuery, matches, requestedPage) {
     const part = matchedPartIndex(records[index], normalizedQuery);
     return [{
       text: suggestionLabel(records[index]),
-      callback_data: part >= 0 ? `s|${index}|${part}` : `s|${index}`,
+      callback_data: token ? `s|${token}|${index}` : (part >= 0 ? `s|${index}|${part}` : `s|${index}`),
     }];
   });
   const navigation = [];
@@ -169,7 +179,7 @@ function escapeHtml(value) {
 
 function formatRecord(record, partIndex = -1) {
   const parts = splitMeaning(record.meaning);
-  const meaning = partIndex >= 0 && parts[partIndex] ? parts[partIndex] : parts.join("، ");
+  const meaning = parts[partIndex >= 0 && parts[partIndex] ? partIndex : 0] ?? "";
   const fields = [
     ["الكلمة", record.coptic],
     ["المعنى", meaning],
@@ -206,11 +216,94 @@ function findMatches(query) {
     }
     return exact.concat(matches);
   }
-  const { text: allText } = searchIndex();
+  const { text: allText, meaningParts } = searchIndex();
   for (let index = 0; index < allText.length; index += 1) {
-    if (allText[index].includes(normalizedQuery)) matches.push(index);
+    if (allText[index].includes(normalizedQuery) || matchingSenseIndices(meaningParts[index], normalizedQuery).length) {
+      matches.push(index);
+    }
   }
   return matches;
+}
+
+const SEARCH_SESSION_TTL_MS = 60 * 60 * 1000;
+
+function searchSessionKey(chatId, userId) {
+  return `search:${chatId}:${userId}`;
+}
+
+function createSearchToken() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(6)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function saveSearchSession(env, chatId, userId, query) {
+  if (!env.USERS) return null;
+  const token = createSearchToken();
+  try {
+    await storeCall(env, {
+      op: "put",
+      key: searchSessionKey(chatId, userId),
+      value: { token, query: String(query), createdAt: Date.now() },
+    });
+    return token;
+  } catch (error) {
+    console.error("Search session save failed", error instanceof Error ? error.message : "unknown error");
+    return null;
+  }
+}
+
+async function loadSearchSession(env, chatId, userId, token) {
+  if (!env.USERS) return null;
+  try {
+    const session = (await storeCall(env, { op: "get", key: searchSessionKey(chatId, userId) })).value;
+    if (!session || session.token !== token || Date.now() - session.createdAt > SEARCH_SESSION_TTL_MS) return null;
+    return session;
+  } catch (error) {
+    console.error("Search session lookup failed", error instanceof Error ? error.message : "unknown error");
+    return null;
+  }
+}
+
+function searchResultEntries(query, matches = findMatches(query)) {
+  const normalizedQuery = normalize(query);
+  const { meaningParts } = searchIndex();
+  const entries = [];
+  for (const recordIndex of matches) {
+    const record = records[recordIndex];
+    const matchedSenses = matchingSenseIndices(meaningParts[recordIndex], normalizedQuery);
+    const wordFieldMatch = ["coptic", "greek", "pronunciation", "english", "phonetic"]
+      .some((field) => normalize(record[field] ?? "").includes(normalizedQuery));
+    entries.push({ recordIndex, partIndex: matchedSenses[0] ?? 0, reverse: !wordFieldMatch && matchedSenses.length > 0 });
+  }
+  return entries;
+}
+
+function formatSearchResult(entry, query) {
+  const record = records[entry.recordIndex];
+  const parts = splitMeaning(record.meaning);
+  const meaning = entry.reverse ? record.coptic : (parts[entry.partIndex] ?? parts[0] ?? "");
+  const fields = [
+    ["الكلمة", query],
+    ["المعنى", meaning],
+    ["النوع", record.kind],
+    ["الأصل", record.origin],
+  ];
+  return fields
+    .filter(([, value]) => String(value ?? "").trim())
+    .map(([label, value]) => `<b>${label}:</b> ${escapeHtml(value)}`)
+    .join("\n");
+}
+
+function searchResultView(entries, query, token, startPosition, step = 0) {
+  if (!entries.length) return null;
+  const start = ((Number(startPosition) % entries.length) + entries.length) % entries.length;
+  const currentStep = Math.max(0, Math.min(Number(step) || 0, entries.length - 1));
+  const entry = entries[(start + currentStep) % entries.length];
+  const hasMore = Boolean(token) && currentStep < entries.length - 1;
+  const text = formatSearchResult(entry, query) + (hasMore ? "\n\nهناك معنى آخر للكلمة التي بحثت بها." : "");
+  const replyMarkup = hasMore
+    ? { inline_keyboard: [[{ text: "اضغط هنا لعرضه", callback_data: `r|${token}|${start}|${currentStep + 1}` }]] }
+    : { inline_keyboard: [] };
+  return { entry, text, hasMore, replyMarkup };
 }
 
 const TYPING_DELAY_MS = 0; // raise (e.g. 400) for a longer visible "typing…"
@@ -310,20 +403,12 @@ function arrayBufferToBase64(buffer) {
 }
 
 // ---- Drive archive (Google Apps Script web app) ----
-// Config comes from the APPS_SCRIPT_URL / APPS_SCRIPT_SECRET secrets, or from /setdrive (stored in the user store).
-const DRIVE_CONFIG_KEY = "drive-config";
+// Credentials are configured on the Worker; the bot never stores or asks users to send them in chat.
 const SYNC_DRIVE_BATCH = 5;
 
 async function driveConfig(env) {
   if (env.APPS_SCRIPT_URL && env.APPS_SCRIPT_SECRET) return { url: env.APPS_SCRIPT_URL, secret: env.APPS_SCRIPT_SECRET };
-  if (!env.USERS) return null;
-  try {
-    const saved = (await storeCall(env, { op: "get", key: DRIVE_CONFIG_KEY })).value;
-    return saved?.url && saved?.secret ? saved : null;
-  } catch (error) {
-    console.error("Drive config lookup failed", error instanceof Error ? error.message : "unknown error");
-    return null;
-  }
+  return null;
 }
 
 async function callAppsScript(config, payload) {
@@ -392,17 +477,20 @@ async function inBackground(ctx, work) {
 
 async function archiveAndReport(env, chatId, job) {
   const outcome = await uploadVoiceToDrive(env, job);
-  if (outcome.ok || outcome.error === "not configured") return;
+  if (outcome.ok) return;
+  const reason = outcome.error === "not configured"
+    ? "الأرشفة التلقائية غير مهيأة على الخادم؛ لا ترسل رابطًا أو كلمة سر في البوت."
+    : outcome.error;
   await telegram(env, "sendMessage", {
     chat_id: chatId,
-    text: `⚠️ تم حفظ التسجيل لكن تعذّر رفع «${job.record?.coptic ?? ""}» إلى درايف:\n${outcome.error}\nسيبقى في قائمة الانتظار، أرسل /syncdrive لإعادة المحاولة.`.slice(0, 1000),
+    text: `⚠️ تم حفظ التسجيل لكن تعذّر رفع «${job.record?.coptic ?? ""}» إلى درايف:\n${reason}\nسيبقى في قائمة الانتظار، أرسل /syncdrive لإعادة المحاولة.`.slice(0, 1000),
   });
 }
 
 async function driveStatusText(env) {
   const config = await driveConfig(env);
   if (!config) {
-    return "☁️ لم يتم ربط جوجل درايف بعد.\nأرسل: /setdrive رابط_السكريبت كلمة_السر";
+    return "⚠️ الأرشفة التلقائية إلى Google Drive غير مهيأة على الخادم. لا ترسل رابطًا أو كلمة سر في البوت.";
   }
   const counts = await storeCall(env, { op: "voicepending", limit: 0 });
   const lines = [
@@ -425,7 +513,7 @@ async function driveStatusText(env) {
 async function syncPendingVoices(env, chatId) {
   const config = await driveConfig(env);
   if (!config) {
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "لم يتم ربط جوجل درايف بعد. استخدم /setdrive أولًا." });
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "الأرشفة التلقائية غير مهيأة على الخادم. لا ترسل رابطًا أو كلمة سر في البوت." });
     return;
   }
   const batch = await storeCall(env, { op: "voicepending", limit: SYNC_DRIVE_BATCH });
@@ -448,28 +536,12 @@ async function syncPendingVoices(env, chatId) {
   await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n") });
 }
 
-async function setDriveConfig(env, message, argument) {
-  const [url, secret] = argument.split(/\s+/u);
-  // The message holds a secret: remove it from the chat either way.
-  await telegram(env, "deleteMessage", { chat_id: message.chat.id, message_id: message.message_id });
-  if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/u.test(url ?? "") || !secret) {
-    await telegram(env, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "الصيغة: /setdrive رابط_الويب_آب_المنتهي_بـ_exec كلمة_السر",
-    });
-    return;
-  }
-  await storeCall(env, { op: "put", key: DRIVE_CONFIG_KEY, value: { url, secret } });
-  await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "تم حفظ إعدادات درايف (وحُذفت رسالتك). جارٍ الاختبار…" });
-  await telegram(env, "sendMessage", { chat_id: message.chat.id, text: await driveStatusText(env), parse_mode: "HTML", disable_web_page_preview: true });
-}
-
 async function showTyping(env, chatId, delayMs = TYPING_DELAY_MS) {
   await telegram(env, "sendChatAction", { chat_id: chatId, action: "typing" });
   if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
-async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
+async function sendSearch(env, chatId, query, page = 0, messageId = undefined, userId = chatId) {
   const cleanQuery = String(query ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, 160);
   const normalizedQuery = normalize(cleanQuery);
   const deliver = (payload) => messageId === undefined
@@ -479,7 +551,8 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
   if (normalizedQuery && Array.from(normalizedQuery).length <= SHORT_QUERY_MAX) {
     const prefixMatches = findPrefixMatches(normalizedQuery);
     if (prefixMatches.length) {
-      const view = renderSuggestions(cleanQuery, normalizedQuery, prefixMatches, page);
+      const token = await saveSearchSession(env, chatId, userId, cleanQuery);
+      const view = renderSuggestions(cleanQuery, normalizedQuery, prefixMatches, page, token);
       return deliver({ text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup });
     }
   }
@@ -489,15 +562,30 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
     return deliver({ text, parse_mode: "HTML" });
   }
   if (matches.length > 1) {
-    const view = renderSuggestions(cleanQuery, normalizedQuery, matches, page);
+    const token = await saveSearchSession(env, chatId, userId, cleanQuery);
+    const view = renderSuggestions(cleanQuery, normalizedQuery, matches, page, token);
     return deliver({ text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup });
   }
-  const record = records[matches[0]];
+  const entries = searchResultEntries(cleanQuery, matches);
+  if (!entries.length) return;
+  const token = entries.length > 1 ? await saveSearchSession(env, chatId, userId, cleanQuery) : null;
+  return sendSearchResult(env, chatId, cleanQuery, entries, token, 0, messageId);
+}
+
+async function sendSearchResult(env, chatId, query, entries, token, startPosition, messageId = undefined, step = 0) {
+  const view = searchResultView(entries, query, token, startPosition, step);
+  if (!view) return;
+  const payload = {
+    chat_id: chatId,
+    text: view.text.slice(0, MAX_MESSAGE_LENGTH),
+    parse_mode: "HTML",
+    ...(view.hasMore ? { reply_markup: view.replyMarkup } : {}),
+  };
+  if (messageId === undefined) await telegram(env, "sendMessage", payload);
+  else await telegram(env, "editMessageText", { ...payload, message_id: messageId });
+  const record = records[view.entry.recordIndex];
   const voice = prepareWordVoice(env, record);
-  const text = formatRecord(record, matchedPartIndex(record, normalizedQuery)).slice(0, MAX_MESSAGE_LENGTH);
-  const response = await deliver({ text, parse_mode: "HTML" });
   await sendPreparedVoice(env, chatId, record, voice);
-  return response;
 }
 
 async function sendRecord(env, chatId, index, partIndex = -1) {
@@ -1040,6 +1128,34 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
+    const userId = callback.from?.id ?? callback.message?.chat?.id;
+    const resultNext = /^r\|([a-f0-9]{12})\|(\d{1,6})\|(\d{1,6})$/u.exec(callback.data ?? "");
+    if (resultNext && callback.message?.chat?.id && callback.message?.message_id) {
+      const [, token, rawStart, rawStep] = resultNext;
+      const session = await loadSearchSession(env, callback.message.chat.id, userId, token);
+      const entries = session ? searchResultEntries(session.query) : [];
+      const start = Number(rawStart);
+      const step = Number(rawStep);
+      if (session && entries.length && start < entries.length && step > 0 && step < entries.length) {
+        await sendSearchResult(env, callback.message.chat.id, session.query, entries, token, start, callback.message.message_id, step);
+      }
+      return;
+    }
+    const searchPick = /^s\|([a-f0-9]{12})\|(\d{1,6})$/u.exec(callback.data ?? "");
+    if (searchPick && callback.message?.chat?.id) {
+      const [, token, rawRecordIndex] = searchPick;
+      const session = await loadSearchSession(env, callback.message.chat.id, userId, token);
+      const recordIndex = Number(rawRecordIndex);
+      if (session) {
+        const entries = searchResultEntries(session.query);
+        const start = entries.findIndex((entry) => entry.recordIndex === recordIndex);
+        if (start >= 0) {
+          await sendSearchResult(env, callback.message.chat.id, session.query, entries, token, start);
+          return;
+        }
+      }
+      return;
+    }
     const pick = /^s\|(\d{1,6})(?:\|(\d{1,3}))?$/u.exec(callback.data ?? "");
     if (pick) {
       if (callback.message?.chat?.id) {
@@ -1049,13 +1165,14 @@ async function handleUpdate(update, env, ctx) {
     }
     const match = /^p\|(\d{1,6})\|(.+)$/su.exec(callback.data ?? "");
     if (!match || !callback.message?.chat?.id || !callback.message?.message_id) return;
-    await sendSearch(env, callback.message.chat.id, match[2], Number(match[1]), callback.message.message_id);
+    await sendSearch(env, callback.message.chat.id, match[2], Number(match[1]), callback.message.message_id, userId);
     return;
   }
 
   const message = update.message;
   if (!message?.chat?.id) return;
   const text = String(message.text ?? "").trim();
+  const commandText = text.toLowerCase();
   const userId = message.from?.id ?? message.chat.id;
   const isPrivate = (message.chat.type ?? "private") === "private";
   const known = await registerOnFirstContact(env, message, userId);
@@ -1070,7 +1187,7 @@ async function handleUpdate(update, env, ctx) {
       await beginBroadcast(env, message.chat.id, userId, admin ?? {});
       return;
     }
-    if (text === "/drive") {
+    if (commandText === "/drive") {
       await telegram(env, "sendMessage", {
         chat_id: message.chat.id,
         text: await driveStatusText(env),
@@ -1079,19 +1196,23 @@ async function handleUpdate(update, env, ctx) {
       });
       return;
     }
-    if (text === "/syncdrive") {
+    if (commandText === "/syncdrive") {
       await inBackground(ctx, syncPendingVoices(env, message.chat.id));
       return;
     }
-    if (text === "/setdrive" || text.startsWith("/setdrive ")) {
-      await setDriveConfig(env, message, text.slice("/setdrive".length).trim());
+    if (commandText === "/setdrive" || commandText.startsWith("/setdrive ")) {
+      await telegram(env, "deleteMessage", { chat_id: message.chat.id, message_id: message.message_id });
+      await telegram(env, "sendMessage", {
+        chat_id: message.chat.id,
+        text: "لا حاجة إلى /setdrive. أرسل /record لتسجيل الصوت؛ سيُرفع تلقائيًا إلى Google Drive ويُضاف رابطه إلى Sheet بعد إعداد الخادم. لا ترسل الرابط أو كلمة السر في البوت.",
+      });
       return;
     }
-    if (text === "/record" || text === "/record_voice") {
+    if (commandText === "/record" || commandText === "/record_voice") {
       await beginVoiceRecording(env, message.chat.id, userId, admin ?? {});
       return;
     }
-    if (text === "/record_stop") {
+    if (commandText === "/record_stop") {
       await stopVoiceRecording(env, message.chat.id, userId, admin ?? {});
       return;
     }
@@ -1173,7 +1294,7 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     await showTyping(env, message.chat.id);
-    await sendSearch(env, message.chat.id, text);
+    await sendSearch(env, message.chat.id, text, 0, undefined, userId);
   }
 }
 

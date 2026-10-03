@@ -4,7 +4,7 @@
  * The bot sends every admin recording here. This script:
  *   1. saves the audio file in a Drive folder (named "<word id>.ogg"),
  *   2. records it in a "Voices" tab of the dictionary spreadsheet, keyed by the word's PERMANENT id,
- *   3. writes the file link next to the matching word(s) in the main sheet (column AT).
+ *   3. writes the file link next to the matching word(s) in a new column after existing data.
  *
  * Setup: see apps-script/README.md.  Deploy as: Execute as "Me", Who has access "Anyone".
  */

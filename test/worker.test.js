@@ -91,7 +91,7 @@ test("admin records a real Telegram voice file word by word and search reuses it
   const kvEnv = { ...env, USERS: fakeKv() };
   const calls = [];
   fakeTelegramApi(calls);
-  await worker.fetch(updateRequest({ message: { text: "/record", chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+  await worker.fetch(updateRequest({ message: { text: "/Record", chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
   const prompt = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
   assert.match(prompt, /تسجيل نطق كلمة جديدة/u);
   const id = kvEnv.USERS.store.get(`user:${ADMIN}`).voiceRec.id;
@@ -156,20 +156,74 @@ test("a single result shows only word, meaning, kind and origin with no heading"
   assert.doesNotMatch(text, /القاموس القبطي|نتائج|الصفحة|اليونانية|النطق|التهجئة|الجنس|الإنجليزية|كلمات مرتبطة/u);
 });
 
-test("tapping a suggestion from an Arabic search shows only the searched meaning", async () => {
+test("an Arabic query shows one matching Coptic word and the next matching result separately", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
   const calls = [];
   fakeTelegramApi(calls);
-  await worker.fetch(updateRequest({ message: { text: "كوبري", chat: { id: 14 } } }), env);
+  await worker.fetch(updateRequest({ message: { text: "قوة", chat: { id: 14 }, from: { id: 14 } } }), kvEnv);
+  const suggestions = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
+  const selected = suggestions.reply_markup.inline_keyboard.flat().find((button) => button.callback_data.startsWith("s|"));
+  assert.ok(selected);
+  calls.length = 0;
+  await worker.fetch(updateRequest({ callback_query: {
+    id: "arabic-pick", from: { id: 14 }, data: selected.callback_data,
+    message: { message_id: 1, chat: { id: 14 }, text: suggestions.text },
+  } }), kvEnv);
   const first = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
-  const single = first.text.startsWith("<b>");
-  const text = single ? first.text : await (async () => {
-    const data = first.reply_markup.inline_keyboard[0][0].callback_data;
-    calls.length = 0;
-    await worker.fetch(updateRequest({ callback_query: { id: "c", data, message: { message_id: 1, chat: { id: 14 }, text: "x" } } }), env);
-    return calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
-  })();
-  assert.match(text, /<b>المعنى:<\/b> [^،\n]*كوبري[^،\n]*\n/u);
-  assert.doesNotMatch(text, /كلمات مرتبطة/u);
+  assert.match(first.text, /<b>الكلمة:<\/b> قوة\n/u);
+  assert.match(first.text, /<b>المعنى:<\/b> [^\n]+\n/u);
+  assert.doesNotMatch(first.text, /<b>المعنى:<\/b> [^\n]*،/u);
+  assert.match(first.text, /هناك معنى آخر للكلمة التي بحثت بها/u);
+  const next = first.reply_markup.inline_keyboard[0][0];
+  calls.length = 0;
+  await worker.fetch(updateRequest({ callback_query: {
+    id: "arabic-next", from: { id: 14 }, data: next.callback_data,
+    message: { message_id: 1, chat: { id: 14 }, text: first.text },
+  } }), kvEnv);
+  const edited = calls.find((call) => call.url.endsWith("/editMessageText")).payload;
+  assert.match(edited.text, /<b>الكلمة:<\/b> قوة\n/u);
+  assert.doesNotMatch(edited.text, /<b>المعنى:<\/b> [^\n]*،/u);
+  assert.notEqual(edited.text, first.text);
+});
+
+test("a Coptic search shows one meaning and the inline button edits the result to the next meaning", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: "ϫⲟⲙ", chat: { id: 141 }, from: { id: 141 } } }), kvEnv);
+  const suggestions = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
+  const selected = suggestions.reply_markup.inline_keyboard.flat().find((button) => button.callback_data.startsWith("s|"));
+  assert.ok(selected);
+
+  calls.length = 0;
+  await worker.fetch(updateRequest({
+    callback_query: { id: "pick-meaning", from: { id: 141 }, data: selected.callback_data,
+      message: { message_id: 45, chat: { id: 141 }, text: suggestions.text } },
+  }), kvEnv);
+  const first = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
+  assert.match(first.text, /<b>الكلمة:<\/b> ϫⲟⲙ\n/u);
+  assert.match(first.text, /<b>المعنى:<\/b> [^\n]+\n/u);
+  assert.doesNotMatch(first.text, /<b>المعنى:<\/b> [^\n]*،/u);
+  assert.match(first.text, /هناك معنى آخر للكلمة التي بحثت بها/u);
+  const button = first.reply_markup.inline_keyboard[0][0];
+  assert.equal(button.text, "اضغط هنا لعرضه");
+
+  calls.length = 0;
+  await worker.fetch(updateRequest({
+    callback_query: {
+      id: "meaning-next",
+      from: { id: 141 },
+      data: button.callback_data,
+      message: { message_id: 45, chat: { id: 141 }, text: first.text },
+    },
+  }), kvEnv);
+  const edited = calls.find((call) => call.url.endsWith("/editMessageText")).payload;
+  assert.equal(edited.message_id, 45);
+  assert.match(edited.text, /<b>الكلمة:<\/b> ϫⲟⲙ\n/u);
+  assert.doesNotMatch(edited.text, /<b>المعنى:<\/b> [^\n]*،/u);
+  assert.match(edited.text, /<b>النوع:<\/b>/u);
+  assert.match(edited.text, /<b>الأصل:<\/b>/u);
+  assert.notEqual(edited.text, first.text);
 });
 
 test("one or two letters show 10 tappable suggestions per page", async () => {
@@ -360,7 +414,10 @@ test("without a keyboard session a typed letter is a normal search, and a real w
   assert.equal(sent(calls)[0].text, "اختر من الاقتراحات التالية:");
   await kbSay(kvEnv, "/keyboard");
   calls = await kbSay(kvEnv, "abagini");
-  assert.match(sent(calls)[0].text, /ⲁⲃⲁϫⲓⲛⲓ/u);
+  const result = sent(calls).at(-1);
+  assert.match(result.text, /<b>الكلمة:<\/b> abagini/u);
+  assert.match(result.text, /<b>المعنى:<\/b> زجاج/u);
+  assert.doesNotMatch(result.text, /زجاج،/u);
 });
 
 test("typing plain ⲉ finds headwords written with accented ὲ, and backticks are ignored", async () => {
@@ -662,39 +719,35 @@ test("an HTML answer from Apps Script (wrong deployment) gives a clear reason", 
   assert.match(warning, /New version/u);
 });
 
-test("without Drive settings nothing is uploaded and no warning is sent", async () => {
+test("without Worker Drive secrets the recording stays saved and the admin gets a safe setup warning", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const world = driveWorld();
   await adminSay(kvEnv, { text: "/record" });
   await adminSay(kvEnv, { voice: { file_id: "TG-5", duration: 2 } });
   assert.ok(!world.calls.some((call) => call.url === SCRIPT_URL));
-  assert.ok(!world.calls.some((call) => /تعذّر رفع/u.test(call.payload?.text ?? "")));
+  const warning = world.calls.find((call) => call.url.endsWith("/sendMessage") && /تعذّر رفع/u.test(call.payload?.text ?? ""));
+  assert.ok(warning);
+  assert.match(warning.payload.text, /لا ترسل رابطًا أو كلمة سر في البوت/u);
 });
 
-test("/setdrive stores the link, deletes the secret message, and rejects bad input", async () => {
+test("/setdrive is disabled, deletes its message, and never stores a link or secret", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  const world = driveWorld({ scriptReply: () => ({ ok: true, folder: { name: "Coptic Dictionary Voices", url: "https://drive.example/f" }, sheet: { name: "Dictionary", mainTab: "Sheet1" } }) });
+  const world = driveWorld();
   await adminSay(kvEnv, { message_id: 321, text: `/setdrive ${SCRIPT_URL} MYSECRET` });
   assert.ok(world.calls.some((call) => call.url.endsWith("/deleteMessage") && call.payload.message_id === 321));
-  assert.deepEqual(kvEnv.USERS.store.get("drive-config"), { url: SCRIPT_URL, secret: "MYSECRET" });
-  assert.ok(world.calls.some((call) => call.url === SCRIPT_URL && call.payload.action === "ping" && call.payload.secret === "MYSECRET"));
-  const status = world.calls.filter((call) => call.url.endsWith("/sendMessage")).at(-1).payload.text;
-  assert.match(status, /Coptic Dictionary Voices/u);
-
-  const bad = driveWorld();
-  const other = { ...env, USERS: fakeKv() };
-  await adminSay(other, { message_id: 322, text: "/setdrive https://example.com/x secret" });
-  assert.equal(other.USERS.store.get("drive-config"), undefined);
-  assert.ok(bad.calls.some((call) => call.url.endsWith("/deleteMessage")));
+  assert.equal(kvEnv.USERS.store.get("drive-config"), undefined);
+  assert.ok(!world.calls.some((call) => call.url === SCRIPT_URL));
+  const reply = world.calls.filter((call) => call.url.endsWith("/sendMessage")).at(-1).payload.text;
+  assert.match(reply, /لا حاجة إلى \/setdrive/u);
+  assert.match(reply, /لا ترسل الرابط أو كلمة السر في البوت/u);
+  assert.doesNotMatch(reply, /الصيغة:/u);
 });
 
-test("/drive explains how to connect when nothing is configured, and only the admin can use these commands", async () => {
+test("/drive status never asks the admin to send credentials in chat", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const world = driveWorld();
   await adminSay(kvEnv, { text: "/drive" });
-  assert.match(world.calls.find((call) => call.url.endsWith("/sendMessage")).payload.text, /\/setdrive/u);
-
-  const stranger = await asUser(kvEnv, 4242, { text: "/setdrive " + SCRIPT_URL + " x" });
-  assert.equal(kvEnv.USERS.store.get("drive-config"), undefined);
-  assert.ok(stranger.length >= 0);
+  const status = world.calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
+  assert.match(status, /غير مهيأة على الخادم/u);
+  assert.doesNotMatch(status, /\/setdrive|الصيغة:/u);
 });
