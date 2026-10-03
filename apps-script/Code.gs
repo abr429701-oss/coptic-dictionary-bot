@@ -7,12 +7,9 @@
  *      (https://drive.google.com/file/d/<FILE_ID>/view?usp=drivesdk), file ids, duration,
  *      the recorder's full name, Telegram id and username.
  *
- * No password is needed. (If you ever add a Script property named SECRET, the bot must send it.)
  * Setup: see apps-script/README.md.  Deploy as: Execute as "Me", Who has access "Anyone".
  */
 const CONFIG = {
-  // Optional. Leave empty = no password. (Can also be a Script property named SECRET.)
-  SECRET: "",
   // Optional: the Drive folder id (the part after /folders/ in its URL). If empty, a folder named
   // FOLDER_NAME is found or created in My Drive.
   FOLDER_ID: "",
@@ -37,17 +34,11 @@ function doGet() {
 function doPost(e) {
   try {
     const body = JSON.parse((e && e.postData && e.postData.contents) || "{}");
-    const secret = getSecret_();
-    if (secret && body.secret !== secret) return json_({ ok: false, error: "unauthorized" });
     if (body.action === "ping") return json_(ping_());
     return json_(upload_(body));
   } catch (error) {
     return json_({ ok: false, error: String(error && error.message ? error.message : error) });
   }
-}
-
-function getSecret_() {
-  return PropertiesService.getScriptProperties().getProperty("SECRET") || CONFIG.SECRET || "";
 }
 
 function json_(value) {

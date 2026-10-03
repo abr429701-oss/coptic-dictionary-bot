@@ -610,7 +610,6 @@ test("a recording is uploaded to Drive with its permanent id and the link is rem
   await adminSay(kvEnv, { voice: { file_id: "TG-1", duration: 4 } });
 
   const post = calls.find((call) => call.url === SCRIPT_URL);
-  assert.equal(post.payload.secret, undefined); // no password is sent
   assert.equal(post.payload.action, "upload");
   assert.equal(post.payload.by.id, String(ADMIN));
   assert.ok(post.payload.by.name.length > 0);
@@ -673,12 +672,12 @@ test("without Drive settings nothing is uploaded and no warning is sent", async 
   assert.ok(!world.calls.some((call) => /تعذّر رفع/u.test(call.payload?.text ?? "")));
 });
 
-test("/setdrive needs only the link (no password) and rejects bad input", async () => {
+test("/setdrive needs only the link and rejects bad input", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const world = driveWorld({ scriptReply: () => ({ ok: true, folder: { name: "Coptic Dictionary Voices", url: "https://drive.example/f" }, sheet: { name: "Dictionary", tab: "Ban" } }) });
   await adminSay(kvEnv, { message_id: 321, text: `/setdrive ${SCRIPT_URL}` });
-  assert.deepEqual(kvEnv.USERS.store.get("drive-config"), { url: SCRIPT_URL, secret: "" });
-  assert.ok(world.calls.some((call) => call.url === SCRIPT_URL && call.payload.action === "ping" && call.payload.secret === undefined));
+  assert.deepEqual(kvEnv.USERS.store.get("drive-config"), { url: SCRIPT_URL });
+  assert.ok(world.calls.some((call) => call.url === SCRIPT_URL && call.payload.action === "ping"));
   const status = world.calls.filter((call) => call.url.endsWith("/sendMessage")).at(-1).payload.text;
   assert.match(status, /Coptic Dictionary Voices/u);
 

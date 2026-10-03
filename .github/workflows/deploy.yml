@@ -65,7 +65,6 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
-      APPS_SCRIPT_SECRET: ${{ secrets.APPS_SCRIPT_SECRET }}
       SETUP_WEBHOOK: ${{ github.event_name == 'workflow_dispatch' && inputs.setup_webhook != 'false' }}
     steps:
       - name: Check out repository (latest main)
@@ -121,11 +120,10 @@ jobs:
           printf '%s' "$TELEGRAM_BOT_TOKEN" | npx wrangler secret put TELEGRAM_BOT_TOKEN --name coptic-dictionary-bot
           printf '%s' "$WEBHOOK_SECRET" | npx wrangler secret put WEBHOOK_SECRET --name coptic-dictionary-bot
 
-      - name: Store Apps Script archive secrets on the Worker
-        if: ${{ env.APPS_SCRIPT_URL != '' && env.APPS_SCRIPT_SECRET != '' }}
+      - name: Store the Apps Script link on the Worker
+        if: ${{ env.APPS_SCRIPT_URL != '' }}
         run: |
           printf '%s' "$APPS_SCRIPT_URL" | npx wrangler secret put APPS_SCRIPT_URL --name coptic-dictionary-bot
-          printf '%s' "$APPS_SCRIPT_SECRET" | npx wrangler secret put APPS_SCRIPT_SECRET --name coptic-dictionary-bot
 
       - name: Register Telegram webhook
         if: ${{ env.SETUP_WEBHOOK == 'true' }}

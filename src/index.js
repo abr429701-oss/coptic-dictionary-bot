@@ -310,13 +310,12 @@ function arrayBufferToBase64(buffer) {
 }
 
 // ---- Drive archive (Google Apps Script web app) ----
-// Config comes from the APPS_SCRIPT_URL secret (APPS_SCRIPT_SECRET is optional), or from /setdrive <url> (stored in the user store).
-// No password is required: the web app only needs its /exec link.
+// Config comes from the APPS_SCRIPT_URL secret, or from /setdrive <url> (stored in the user store).
 const DRIVE_CONFIG_KEY = "drive-config";
 const SYNC_DRIVE_BATCH = 5;
 
 async function driveConfig(env) {
-  if (env.APPS_SCRIPT_URL) return { url: env.APPS_SCRIPT_URL, secret: env.APPS_SCRIPT_SECRET ?? "" };
+  if (env.APPS_SCRIPT_URL) return { url: env.APPS_SCRIPT_URL };
   if (!env.USERS) return null;
   try {
     const saved = (await storeCall(env, { op: "get", key: DRIVE_CONFIG_KEY })).value;
@@ -331,7 +330,7 @@ async function callAppsScript(config, payload) {
   const response = await fetch(config.url, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ ...(config.secret ? { secret: config.secret } : {}), ...payload }),
+    body: JSON.stringify(payload),
     redirect: "follow",
     signal: AbortSignal.timeout(30000),
   });
@@ -404,7 +403,7 @@ async function archiveAndReport(env, chatId, job) {
 async function driveStatusText(env) {
   const config = await driveConfig(env);
   if (!config) {
-    return "☁️ لم يتم ربط جوجل درايف بعد.\nأرسل: /setdrive رابط_السكريبت (بدون كلمة سر)";
+    return "☁️ لم يتم ربط جوجل درايف بعد.\nأرسل: /setdrive رابط_السكريبت";
   }
   const counts = await storeCall(env, { op: "voicepending", limit: 0 });
   const lines = [
@@ -455,11 +454,11 @@ async function setDriveConfig(env, message, argument) {
   if (!/^https:\/\/script\.google\.com\/(?:macros\/s\/[\w-]+|a\/[^/\s]+\/macros\/s\/[\w-]+)\/exec$/u.test(url ?? "")) {
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
-      text: "أرسل: /setdrive ثم رابط الويب آب المنتهي بـ exec (بدون كلمة سر).",
+      text: "أرسل: /setdrive ثم رابط الويب آب المنتهي بـ exec",
     });
     return;
   }
-  await storeCall(env, { op: "put", key: DRIVE_CONFIG_KEY, value: { url, secret: "" } });
+  await storeCall(env, { op: "put", key: DRIVE_CONFIG_KEY, value: { url } });
   await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "تم حفظ رابط درايف. جارٍ الاختبار…" });
   await telegram(env, "sendMessage", { chat_id: message.chat.id, text: await driveStatusText(env), parse_mode: "HTML", disable_web_page_preview: true });
 }

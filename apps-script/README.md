@@ -1,6 +1,6 @@
 # Voice archive (Google Apps Script)
 
-لا توجد كلمة سر. كل تسجيل Voice لكلمة (/record) يُرفع إلى Google Drive، ويُكتب في ورقة **Ban** صف واحد لكل كلمة:
+كل تسجيل Voice لكلمة (/record) يُرفع إلى Google Drive، ويُكتب في ورقة **Ban** صف واحد لكل كلمة:
 `id, word, drive_url, drive_file_id, telegram_file_id, duration_s, full_name, user_id, username`
 ورابط الملف بصيغة `https://drive.google.com/file/d/<FILE_ID>/view?usp=drivesdk`.
 

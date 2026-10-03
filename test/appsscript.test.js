@@ -27,8 +27,8 @@ class FakeSheet {
   }
 }
 
-function build({ secret = "S3CRET", mainRows = [] } = {}) {
-  const props = new Map(secret ? [["SECRET", secret]] : []);
+function build() {
+  const props = new Map();
   const files = new Map();
   const folders = [];
   let nextId = 1;
@@ -41,7 +41,7 @@ function build({ secret = "S3CRET", mainRows = [] } = {}) {
   };
   const makeFolder = (name) => ({ id: `folder${folders.length + 1}`, name, getId() { return this.id; }, getName() { return this.name; },
     getUrl() { return `https://drive.google.com/drive/folders/${this.id}`; }, createFile: makeFile });
-  const main = new FakeSheet("Dictionary", [["coptic", "greek"], ...mainRows]);
+  const main = new FakeSheet("Dictionary", [["coptic", "greek"]]);
   const sheets = [main];
   const spreadsheet = {
     getName: () => "Coptic dictionary", getSheets: () => sheets, getNumSheets: () => sheets.length,
@@ -69,17 +69,15 @@ function build({ secret = "S3CRET", mainRows = [] } = {}) {
 }
 
 const audio = Buffer.from([79, 103, 103, 83, 1, 2, 3]).toString("base64");
-const upload = (extra = {}) => ({ secret: "S3CRET", action: "upload", id: 7, word: "ⲁⲧⲥ̀ϧⲁⲓ", audio_base64: audio, mime_type: "audio/ogg", file_id: "TG", duration: 3, ...extra });
+const upload = (extra = {}) => ({ action: "upload", id: 7, word: "ⲁⲧⲥ̀ϧⲁⲓ", audio_base64: audio, mime_type: "audio/ogg", file_id: "TG", duration: 3, ...extra });
 
-test("works without any password; if a SECRET property exists it is enforced", () => {
-  const open = build({ secret: "" });
-  assert.equal(open.post({ action: "ping" }).ok, true);
-  assert.equal(build().post({ secret: "nope", action: "ping" }).error, "unauthorized");
+test("answers ping and GET with no password of any kind", () => {
+  assert.equal(build().post({ action: "ping" }).ok, true);
   assert.equal(JSON.parse(build().api.doGet().text).ok, true);
 });
 
 test("ping creates/finds the folder and reports the spreadsheet", () => {
-  const world = build({ secret: "" });
+  const world = build();
   const result = world.post({ action: "ping" });
   assert.equal(result.ok, true);
   assert.equal(result.folder.name, "Coptic Dictionary Voices");
@@ -91,8 +89,8 @@ test("ping creates/finds the folder and reports the spreadsheet", () => {
 const by = { name: "مينا ميخائيل جرجس", id: "555", username: "mina" };
 
 test("an upload saves <id>.ogg and writes one Ban row with the drive link, recorder name, id and username", () => {
-  const world = build({ secret: "" });
-  const result = world.post(upload({ secret: undefined, by }));
+  const world = build();
+  const result = world.post(upload({ by }));
   assert.equal(result.ok, true);
   const file = world.files.get(result.file_id);
   assert.equal(file.blob.name, "7.ogg");
@@ -106,9 +104,9 @@ test("an upload saves <id>.ogg and writes one Ban row with the drive link, recor
 });
 
 test("re-recording a word replaces its Ban row and moves the old file to trash", () => {
-  const world = build({ secret: "" });
-  const first = world.post(upload({ secret: undefined, id: 3, word: "ⲁⲛⲁⲩ", by }));
-  const second = world.post(upload({ secret: undefined, id: 3, word: "ⲁⲛⲁⲩ", by }));
+  const world = build();
+  const first = world.post(upload({ id: 3, word: "ⲁⲛⲁⲩ", by }));
+  const second = world.post(upload({ id: 3, word: "ⲁⲛⲁⲩ", by }));
   assert.notEqual(first.file_id, second.file_id);
   assert.equal(world.files.get(first.file_id).trashed, true);
   assert.equal(world.files.get(second.file_id).trashed, false);
@@ -118,8 +116,8 @@ test("re-recording a word replaces its Ban row and moves the old file to trash",
 });
 
 test("rejects bad input without touching Drive", () => {
-  const world = build({ secret: "" });
-  assert.match(world.post(upload({ secret: undefined, audio_base64: "" })).error, /audio_base64/u);
-  assert.match(world.post(upload({ secret: undefined, id: "7; drop" })).error, /id must be a number/u);
+  const world = build();
+  assert.match(world.post(upload({ audio_base64: "" })).error, /audio_base64/u);
+  assert.match(world.post(upload({ id: "7; drop" })).error, /id must be a number/u);
   assert.equal(world.files.size, 0);
 });
