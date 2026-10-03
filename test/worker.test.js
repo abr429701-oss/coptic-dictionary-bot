@@ -937,22 +937,25 @@ function photoWorld({ photoOk = true } = {}) {
   return calls;
 }
 
-test("a word with a card is sent as a photo whose caption is the entry, and the file id is cached", async () => {
+test("a word with a card is sent as text, two card photos, then voice, and both file ids are cached", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const record = records.find((item) => item.coptic === "ⲁⲃⲱⲕ");
   cardManifest[String(record.id)] = "hash0001";
   try {
     const calls = photoWorld();
     await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲱⲕ", chat: { id: 70 } } }), kvEnv);
-    const photo = calls.find((call) => call.url.endsWith("/sendPhoto")).payload;
-    assert.equal(photo.photo, `https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/main/cards/${record.id}.png?v=hash0001`);
-    assert.match(photo.caption, /<b>الكلمة:<\/b> ⲁⲃⲱⲕ/u);
-    assert.equal(photo.parse_mode, "HTML");
-    assert.ok(!calls.some((call) => call.url.endsWith("/sendMessage") && /<b>الكلمة/u.test(call.payload?.text ?? "")));
-    assert.deepEqual(kvEnv.USERS.store.get(`card:${record.id}`), { hash: "hash0001", fileId: "PHOTO-FILE-1" });
+    const textIndex = calls.findIndex((call) => call.url.endsWith("/sendMessage") && /<b>الكلمة/u.test(call.payload?.text ?? ""));
+    const photos = calls.filter((call) => call.url.endsWith("/sendPhoto"));
+    assert.ok(textIndex >= 0);
+    assert.equal(photos.length, 2);
+    assert.equal(photos[0].payload.photo, `https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/main/cards/${record.id}-1.png?v=hash0001`);
+    assert.equal(photos[1].payload.photo, `https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/main/cards/${record.id}-2.png?v=hash0001`);
+    assert.ok(calls.indexOf(photos[0]) > textIndex);
+    assert.deepEqual(kvEnv.USERS.store.get(`card:${record.id}`), { hash: "hash0001", fileIds: ["PHOTO-FILE-1", "PHOTO-FILE-1"] });
 
     const again = photoWorld();
     await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲱⲕ", chat: { id: 70 } } }), kvEnv);
+    assert.equal(again.filter((call) => call.url.endsWith("/sendPhoto")).length, 2);
     assert.equal(again.find((call) => call.url.endsWith("/sendPhoto")).payload.photo, "PHOTO-FILE-1");
 
     cardManifest[String(record.id)] = "hash0002"; // the card was redrawn: the old file id must not be used
@@ -981,12 +984,12 @@ test("if the card cannot be sent the entry still arrives as text; words without 
   assert.ok(plain.some((call) => call.url.endsWith("/sendMessage")));
 });
 
-test("the card renderer produces a 1080x1330 PNG and redraws only changed cards", async () => {
-  const { renderCard } = await import("../scripts/card.mjs");
-  const png = renderCard({ word: "ⲙⲟⲣⲫⲏ", meaning: "صورة", typeLabel: "مؤنثة", origin: "يونانية", qrText: "https://t.me/Uploade33_bot" });
+test("the card renderer produces both supplied card layouts", async () => {
+  const { renderCards } = await import("../scripts/card.mjs");
+  const png = renderCards({ word: "ⲙⲟⲣⲫⲏ", meaning: "صورة", typeLabel: "مؤنثة", origin: "يونانية", qrText: "https://t.me/Uploade33_bot" }).first;
   assert.equal(Buffer.from(png).subarray(1, 4).toString(), "PNG");
   assert.equal(Buffer.from(png).readUInt32BE(16), 1080);
-  assert.equal(Buffer.from(png).readUInt32BE(20), 1330);
+  assert.equal(Buffer.from(png).readUInt32BE(20), 2340);
   const { cardData } = await import("../scripts/render_cards.mjs");
   const data = cardData([{ coptic: "ⲁ", meaning: "أ، ب", gender: "", kind: "اسم", origin: "قبطية" }, { coptic: "ⲁ", meaning: "ب، ج", gender: "مذكرة", kind: "", origin: "" }], "");
   assert.deepEqual([data.meaning, data.typeLabel, data.origin], ["أ، ب، ج", "مذكرة", "قبطية"]);

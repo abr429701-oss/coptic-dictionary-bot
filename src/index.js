@@ -1,7 +1,6 @@
 import records from "../data/dictionary.json" with { type: "json" };
 import cardManifest from "../data/cards.json" with { type: "json" };
 import welcomeImageBase64 from "./welcome-image.js";
-import welcomeImage2Base64 from "./welcome-image-2.js";
 
 const BOT_TITLE = "📖 القاموس القبطي البحيري";
 const PAGE_SIZE = 1;
@@ -532,20 +531,23 @@ async function sendCardEntry(env, chatId, record, text, media) {
   const hash = cardHash(record);
   if (!hash || !media) return false;
   const saved = (await media).card;
-  const cachedId = saved?.hash === hash ? saved.fileId : "";
+  const cachedIds = saved?.hash === hash
+    ? (Array.isArray(saved.fileIds) ? saved.fileIds : saved.fileId ? [saved.fileId] : [])
+    : [];
   const base = String(env.CARDS_BASE_URL || CARDS_BASE_URL).replace(/\/$/u, "");
-  const photo = cachedId || `${base}/${record.id}.png?v=${hash}`;
-  const caption = text.length <= 1000;
-  let result = await telegram(env, "sendPhoto", { chat_id: chatId, photo, ...(caption ? { caption: text, parse_mode: "HTML" } : {}) });
-  if (!result?.ok && cachedId) {
-    // The cached file id was refused: send from the URL once more.
-    result = await telegram(env, "sendPhoto", { chat_id: chatId, photo: `${base}/${record.id}.png?v=${hash}`, ...(caption ? { caption: text, parse_mode: "HTML" } : {}) });
+  // The requested order is intentionally text -> first card -> second card -> voice.
+  await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML" });
+  const fileIds = [];
+  for (const number of [1, 2]) {
+    const url = `${base}/${record.id}-${number}.png?v=${hash}`;
+    let result = await telegram(env, "sendPhoto", { chat_id: chatId, photo: cachedIds[number - 1] || url });
+    if (!result?.ok && cachedIds[number - 1]) result = await telegram(env, "sendPhoto", { chat_id: chatId, photo: url });
+    if (!result?.ok) continue;
+    const fileId = result.result?.photo?.at(-1)?.file_id;
+    if (fileId) fileIds[number - 1] = fileId;
   }
-  if (!result?.ok) return false;
-  if (!caption) await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML" });
-  const fileId = result.result?.photo?.at?.(-1)?.file_id;
-  if (fileId && fileId !== cachedId && env.USERS) {
-    await storeCall(env, { op: "put", key: `card:${record.id}`, value: { hash, fileId } }).catch(() => {});
+  if (fileIds.length && env.USERS) {
+    await storeCall(env, { op: "put", key: `card:${record.id}`, value: { hash, fileIds } }).catch(() => {});
   }
   return true;
 }
@@ -851,30 +853,17 @@ function isValidFullName(value) {
 async function sendWelcome(env, chatId, name) {
   const caption =
     `مرحبًا بك يا ${escapeHtml(name)} في القاموس الرقمي الناطق للغة القبطية, تفضل الان بكتابة أي كلمة للبحث عنها`;
-  let sentPhotos = 0;
   try {
-    // Upload both bundled images directly; Telegram does not need to fetch an external URL.
-    for (const [image, filename, imageCaption] of [
-      [welcomeImageBase64, "welcome.jpg", caption],
-      [welcomeImage2Base64, "welcome-word-card.jpg", ""],
-    ]) {
-      const bytes = Uint8Array.from(atob(image), (char) => char.charCodeAt(0));
-      const form = new FormData();
-      form.append("chat_id", String(chatId));
-      if (imageCaption) {
-        form.append("caption", imageCaption);
-        form.append("parse_mode", "HTML");
-      }
-      form.append("photo", new Blob([bytes], { type: "image/jpeg" }), filename);
-      const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, {
-        method: "POST",
-        body: form,
-      });
-      const result = await response.json().catch(() => ({}));
-      if (response.ok && result.ok) sentPhotos += 1;
-      else console.error("Telegram sendPhoto failed", result.description ?? response.status);
-    }
-    if (sentPhotos > 0) return;
+    const bytes = Uint8Array.from(atob(welcomeImageBase64), (char) => char.charCodeAt(0));
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    form.append("caption", caption);
+    form.append("parse_mode", "HTML");
+    form.append("photo", new Blob([bytes], { type: "image/jpeg" }), "welcome.jpg");
+    const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, { method: "POST", body: form });
+    const result = await response.json().catch(() => ({}));
+    if (response.ok && result.ok) return;
+    console.error("Telegram sendPhoto failed", result.description ?? response.status);
   } catch (error) {
     console.error("Welcome photo failed", error instanceof Error ? error.message : "unknown error");
   }

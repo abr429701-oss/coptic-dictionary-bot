@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { renderCard } from "./card.mjs";
+import { renderCards } from "./card.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SHEET_ID = process.env.SHEET_ID || "1kXVA3CNgETqym5Vz3lBUu_2gZ01QNdx7ROtGVnIJp0c";
@@ -14,7 +14,7 @@ const BAN_TAB = process.env.BAN_TAB || "Ban";
 const BOT_USERNAME = process.env.BOT_USERNAME || "Uploade33_bot";
 const SCOPE = process.env.CARD_SCOPE || "recorded";
 const MAX_PER_RUN = Number(process.env.MAX_CARDS || 500);
-const CARD_VERSION = 1; // bump when the design changes: every card is redrawn
+const CARD_VERSION = 2; // the supplied two-template design replaces the previous one-card layout
 const DICTIONARY = process.env.DICTIONARY_JSON || path.join(ROOT, "data", "dictionary.json");
 const MANIFEST = process.env.CARDS_MANIFEST || path.join(ROOT, "data", "cards.json");
 const CARDS_DIR = process.env.CARDS_DIR || path.join(ROOT, "cards");
@@ -109,16 +109,18 @@ export async function main() {
     const data = cardData(group, voiceLink);
     if (!data.word || !data.meaning) continue;
     const hash = hashOf(data);
-    const file = path.join(CARDS_DIR, `${id}.png`);
-    if (manifest[id] === hash && existsSync(file)) { next[id] = hash; continue; }
+    const files = [path.join(CARDS_DIR, `${id}-1.png`), path.join(CARDS_DIR, `${id}-2.png`)];
+    if (manifest[id] === hash && files.every((file) => existsSync(file))) { next[id] = hash; continue; }
     if (rendered >= MAX_PER_RUN) { deferred += 1; if (manifest[id]) next[id] = manifest[id]; continue; }
-    writeFileSync(file, renderCard(data));
+    const renderedCards = renderCards(data);
+    writeFileSync(files[0], renderedCards.first);
+    writeFileSync(files[1], renderedCards.second);
     next[id] = hash;
     rendered += 1;
   }
   for (const file of readdirSync(CARDS_DIR)) {
-    const id = file.replace(/\.png$/u, "");
-    if (file.endsWith(".png") && !(id in next)) rmSync(path.join(CARDS_DIR, file));
+    const match = /^(\d+)-(?:1|2)\.png$/u.exec(file);
+    if (match && !(match[1] in next)) rmSync(path.join(CARDS_DIR, file));
   }
   const sorted = Object.fromEntries(Object.entries(next).sort(([a], [b]) => Number(a) - Number(b)));
   writeFileSync(MANIFEST, `${JSON.stringify(sorted)}\n`);

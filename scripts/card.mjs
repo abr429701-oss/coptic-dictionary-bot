@@ -1,114 +1,93 @@
-// Draws one word card (1080 x 1330 PNG) in the dictionary's dark/gold design.
-// Uses resvg (no browser), so it runs in GitHub Actions in milliseconds per card.
-import { existsSync } from "node:fs";
+// Renders the two exact card layouts supplied by the user.
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { Resvg } from "@resvg/resvg-js";
 import QRCode from "qrcode";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const TEMPLATE_DIR = path.join(ROOT, "templates");
 const FONT_DIR = path.join(ROOT, "fonts");
-// Drop the dictionary's own Coptic font at fonts/coptic-card.ttf (family name below) to use it automatically.
 const COPTIC_FAMILY = existsSync(path.join(FONT_DIR, "coptic-card.ttf")) ? "Coptic Card" : "Noto Sans Coptic";
 const FONT_FILES = ["Tajawal-Regular.ttf", "Tajawal-Medium.ttf", "Tajawal-Bold.ttf", "NotoSansCoptic-Regular.ttf", "coptic-card.ttf"]
-  .map((file) => path.join(FONT_DIR, file))
-  .filter((file) => existsSync(file));
+  .map((file) => path.join(FONT_DIR, file)).filter((file) => existsSync(file));
 
-export const CARD = { width: 1080, height: 1330 };
-const COLORS = {
-  bg: "#1e1e1e", circleTop: "#232220", circleBottom: "#21201e", gold: "#c8a851", bar: "#85713c",
-  divider: "#48402b", white: "#f0f0f0", label: "#8d8989", footer: "#5b5131", footerLine: "#403b28",
-};
-// Gender/type colour (the "النوع" box); unknown values use gold.
-const TYPE_STYLES = {
-  red: { fill: "#29211f", stroke: "#4c2a29", accent: "#cc4444" },
-  blue: { fill: "#1f232b", stroke: "#2a3a55", accent: "#4a8fd6" },
-  gold: { fill: "#282722", stroke: "#463f2d", accent: "#c8a851" },
-};
-
-export function typeStyle(value) {
-  const text = String(value ?? "");
-  if (/مؤنث/u.test(text)) return TYPE_STYLES.red;
-  if (/مذكر/u.test(text)) return TYPE_STYLES.blue;
-  return TYPE_STYLES.gold;
-}
-
+export const CARD = { first: { width: 1080, height: 2340 }, second: { width: 907, height: 1280 } };
+const TEMPLATE_1 = readFileSync(path.join(TEMPLATE_DIR, "card-1.jpg")).toString("base64");
+const TEMPLATE_2 = readFileSync(path.join(TEMPLATE_DIR, "card-2.jpg")).toString("base64");
 const esc = (value) => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-
-// Font size that keeps `text` inside maxWidth (rough per-character estimate), never above `size`.
-function fit(text, size, maxWidth, perChar) {
-  const length = Array.from(String(text)).length || 1;
-  return Math.max(Math.round(size * 0.45), Math.min(size, Math.floor(maxWidth / (length * perChar))));
-}
-
-function wrapArabic(text, maxChars) {
-  const words = String(text).split(/\s+/u).filter(Boolean);
-  const lines = [];
-  let line = "";
-  for (const word of words) {
-    if (line && Array.from(`${line} ${word}`).length > maxChars) {
-      lines.push(line);
-      line = word;
-    } else {
-      line = line ? `${line} ${word}` : word;
-    }
+const fit = (text, size, maxWidth, perChar) => Math.max(Math.round(size * 0.45), Math.min(size, Math.floor(maxWidth / (Array.from(String(text)).length * perChar || 1))));
+const wrapArabic = (text, maxChars) => {
+  const lines = []; let line = "";
+  for (const word of String(text).split(/\s+/u).filter(Boolean)) {
+    if (line && Array.from(`${line} ${word}`).length > maxChars) { lines.push(line); line = word; }
+    else line = line ? `${line} ${word}` : word;
   }
   if (line) lines.push(line);
   return lines.slice(0, 3);
-}
+};
 
-function qrGroup(text, x, y, size) {
-  const qr = QRCode.create(text, { errorCorrectionLevel: "M" });
-  const count = qr.modules.size;
-  const cell = size / count;
+function qrSvg(text, x, y, size) {
+  const qr = QRCode.create(text || "https://t.me/Uploade33_bot", { errorCorrectionLevel: "M" });
+  const cell = size / qr.modules.size;
   let path = "";
-  for (let row = 0; row < count; row += 1) {
-    for (let col = 0; col < count; col += 1) {
-      if (qr.modules.get(row, col)) path += `M${(x + col * cell).toFixed(2)} ${(y + row * cell).toFixed(2)}h${cell.toFixed(2)}v${cell.toFixed(2)}h-${cell.toFixed(2)}z`;
-    }
+  for (let row = 0; row < qr.modules.size; row += 1) for (let col = 0; col < qr.modules.size; col += 1) {
+    if (qr.modules.get(row, col)) path += `M${(x + col * cell).toFixed(2)} ${(y + row * cell).toFixed(2)}h${cell.toFixed(2)}v${cell.toFixed(2)}h-${cell.toFixed(2)}z`;
   }
   return `<path d="${path}" fill="#000" shape-rendering="crispEdges"/>`;
 }
 
+function textSvg({ x, y, text, size, fill = "#fff", anchor = "middle", family = "Tajawal", weight = 700 }) {
+  return `<text x="${x}" y="${y}" text-anchor="${anchor}" direction="rtl" font-family="${family}" font-weight="${weight}" font-size="${size}" fill="${fill}">${esc(text)}</text>`;
+}
+
 export function cardSvg({ word, meaning, typeLabel, origin, qrText }) {
-  const wordSize = fit(word, 158, 860, 0.62);
-  const lines = wrapArabic(meaning, 22);
-  const meaningSize = lines.length > 1 ? 62 : fit(meaning, 80, 880, 0.52);
-  const lineHeight = Math.round(meaningSize * 1.25);
-  const firstBaseline = lines.length > 1 ? 448 : 468;
-  const meaningSvg = lines.map((line, index) =>
-    `<text x="540" y="${firstBaseline + index * lineHeight}" text-anchor="middle" direction="rtl" font-family="Tajawal" font-weight="700" font-size="${meaningSize}" fill="${COLORS.white}">${esc(line)}</text>`).join("");
-  const style = typeStyle(typeLabel);
-  const box = (x, label, value, colors) => {
-    const cx = x + 201.5;
-    const valueSize = fit(value, 42, 350, 0.42);
-    return `<rect x="${x + 1.5}" y="533.5" width="400" height="277" rx="44" fill="${colors.fill}" stroke="${colors.stroke}" stroke-width="3"/>
-<text x="${cx}" y="607" text-anchor="middle" direction="rtl" font-family="Tajawal" font-weight="400" font-size="27" fill="${COLORS.label}">${esc(label)}</text>
-<rect x="${cx - 44}" y="653" width="88" height="6" rx="3" fill="${colors.accent}"/>
-<text x="${cx}" y="734" text-anchor="middle" direction="rtl" font-family="Tajawal" font-weight="700" font-size="${valueSize}" fill="${colors.accent}">${esc(value)}</text>`;
-  };
-  const gold = TYPE_STYLES.gold;
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${CARD.width}" height="${CARD.height}" viewBox="0 0 ${CARD.width} ${CARD.height}">
-<defs><clipPath id="card"><rect width="1080" height="1330" rx="60"/></clipPath></defs>
-<rect width="1080" height="1330" rx="60" fill="${COLORS.bg}"/>
-<g clip-path="url(#card)"><circle cx="854" cy="222" r="310" fill="${COLORS.circleTop}"/><circle cx="197" cy="1033" r="238" fill="${COLORS.circleBottom}"/></g>
-<rect x="78" y="3" width="922" height="10" fill="${COLORS.bar}"/>
-<text x="540" y="257" text-anchor="middle" font-family="${COPTIC_FAMILY}" font-size="${wordSize}" fill="${COLORS.gold}">${esc(word)}</text>
-<rect x="447" y="337" width="186" height="4" fill="${COLORS.divider}"/>
-${meaningSvg}
-${box(118, "النوع", typeLabel || "—", style)}
-${box(555, "الأصل", origin || "—", gold)}
-<rect x="417" y="887" width="243" height="243" rx="36" fill="#fff"/>
-${qrGroup(qrText, 437, 907, 203)}
-<rect x="78" y="1243" width="365" height="4" fill="${COLORS.footerLine}"/><rect x="634" y="1243" width="365" height="4" fill="${COLORS.footerLine}"/>
-<text x="540" y="1268" text-anchor="middle" font-family="${COPTIC_FAMILY}" font-weight="700" font-size="58" fill="${COLORS.footer}">ⲭⲏⲙⲓ</text>
+  const lines = wrapArabic(meaning, 25);
+  const meaningText = lines.map((line, i) => textSvg({ x: 540, y: 960 + i * 74, text: line, size: lines.length > 1 ? 58 : fit(line, 78, 760, 0.52) })).join("");
+  const wordSize = fit(word, 150, 760, 0.62);
+  const typeSize = fit(typeLabel || "—", 43, 275, 0.42);
+  const originSize = fit(origin || "—", 43, 275, 0.42);
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="2340" viewBox="0 0 1080 2340">
+<image href="data:image/jpeg;base64,${TEMPLATE_1}" width="1080" height="2340"/>
+<rect x="145" y="600" width="790" height="190" fill="#1e1e1e"/>
+${textSvg({ x: 540, y: 750, text: word, size: wordSize, fill: "#c8a851", family: COPTIC_FAMILY })}
+<rect x="130" y="855" width="820" height="180" fill="#1e1e1e"/>
+${meaningText}
+<rect x="135" y="1115" width="355" height="165" rx="25" fill="#29211f"/><rect x="545" y="1115" width="355" height="165" rx="25" fill="#282722"/>
+${textSvg({ x: 312, y: 1180, text: "النوع", size: 30, fill: "#b9b2b2", weight: 400 })}
+${textSvg({ x: 722, y: 1180, text: "الأصل", size: 30, fill: "#b9b2b2", weight: 400 })}
+${textSvg({ x: 312, y: 1260, text: typeLabel || "—", size: typeSize, fill: "#cc4444" })}
+${textSvg({ x: 722, y: 1260, text: origin || "—", size: originSize, fill: "#c8a851" })}
+<rect x="405" y="1360" width="270" height="270" rx="38" fill="#fff"/>${qrSvg(qrText, 428, 1383, 224)}
 </svg>`;
 }
 
-export function renderCard(data) {
-  const resvg = new Resvg(cardSvg(data), {
-    font: { fontFiles: FONT_FILES, loadSystemFonts: false, defaultFontFamily: "Tajawal" },
-    fitTo: { mode: "width", value: CARD.width },
-  });
-  return resvg.render().asPng();
+export function secondCardSvg({ word, meaning, typeLabel, origin, qrText }) {
+  const lines = wrapArabic(meaning, 24);
+  const meaningText = lines.map((line, i) => textSvg({ x: 670, y: 430 + i * 62, text: line, size: lines.length > 1 ? 47 : fit(line, 65, 350, 0.52) })).join("");
+  const type = typeLabel || "—";
+  const date = "";
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="907" height="1280" viewBox="0 0 907 1280">
+<image href="data:image/jpeg;base64,${TEMPLATE_2}" width="907" height="1280"/>
+<rect x="455" y="300" width="440" height="500" fill="#4a4a4a"/>
+${textSvg({ x: 850, y: 370, text: "الكلمة:", size: 31, fill: "#f2d000", anchor: "end" })}
+${textSvg({ x: 590, y: 370, text: word, size: fit(word, 49, 300, 0.58), fill: "#fff" })}
+${textSvg({ x: 850, y: 470, text: "المعنى:", size: 31, fill: "#f2d000", anchor: "end" })}
+${meaningText}
+${textSvg({ x: 850, y: 580, text: "النوع:", size: 31, fill: "#f2d000", anchor: "end" })}
+${textSvg({ x: 590, y: 580, text: type, size: fit(type, 43, 260, 0.45), fill: "#fff" })}
+${textSvg({ x: 850, y: 690, text: "الأصل:", size: 31, fill: "#f2d000", anchor: "end" })}
+${textSvg({ x: 590, y: 690, text: origin || "—", size: fit(origin || "—", 43, 260, 0.45), fill: "#fff" })}
+<rect x="30" y="745" width="845" height="105" fill="#4a4a4a"/>
+<rect x="330" y="1005" width="250" height="250" rx="34" fill="#fff"/>${qrSvg(qrText, 350, 1025, 210)}
+${date ? textSvg({ x: 600, y: 850, text: date, size: 30, fill: "#fff" }) : ""}
+</svg>`;
 }
+
+function render(svg, width) {
+  return new Resvg(svg, { font: { fontFiles: FONT_FILES, loadSystemFonts: false, defaultFontFamily: "Tajawal" }, fitTo: { mode: "width", value: width } }).render().asPng();
+}
+
+export function renderCard(data) { return render(cardSvg(data), CARD.first.width); }
+export function renderSecondCard(data) { return render(secondCardSvg(data), CARD.second.width); }
+export function renderCards(data) { return { first: renderCard(data), second: renderSecondCard(data) }; }
