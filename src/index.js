@@ -285,6 +285,19 @@ function spokenText(record) {
   return String(record?.phonetic || record?.english || "").trim().slice(0, 200);
 }
 
+// Caption under the voice sent to the user: "<meaning>. <Coptic word>. <origin>. <gender>."
+// The meaning is the one the user searched for (the whole meaning when they searched by Coptic/Latin text).
+function voiceCaption(record, partIndex = -1) {
+  const parts = splitMeaning(record?.meaning);
+  const meaning = partIndex >= 0 && parts[partIndex] ? parts[partIndex] : parts.join("، ");
+  return [meaning, record?.coptic, record?.origin, record?.gender]
+    .map((value) => String(value ?? "").replace(/\s+/gu, " ").trim().replace(/\.+$/u, ""))
+    .filter(Boolean)
+    .join(". ")
+    .concat(".")
+    .slice(0, 1000);
+}
+
 // Starts the lookup (admin recording) or speech generation right away, so it is ready when the text is sent.
 function prepareWordVoice(env, record, media = null) {
   return (async () => {
@@ -303,12 +316,12 @@ function prepareWordVoice(env, record, media = null) {
   })();
 }
 
-async function sendPreparedVoice(env, chatId, record, prepared) {
+async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1) {
   let voice = await prepared;
   if (!voice) return;
-  const word = String(record?.coptic ?? "").trim();
+  const caption = voiceCaption(record, partIndex);
   if (voice.fileId) {
-    const result = await telegram(env, "sendVoice", { chat_id: chatId, voice: voice.fileId, caption: `🔊 ${word}`.slice(0, 1000) });
+    const result = await telegram(env, "sendVoice", { chat_id: chatId, voice: voice.fileId, caption });
     if (result?.ok) return;
     // The saved recording could not be sent: fall back to the generated speech.
     const spoken = spokenText(record);
@@ -319,7 +332,7 @@ async function sendPreparedVoice(env, chatId, record, prepared) {
   try {
     const form = new FormData();
     form.append("chat_id", String(chatId));
-    form.append("caption", `🔊 ${word} — ${voice.spoken}`.slice(0, 1000));
+    form.append("caption", caption);
     form.append("voice", new Blob([voice.audio], { type: "audio/mpeg" }), "word.mp3");
     const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVoice`, { method: "POST", body: form });
     if (!response.ok) console.error("Telegram sendVoice failed", response.status);
@@ -578,13 +591,14 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined, r
   const record = records[matches[0]];
   const media = messageId === undefined ? lookupMedia(env, record) : null;
   const voice = prepareWordVoice(env, record, media);
-  const text = `${formatRecord(record, matchedPartIndex(record, normalizedQuery))}${formatRequestDate(requestTimestamp)}`.slice(0, MAX_MESSAGE_LENGTH);
+  const part = matchedPartIndex(record, normalizedQuery);
+  const text = `${formatRecord(record, part)}${formatRequestDate(requestTimestamp)}`.slice(0, MAX_MESSAGE_LENGTH);
   if (await sendCardEntry(env, chatId, record, text, media)) {
-    await sendPreparedVoice(env, chatId, record, voice);
+    await sendPreparedVoice(env, chatId, record, voice, part);
     return undefined;
   }
   const response = await deliver({ text, parse_mode: "HTML" });
-  await sendPreparedVoice(env, chatId, record, voice);
+  await sendPreparedVoice(env, chatId, record, voice, part);
   return response;
 }
 
@@ -597,7 +611,7 @@ async function sendRecord(env, chatId, index, partIndex = -1, requestTimestamp =
   if (!(await sendCardEntry(env, chatId, record, text, media))) {
     await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML" });
   }
-  await sendPreparedVoice(env, chatId, record, voice);
+  await sendPreparedVoice(env, chatId, record, voice, partIndex);
 }
 
 // Registered users live in one SQLite-backed Durable Object (no extra Cloudflare token permission needed).

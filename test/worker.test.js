@@ -995,3 +995,69 @@ test("the card renderer produces both supplied card layouts", async () => {
   assert.deepEqual([data.meaning, data.typeLabel, data.origin], ["أ، ب، ج", "مذكرة", "قبطية"]);
   assert.equal(data.qrText, "https://t.me/Uploade33_bot");
 });
+
+// ---- voice caption: "<meaning>. <Coptic word>. <origin>. <gender>." ----
+const sonIndex = records.findIndex((record) => record.coptic === "ⲥⲟⲛ" && /^أخ، شقيق/u.test(record.meaning ?? ""));
+
+function pickWorld(kvEnv, { speech = true } = {}) {
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    url = String(url);
+    const body = options.body;
+    const payload = !body ? null : typeof body === "string" ? JSON.parse(body) : Object.fromEntries(body.entries());
+    calls.push({ url, payload });
+    if (url.includes("translate_tts")) {
+      return speech
+        ? new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "audio/mpeg" } })
+        : new Response("blocked", { status: 403 });
+    }
+    return Response.json({ ok: true, result: { message_id: 900 } });
+  };
+  return calls;
+}
+
+const pick = (kvEnv, data, chatId = 951) => worker.fetch(updateRequest({
+  callback_query: { id: "p1", data, from: { id: chatId }, message: { message_id: 5, chat: { id: chatId }, text: "x" } },
+}), kvEnv);
+
+test("voice caption shows the meaning the user searched for, then the word, origin and gender", async () => {
+  assert.ok(sonIndex >= 0);
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const calls = pickWorld(kvEnv);
+  await pick(kvEnv, `s|${sonIndex}|1`);
+  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption, "شقيق. ⲥⲟⲛ. قبطية. مذكرة.");
+
+  calls.length = 0;
+  await pick(kvEnv, `s|${sonIndex}|0`);
+  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption, "أخ. ⲥⲟⲛ. قبطية. مذكرة.");
+});
+
+test("a Coptic search puts every meaning in the voice caption", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const calls = pickWorld(kvEnv);
+  await pick(kvEnv, `s|${sonIndex}`);
+  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption, "أخ، شقيق، أخ في الإيمان. ⲥⲟⲛ. قبطية. مذكرة.");
+});
+
+test("the recorded voice from the admin uses the same caption", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  kvEnv.USERS.store.set(`voiceid:${records[sonIndex].id}`, { fileId: "ADMIN-VOICE" });
+  const calls = pickWorld(kvEnv);
+  await pick(kvEnv, `s|${sonIndex}|1`);
+  const voice = calls.find((call) => call.url.endsWith("/sendVoice")).payload;
+  assert.equal(voice.voice, "ADMIN-VOICE");
+  assert.equal(voice.caption, "شقيق. ⲥⲟⲛ. قبطية. مذكرة.");
+});
+
+test("empty fields are skipped and doubled full stops are not added", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const index = records.findIndex((record) => record.coptic && record.meaning && !record.gender && record.origin);
+  assert.ok(index >= 0);
+  const calls = pickWorld(kvEnv);
+  await pick(kvEnv, `s|${index}`);
+  const caption = calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption;
+  assert.ok(caption.endsWith("."));
+  assert.ok(!caption.includes(". ."));
+  assert.ok(!caption.includes(".."));
+  assert.ok(caption.includes(records[index].coptic.trim()));
+});
