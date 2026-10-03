@@ -628,6 +628,32 @@ export class UserStore {
       const users = [...page].map(([storedKey, record]) => ({ key: storedKey, id: storedKey.slice("user:".length), record }));
       return Response.json({ users, next: users.length === size ? users.at(-1).key : null });
     }
+    if (op === "usage") {
+      // Request counter per UTC day (flushed in batches by the Worker so it stays cheap).
+      const dayKey = `usage:${profile?.day ?? id}`;
+      const day = String(profile?.day ?? id);
+      const total = ((await storage.get(dayKey)) ?? 0) + Number(limit ?? 0);
+      await storage.put(dayKey, total);
+      if (total === Number(limit ?? 0)) {
+        // First write of a new day: forget counters older than 40 days.
+        const old = [...(await storage.list({ prefix: "usage:" })).keys()].sort().slice(0, -40);
+        for (const oldKey of old) await storage.delete(oldKey);
+      }
+      const alertKey = `usage-alert:${day}`;
+      const alerted = (await storage.get(alertKey)) ?? 0;
+      const level = USAGE_ALERT_LEVELS.filter((threshold) => total >= threshold).at(-1) ?? 0;
+      if (level > alerted) {
+        await storage.put(alertKey, level);
+        return Response.json({ total, alert: level });
+      }
+      return Response.json({ total });
+    }
+    if (op === "usageReport") {
+      const all = await storage.list({ prefix: "usage:" });
+      const days = [...all].map(([storedKey, count]) => ({ day: storedKey.slice("usage:".length), count }))
+        .sort((a, b) => (a.day < b.day ? 1 : -1));
+      return Response.json({ days: days.slice(0, Number(limit ?? 8)) });
+    }
     if (op === "bccount") return Response.json({ count: (await this.recipients(exclude)).length });
     if (op === "bcstatus") {
       const job = await storage.get("broadcast");
@@ -1132,7 +1158,135 @@ async function handleBroadcastCallback(env, callback) {
   else await edit(`🚀 بدأ الإرسال إلى ${started.total.toLocaleString("en-US")} مستخدم. سأرسل لك تقريرًا عند الانتهاء.`);
 }
 
+// ---- Daily request counter (compare with the free plan's 100,000 requests/day) ----
+const DAILY_REQUEST_LIMIT = 100000;
+const USAGE_ALERT_LEVELS = [50000, 80000, 95000, 100000];
+const USAGE_FLUSH_EVERY = 20;
+const USAGE_FLUSH_MS = 60000;
+const usageState = { day: "", pending: 0, flushedAt: 0 };
+
+function utcDay(date = new Date()) {
+  return date.toISOString().slice(0, 10);
+}
+
+async function flushUsage(env, day, count) {
+  try {
+    const result = await storeCall(env, { op: "usage", profile: { day }, limit: count });
+    if (result?.alert) {
+      const percent = Math.round((result.total / DAILY_REQUEST_LIMIT) * 100);
+      await notifyAdmins(env, `⚠️ <b>تنبيه الاستخدام</b>\nوصلت طلبات اليوم إلى ${Number(result.total).toLocaleString("en-US")} من ${DAILY_REQUEST_LIMIT.toLocaleString("en-US")} (${percent}%).\nعند الوصول للحد يتوقف البوت حتى تصفير العدّاد. أرسل /usage للتفاصيل.`);
+    }
+  } catch (error) {
+    console.error("Usage count failed", error instanceof Error ? error.message : "unknown error");
+  }
+}
+
+// Called for every request the Worker receives; sends one batched write per ~20 requests.
+function countRequest(env, ctx) {
+  if (!env.USERS) return;
+  const day = utcDay();
+  const now = Date.now();
+  if (usageState.day && usageState.day !== day && usageState.pending) {
+    const previous = { day: usageState.day, count: usageState.pending };
+    usageState.pending = 0;
+    inBackground(ctx, flushUsage(env, previous.day, previous.count));
+  }
+  usageState.day = day;
+  usageState.pending += 1;
+  if (usageState.pending >= USAGE_FLUSH_EVERY || now - usageState.flushedAt >= USAGE_FLUSH_MS) {
+    const count = usageState.pending;
+    usageState.pending = 0;
+    usageState.flushedAt = now;
+    inBackground(ctx, flushUsage(env, day, count));
+  }
+}
+
+async function sendUsageReport(env, chatId) {
+  if (!env.USERS) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "العدّاد يحتاج تخزين المستخدمين (Durable Object) وهو غير مفعّل." });
+    return;
+  }
+  const report = await storeCall(env, { op: "usageReport", limit: 8 });
+  const today = utcDay();
+  const rows = report.days.map((item) => ({ ...item }));
+  const todayRow = rows.find((item) => item.day === today);
+  const pending = usageState.day === today ? usageState.pending : 0;
+  if (todayRow) todayRow.count += pending;
+  else rows.unshift({ day: today, count: pending });
+  const used = rows.find((item) => item.day === today).count;
+  const remaining = Math.max(0, DAILY_REQUEST_LIMIT - used);
+  const nextReset = new Date(`${today}T00:00:00Z`);
+  nextReset.setUTCDate(nextReset.getUTCDate() + 1);
+  const resetAt = new Intl.DateTimeFormat("ar-EG", { timeZone: "Africa/Cairo", hour: "2-digit", minute: "2-digit" }).format(nextReset);
+  const fmt = (value) => Number(value).toLocaleString("en-US");
+  const lines = [
+    `📊 <b>طلبات البوت اليوم</b> (UTC ${today})`,
+    `المستخدَم: <b>${fmt(used)}</b> من ${fmt(DAILY_REQUEST_LIMIT)} (${((used / DAILY_REQUEST_LIMIT) * 100).toFixed(1)}%)`,
+    `المتبقي: <b>${fmt(remaining)}</b>`,
+    `يتصفّر العدّاد الساعة ${resetAt} بتوقيت القاهرة`,
+    "",
+    "<b>آخر الأيام:</b>",
+    ...rows.slice(0, 7).map((item) => `${item.day}: ${fmt(item.count)}`),
+    "",
+    "العدّاد تقديري وقد ينقص بضع عشرات من الطلبات. سأنبّهك تلقائيًا عند 50% و80% و95%.",
+  ];
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML" });
+}
+
+// ---- Inline mode: type @bot_username <word> in any chat ----
+const INLINE_LIMIT = 20;
+const INLINE_CACHE_SECONDS = 300;
+
+function inlineArticle(index, normalizedQuery) {
+  const record = records[index];
+  const part = matchedPartIndex(record, normalizedQuery);
+  const parts = splitMeaning(record.meaning);
+  const meaning = part >= 0 && parts[part] ? parts[part] : parts.join("، ");
+  const description = [meaning, String(record.kind ?? "").trim()].filter(Boolean).join(" — ");
+  return {
+    type: "article",
+    id: part >= 0 ? `${index}.${part}` : String(index),
+    title: String(record.coptic ?? "").trim() || String(record.english ?? "").trim() || "—",
+    description: description.slice(0, 120),
+    input_message_content: {
+      message_text: formatRecord(record, part).slice(0, MAX_MESSAGE_LENGTH),
+      parse_mode: "HTML",
+    },
+  };
+}
+
+async function answerInline(env, inlineQuery) {
+  const raw = String(inlineQuery.query ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, 160);
+  const normalizedQuery = normalize(raw);
+  let results;
+  if (!normalizedQuery) {
+    results = [{
+      type: "article",
+      id: "tip",
+      title: "اكتب كلمة قبطية أو عربية للبحث",
+      description: "مثال: غراب   أو   ⲁⲃⲱⲕ",
+      input_message_content: { message_text: `${BOT_TITLE}\nاكتب اسم البوت ثم الكلمة للبحث من أي محادثة.` },
+    }];
+  } else {
+    const indexes = Array.from(normalizedQuery).length <= SHORT_QUERY_MAX
+      ? findPrefixMatches(normalizedQuery)
+      : findMatches(raw);
+    const found = indexes.length ? indexes : (Array.from(normalizedQuery).length <= SHORT_QUERY_MAX ? findMatches(raw) : []);
+    results = found.slice(0, INLINE_LIMIT).map((index) => inlineArticle(index, normalizedQuery));
+  }
+  await telegram(env, "answerInlineQuery", {
+    inline_query_id: inlineQuery.id,
+    results,
+    cache_time: INLINE_CACHE_SECONDS,
+    is_personal: false,
+  });
+}
+
 async function handleUpdate(update, env, ctx) {
+  if (update.inline_query) {
+    await answerInline(env, update.inline_query);
+    return;
+  }
   if (update.callback_query) {
     const callback = update.callback_query;
     if (String(callback.data ?? "").startsWith("bc|")) {
@@ -1181,6 +1335,10 @@ async function handleUpdate(update, env, ctx) {
     }
     if (text === "/syncdrive") {
       await inBackground(ctx, syncPendingVoices(env, message.chat.id, recorderInfo(message.from, admin, userId)));
+      return;
+    }
+    if (text === "/usage") {
+      await sendUsageReport(env, message.chat.id);
       return;
     }
     if (text === "/syncusers") {
@@ -1285,6 +1443,7 @@ async function handleUpdate(update, env, ctx) {
 
 export default {
   async fetch(request, env, ctx) {
+    countRequest(env, ctx);
     const url = new URL(request.url);
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
       return new Response("Coptic dictionary bot is ready.", { status: 200 });
@@ -1298,7 +1457,7 @@ export default {
       const result = await telegram(env, "setWebhook", {
         url: `${url.origin}/webhook`,
         secret_token: env.WEBHOOK_SECRET,
-        allowed_updates: ["message", "callback_query"],
+        allowed_updates: ["message", "callback_query", "inline_query"],
       });
       return Response.json(result, { status: result.ok ? 200 : 502 });
     }

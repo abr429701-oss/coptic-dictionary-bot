@@ -136,7 +136,7 @@ jobs:
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
             --data-urlencode "url=${WORKER_URL}/webhook" \
             --data-urlencode "secret_token=${WEBHOOK_SECRET}" \
-            --data-urlencode 'allowed_updates=["message","callback_query"]' \
+            --data-urlencode 'allowed_updates=["message","callback_query","inline_query"]' \
             --data-urlencode 'drop_pending_updates=true')"
           echo "$response"
           node -e 'const r=JSON.parse(process.argv[1]); if (!r.ok) process.exit(1)' "$response"

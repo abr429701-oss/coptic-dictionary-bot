@@ -632,7 +632,7 @@ test("uploading runs after the reply when the platform provides waitUntil", asyn
   await adminSay(kvEnv, { text: "/record" }, ctx);
   await adminSay(kvEnv, { voice: { file_id: "TG-2", duration: 1 } }, ctx);
   const id = [...kvEnv.USERS.store.keys()].find((key) => key.startsWith("voiceid:"));
-  assert.equal(pending.length, 1); // handed to the platform; the webhook does not wait for it
+  assert.ok(pending.length >= 1); // handed to the platform (plus the request counter's batched write)
   await Promise.all(pending);
   assert.ok(kvEnv.USERS.store.get(id).drive.url);
   assert.ok(calls.some((call) => call.url === SCRIPT_URL));
@@ -764,4 +764,68 @@ test("/syncusers pushes existing users in batches, reading old users' Telegram p
   const push = world.calls.find((call) => call.payload?.action === "users");
   assert.deepEqual(push.payload.users.map((user) => [user.id, user.name, user.username]), [["6001", "بيشوي مجدي فرج", "bishoy_m"], ["6002", "Mark", "mark"]]);
   assert.equal(kvEnv.USERS.store.get("user:6001").username, "bishoy_m");
+});
+
+// ---- Inline mode ----
+async function inline(query, id = "q1") {
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ inline_query: { id, from: { id: 77 }, query, offset: "" } }), env);
+  return calls.find((call) => call.url.endsWith("/answerInlineQuery"))?.payload;
+}
+
+test("inline: a word returns articles with the entry as the message to send", async () => {
+  const answer = await inline("غراب");
+  assert.equal(answer.inline_query_id, "q1");
+  assert.ok(answer.results.length >= 1 && answer.results.length <= 20);
+  const first = answer.results[0];
+  assert.equal(first.type, "article");
+  assert.ok(first.title && first.id.length <= 64);
+  assert.match(first.input_message_content.message_text, /<b>الكلمة:<\/b> /u);
+  assert.match(first.input_message_content.message_text, /<b>المعنى:<\/b> [^\n]*غراب/u);
+  assert.doesNotMatch(first.input_message_content.message_text, /الاستغراب/u);
+  assert.equal(answer.is_personal, false);
+  assert.ok(answer.cache_time >= 60);
+});
+
+test("inline: one or two letters list words that start with them; empty shows a tip", async () => {
+  const short = await inline("ⲁⲃ", "q2");
+  assert.ok(short.results.length > 1);
+  assert.ok(short.results.every((item) => /^ⲁⲃ/u.test(item.title.replaceAll("`", "").toLowerCase()) || item.description));
+  const tip = await inline("", "q3");
+  assert.equal(tip.results[0].id, "tip");
+  const none = await inline("zzzzqqq", "q4");
+  assert.deepEqual(none.results, []);
+});
+
+// ---- Daily request counter ----
+test("every request is counted per UTC day, /usage reports it, and the admin is alerted at thresholds", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const calls = [];
+  fakeTelegramApi(calls);
+  const today = new Date().toISOString().slice(0, 10);
+  kvEnv.USERS.store.set(`usage:${today}`, 49995);
+  for (let index = 0; index < 25; index += 1) {
+    await worker.fetch(new Request("https://bot.example/health"), kvEnv);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 20)); // the batched write runs in the background
+  const counted = kvEnv.USERS.store.get(`usage:${today}`);
+  assert.ok(counted > 49995 && counted <= 50020, `counted ${counted}`);
+  const alert = calls.map((call) => call.payload?.text ?? "").find((text) => /تنبيه الاستخدام/u.test(text));
+  assert.ok(alert, "expected the 50% alert");
+  assert.match(alert, /50,0\d\d|49,9\d\d|50,/u);
+
+  calls.length = 0;
+  await adminSay(kvEnv, { text: "/usage" });
+  const report = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
+  assert.match(report, /طلبات البوت اليوم/u);
+  assert.match(report, /من 100,000/u);
+  assert.match(report, /المتبقي/u);
+  assert.match(report, /بتوقيت القاهرة/u);
+});
+
+test("only the admin can read /usage", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const calls = await say(kvEnv, 4242, "/usage");
+  assert.ok(!calls.some((call) => /طلبات البوت اليوم/u.test(call.payload?.text ?? "")));
 });
