@@ -4,6 +4,9 @@ import assert from "node:assert/strict";
 import worker, { UserStore } from "../src/index.js";
 import records from "../data/dictionary.json" with { type: "json" };
 
+// The real manifest lists whichever words have a card today; tests start from "no cards" and add their own.
+for (const key of Object.keys(cardManifest)) delete cardManifest[key];
+
 const token = "test-token";
 const secret = "test-secret-should-be-long-enough";
 const env = { TELEGRAM_BOT_TOKEN: token, WEBHOOK_SECRET: secret };
