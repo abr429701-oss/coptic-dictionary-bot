@@ -673,13 +673,14 @@ test("without Drive settings nothing is uploaded and no warning is sent", async 
 
 test("/setdrive stores the link, deletes the secret message, and rejects bad input", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  const world = driveWorld({ scriptReply: () => ({ ok: true, folder: { name: "Coptic Dictionary Voices", url: "https://drive.example/f" }, sheet: { name: "Dictionary", mainTab: "Sheet1" } }) });
+  const world = driveWorld({ scriptReply: () => ({ ok: true, folder: { name: "Coptic Dictionary Voices", url: "https://drive.example/f" }, sheet: { name: "Dictionary", archiveTab: "Ban" } }) });
   await adminSay(kvEnv, { message_id: 321, text: `/setdrive ${SCRIPT_URL} MYSECRET` });
   assert.ok(world.calls.some((call) => call.url.endsWith("/deleteMessage") && call.payload.message_id === 321));
   assert.deepEqual(kvEnv.USERS.store.get("drive-config"), { url: SCRIPT_URL, secret: "MYSECRET" });
   assert.ok(world.calls.some((call) => call.url === SCRIPT_URL && call.payload.action === "ping" && call.payload.secret === "MYSECRET"));
   const status = world.calls.filter((call) => call.url.endsWith("/sendMessage")).at(-1).payload.text;
   assert.match(status, /Coptic Dictionary Voices/u);
+  assert.match(status, /تبويب روابط التسجيل: Ban/u);
 
   const bad = driveWorld();
   const other = { ...env, USERS: fakeKv() };
