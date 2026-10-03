@@ -32,16 +32,28 @@ jobs:
       - name: Build dictionary.json from the Google Sheet
         run: python3 scripts/sheet_to_json.py
 
-      - name: Commit data if it changed
+      - name: Set up Node.js (for the word cards)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Draw word cards (a failure here never blocks the dictionary sync)
+        continue-on-error: true
+        run: |
+          npm ci
+          node scripts/render_cards.mjs
+
+      - name: Commit data and cards if they changed
         id: commit
         run: |
-          if git diff --quiet -- data/dictionary.json data/word_ids.json; then
+          git add -A data cards
+          if git diff --cached --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add data/dictionary.json data/word_ids.json
-            git commit -m "Sync dictionary from Google Sheet"
+            git commit -m "Sync dictionary and word cards from Google Sheet"
             git push
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi

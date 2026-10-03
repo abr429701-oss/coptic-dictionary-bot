@@ -1,4 +1,5 @@
 import records from "../data/dictionary.json" with { type: "json" };
+import cardManifest from "../data/cards.json" with { type: "json" };
 import welcomeImageBase64 from "./welcome-image.js";
 
 const BOT_TITLE = "📖 القاموس القبطي البحيري";
@@ -253,11 +254,11 @@ function spokenText(record) {
 }
 
 // Starts the lookup (admin recording) or speech generation right away, so it is ready when the text is sent.
-function prepareWordVoice(env, record) {
+function prepareWordVoice(env, record, media = null) {
   return (async () => {
     if (env.USERS && record?.id != null) {
       try {
-        const saved = await storeCall(env, { op: "get", key: voiceKey(record.id) });
+        const saved = media ? { value: (await media).voice } : await storeCall(env, { op: "get", key: voiceKey(record.id) });
         if (saved?.value?.fileId) return { fileId: saved.value.fileId };
       } catch (error) {
         console.error("Recorded voice lookup failed", error instanceof Error ? error.message : "unknown error");
@@ -476,6 +477,46 @@ async function showTyping(env, chatId, delayMs = TYPING_DELAY_MS) {
   if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
+// ---- Word cards (images drawn in GitHub Actions; see scripts/render_cards.mjs) ----
+const CARDS_BASE_URL = "https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/main/cards";
+
+function cardHash(record) {
+  return record?.id != null ? cardManifest[String(record.id)] ?? null : null;
+}
+
+// Only words that have a card pay for the extra lookup; it also carries the saved recording (one call).
+function lookupMedia(env, record) {
+  if (!cardHash(record)) return null;
+  if (!env.USERS) return Promise.resolve({ voice: null, card: null });
+  return storeCall(env, { op: "media", id: record.id }).catch((error) => {
+    console.error("Media lookup failed", error instanceof Error ? error.message : "unknown error");
+    return { voice: null, card: null };
+  });
+}
+
+// Sends the card with the entry as its caption (one message). Returns false when it could not be sent.
+async function sendCardEntry(env, chatId, record, text, media) {
+  const hash = cardHash(record);
+  if (!hash || !media) return false;
+  const saved = (await media).card;
+  const cachedId = saved?.hash === hash ? saved.fileId : "";
+  const base = String(env.CARDS_BASE_URL || CARDS_BASE_URL).replace(/\/$/u, "");
+  const photo = cachedId || `${base}/${record.id}.png?v=${hash}`;
+  const caption = text.length <= 1000;
+  let result = await telegram(env, "sendPhoto", { chat_id: chatId, photo, ...(caption ? { caption: text, parse_mode: "HTML" } : {}) });
+  if (!result?.ok && cachedId) {
+    // The cached file id was refused: send from the URL once more.
+    result = await telegram(env, "sendPhoto", { chat_id: chatId, photo: `${base}/${record.id}.png?v=${hash}`, ...(caption ? { caption: text, parse_mode: "HTML" } : {}) });
+  }
+  if (!result?.ok) return false;
+  if (!caption) await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML" });
+  const fileId = result.result?.photo?.at?.(-1)?.file_id;
+  if (fileId && fileId !== cachedId && env.USERS) {
+    await storeCall(env, { op: "put", key: `card:${record.id}`, value: { hash, fileId } }).catch(() => {});
+  }
+  return true;
+}
+
 async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
   const cleanQuery = String(query ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, 160);
   const normalizedQuery = normalize(cleanQuery);
@@ -500,8 +541,13 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
     return deliver({ text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup });
   }
   const record = records[matches[0]];
-  const voice = prepareWordVoice(env, record);
+  const media = messageId === undefined ? lookupMedia(env, record) : null;
+  const voice = prepareWordVoice(env, record, media);
   const text = formatRecord(record, matchedPartIndex(record, normalizedQuery)).slice(0, MAX_MESSAGE_LENGTH);
+  if (await sendCardEntry(env, chatId, record, text, media)) {
+    await sendPreparedVoice(env, chatId, record, voice);
+    return undefined;
+  }
   const response = await deliver({ text, parse_mode: "HTML" });
   await sendPreparedVoice(env, chatId, record, voice);
   return response;
@@ -510,12 +556,12 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
 async function sendRecord(env, chatId, index, partIndex = -1) {
   const record = records[index];
   if (!record) return;
-  const voice = prepareWordVoice(env, record);
-  await telegram(env, "sendMessage", {
-    chat_id: chatId,
-    text: formatRecord(record, partIndex).slice(0, MAX_MESSAGE_LENGTH),
-    parse_mode: "HTML",
-  });
+  const media = lookupMedia(env, record);
+  const voice = prepareWordVoice(env, record, media);
+  const text = formatRecord(record, partIndex).slice(0, MAX_MESSAGE_LENGTH);
+  if (!(await sendCardEntry(env, chatId, record, text, media))) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML" });
+  }
   await sendPreparedVoice(env, chatId, record, voice);
 }
 
@@ -659,6 +705,11 @@ export class UserStore {
       const wanted = Array.isArray(body.ids) ? body.ids.slice(0, 50) : [];
       const entries = await Promise.all(wanted.map(async (wordId) => [wordId, (await storage.get(voiceKey(wordId)))?.fileId ?? null]));
       return Response.json({ files: Object.fromEntries(entries.filter(([, fileId]) => fileId)) });
+    }
+    if (op === "media") {
+      // One call returns both the saved recording and the cached card photo of a word.
+      const [voice, card] = await Promise.all([storage.get(voiceKey(id)), storage.get(`card:${id}`)]);
+      return Response.json({ voice: voice ?? null, card: card ?? null });
     }
     if (op === "bccount") return Response.json({ count: (await this.recipients(exclude)).length });
     if (op === "bcstatus") {
