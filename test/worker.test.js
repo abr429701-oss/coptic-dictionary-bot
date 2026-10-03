@@ -792,8 +792,8 @@ test("inline: one or two letters list words that start with them; empty shows a 
   const short = await inline("ⲁⲃ", "q2");
   assert.ok(short.results.length > 1);
   assert.ok(short.results.every((item) => /^ⲁⲃ/u.test(item.title.replaceAll("`", "").toLowerCase()) || item.description));
-  const tip = await inline("", "q3");
-  assert.equal(tip.results[0].id, "tip");
+  const empty = await inline("", "q3");
+  assert.deepEqual(empty.results, []); // placeholder only, no list above the input
   const none = await inline("zzzzqqq", "q4");
   assert.deepEqual(none.results, []);
 });
@@ -828,4 +828,39 @@ test("only the admin can read /usage", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const calls = await say(kvEnv, 4242, "/usage");
   assert.ok(!calls.some((call) => /طلبات البوت اليوم/u.test(call.payload?.text ?? "")));
+});
+
+test("inline: a recorded word is offered as its voice with the entry as the caption", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const calls = [];
+  fakeTelegramApi(calls);
+  const record = records.find((item) => item.coptic === "ⲁⲃⲱⲕ");
+  kvEnv.USERS.store.set(`voiceid:${record.id}`, { fileId: "VOICE-FILE-1" });
+  await worker.fetch(updateRequest({ inline_query: { id: "v1", from: { id: 77 }, query: "ⲁⲃⲱⲕ", offset: "" } }), kvEnv);
+  const answer = calls.find((call) => call.url.endsWith("/answerInlineQuery")).payload;
+  const voice = answer.results.find((item) => item.type === "voice");
+  assert.equal(voice.voice_file_id, "VOICE-FILE-1");
+  assert.match(voice.caption, /<b>الكلمة:<\/b> ⲁⲃⲱⲕ/u);
+  assert.equal(voice.parse_mode, "HTML");
+  assert.ok(voice.title.startsWith("🔊"));
+  assert.ok(answer.results.some((item) => item.type === "article") || answer.results.length === 1);
+});
+
+test("inline: if Telegram rejects a stored recording, the answer is repeated as text only", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const payload = typeof options.body === "string" ? JSON.parse(options.body) : null;
+    calls.push({ url: String(url), payload });
+    if (String(url).endsWith("/answerInlineQuery") && payload.results.some((item) => item.type === "voice")) {
+      return Response.json({ ok: false, description: "wrong file identifier" });
+    }
+    return Response.json({ ok: true, result: true });
+  };
+  const record = records.find((item) => item.coptic === "ⲁⲃⲱⲕ");
+  kvEnv.USERS.store.set(`voiceid:${record.id}`, { fileId: "BAD" });
+  await worker.fetch(updateRequest({ inline_query: { id: "v2", from: { id: 77 }, query: "ⲁⲃⲱⲕ", offset: "" } }), kvEnv);
+  const answers = calls.filter((call) => call.url.endsWith("/answerInlineQuery"));
+  assert.equal(answers.length, 2);
+  assert.ok(answers[1].payload.results.every((item) => item.type === "article"));
 });

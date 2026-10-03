@@ -596,7 +596,8 @@ export class UserStore {
   }
 
   async fetch(request) {
-    const { op, key, value, userId, input, kb, exclude, fromChat, messageId, id, fileId, drive, limit, profile, cursor } = await request.json();
+    const body = await request.json();
+    const { op, key, value, userId, input, kb, exclude, fromChat, messageId, id, fileId, drive, limit, profile, cursor } = body;
     const storage = this.state.storage;
     if (op === "get") return Response.json({ value: (await storage.get(key)) ?? null });
     if (op === "put") {
@@ -653,6 +654,11 @@ export class UserStore {
       const days = [...all].map(([storedKey, count]) => ({ day: storedKey.slice("usage:".length), count }))
         .sort((a, b) => (a.day < b.day ? 1 : -1));
       return Response.json({ days: days.slice(0, Number(limit ?? 8)) });
+    }
+    if (op === "voiceFiles") {
+      const wanted = Array.isArray(body.ids) ? body.ids.slice(0, 50) : [];
+      const entries = await Promise.all(wanted.map(async (wordId) => [wordId, (await storage.get(voiceKey(wordId)))?.fileId ?? null]));
+      return Response.json({ files: Object.fromEntries(entries.filter(([, fileId]) => fileId)) });
     }
     if (op === "bccount") return Response.json({ count: (await this.recipients(exclude)).length });
     if (op === "bcstatus") {
@@ -1237,49 +1243,72 @@ async function sendUsageReport(env, chatId) {
 const INLINE_LIMIT = 20;
 const INLINE_CACHE_SECONDS = 300;
 
-function inlineArticle(index, normalizedQuery) {
+function inlineArticle(index, normalizedQuery, fileId) {
   const record = records[index];
   const part = matchedPartIndex(record, normalizedQuery);
   const parts = splitMeaning(record.meaning);
   const meaning = part >= 0 && parts[part] ? parts[part] : parts.join("، ");
+  const word = String(record.coptic ?? "").trim() || String(record.english ?? "").trim() || "—";
+  const id = part >= 0 ? `${index}.${part}` : String(index);
+  const text = formatRecord(record, part).slice(0, MAX_MESSAGE_LENGTH);
+  if (fileId && text.length <= 1000) {
+    // A recorded word is sent as the voice itself, with the entry as its caption (one tap = entry + voice).
+    return {
+      type: "voice",
+      id,
+      voice_file_id: fileId,
+      title: `🔊 ${word}${meaning ? ` — ${meaning}` : ""}`.slice(0, 100),
+      caption: text,
+      parse_mode: "HTML",
+    };
+  }
   const description = [meaning, String(record.kind ?? "").trim()].filter(Boolean).join(" — ");
   return {
     type: "article",
-    id: part >= 0 ? `${index}.${part}` : String(index),
-    title: String(record.coptic ?? "").trim() || String(record.english ?? "").trim() || "—",
+    id,
+    title: word,
     description: description.slice(0, 120),
-    input_message_content: {
-      message_text: formatRecord(record, part).slice(0, MAX_MESSAGE_LENGTH),
-      parse_mode: "HTML",
-    },
+    input_message_content: { message_text: text, parse_mode: "HTML" },
   };
+}
+
+async function recordedVoices(env, indexes) {
+  if (!env.USERS) return {};
+  const ids = indexes.map((index) => records[index].id).filter((id) => id != null);
+  if (!ids.length) return {};
+  try {
+    return (await storeCall(env, { op: "voiceFiles", ids })).files ?? {};
+  } catch (error) {
+    console.error("Inline voice lookup failed", error instanceof Error ? error.message : "unknown error");
+    return {};
+  }
 }
 
 async function answerInline(env, inlineQuery) {
   const raw = String(inlineQuery.query ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, 160);
   const normalizedQuery = normalize(raw);
-  let results;
-  if (!normalizedQuery) {
-    results = [{
-      type: "article",
-      id: "tip",
-      title: "اكتب كلمة قبطية أو عربية للبحث",
-      description: "مثال: غراب   أو   ⲁⲃⲱⲕ",
-      input_message_content: { message_text: `${BOT_TITLE}\nاكتب اسم البوت ثم الكلمة للبحث من أي محادثة.` },
-    }];
-  } else {
-    const indexes = Array.from(normalizedQuery).length <= SHORT_QUERY_MAX
-      ? findPrefixMatches(normalizedQuery)
-      : findMatches(raw);
-    const found = indexes.length ? indexes : (Array.from(normalizedQuery).length <= SHORT_QUERY_MAX ? findMatches(raw) : []);
-    results = found.slice(0, INLINE_LIMIT).map((index) => inlineArticle(index, normalizedQuery));
-  }
-  await telegram(env, "answerInlineQuery", {
+  const answer = (results, cacheTime) => telegram(env, "answerInlineQuery", {
     inline_query_id: inlineQuery.id,
     results,
-    cache_time: INLINE_CACHE_SECONDS,
+    cache_time: cacheTime,
     is_personal: false,
   });
+  // Empty query: no list at all, so the bot's placeholder text (set in BotFather) is what the user sees.
+  if (!normalizedQuery) {
+    await answer([], 3600);
+    return;
+  }
+  const short = Array.from(normalizedQuery).length <= SHORT_QUERY_MAX;
+  let indexes = short ? findPrefixMatches(normalizedQuery) : findMatches(raw);
+  if (!indexes.length && short) indexes = findMatches(raw);
+  indexes = indexes.slice(0, INLINE_LIMIT);
+  const voices = await recordedVoices(env, indexes);
+  const results = indexes.map((index) => inlineArticle(index, normalizedQuery, voices[records[index].id]));
+  const response = await answer(results, INLINE_CACHE_SECONDS);
+  if (response && response.ok === false && results.some((item) => item.type === "voice")) {
+    // A stored recording was rejected by Telegram: answer again with text only.
+    await answer(indexes.map((index) => inlineArticle(index, normalizedQuery, null)), INLINE_CACHE_SECONDS);
+  }
 }
 
 async function handleUpdate(update, env, ctx) {
