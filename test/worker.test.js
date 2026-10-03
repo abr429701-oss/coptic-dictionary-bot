@@ -599,7 +599,7 @@ const adminSay = (kvEnv, message, ctx) =>
   worker.fetch(updateRequest({ message: { chat: { id: ADMIN }, from: { id: ADMIN }, ...message } }), kvEnv, ctx);
 
 function driveEnv(extra = {}) {
-  return { ...env, USERS: fakeKv(), APPS_SCRIPT_URL: SCRIPT_URL, APPS_SCRIPT_SECRET: "S3CRET", ...extra };
+  return { ...env, USERS: fakeKv(), APPS_SCRIPT_URL: SCRIPT_URL, ...extra };
 }
 
 test("a recording is uploaded to Drive with its permanent id and the link is remembered", async () => {
@@ -610,8 +610,10 @@ test("a recording is uploaded to Drive with its permanent id and the link is rem
   await adminSay(kvEnv, { voice: { file_id: "TG-1", duration: 4 } });
 
   const post = calls.find((call) => call.url === SCRIPT_URL);
-  assert.equal(post.payload.secret, "S3CRET");
+  assert.equal(post.payload.secret, undefined); // no password is sent
   assert.equal(post.payload.action, "upload");
+  assert.equal(post.payload.by.id, String(ADMIN));
+  assert.ok(post.payload.by.name.length > 0);
   assert.equal(post.payload.id, id);
   assert.equal(post.payload.file_id, "TG-1");
   assert.ok(post.payload.word.length > 0);
@@ -671,21 +673,18 @@ test("without Drive settings nothing is uploaded and no warning is sent", async 
   assert.ok(!world.calls.some((call) => /تعذّر رفع/u.test(call.payload?.text ?? "")));
 });
 
-test("/setdrive stores the link, deletes the secret message, and rejects bad input", async () => {
+test("/setdrive needs only the link (no password) and rejects bad input", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  const world = driveWorld({ scriptReply: () => ({ ok: true, folder: { name: "Coptic Dictionary Voices", url: "https://drive.example/f" }, sheet: { name: "Dictionary", mainTab: "Sheet1" } }) });
-  await adminSay(kvEnv, { message_id: 321, text: `/setdrive ${SCRIPT_URL} MYSECRET` });
-  assert.ok(world.calls.some((call) => call.url.endsWith("/deleteMessage") && call.payload.message_id === 321));
-  assert.deepEqual(kvEnv.USERS.store.get("drive-config"), { url: SCRIPT_URL, secret: "MYSECRET" });
-  assert.ok(world.calls.some((call) => call.url === SCRIPT_URL && call.payload.action === "ping" && call.payload.secret === "MYSECRET"));
+  const world = driveWorld({ scriptReply: () => ({ ok: true, folder: { name: "Coptic Dictionary Voices", url: "https://drive.example/f" }, sheet: { name: "Dictionary", tab: "Ban" } }) });
+  await adminSay(kvEnv, { message_id: 321, text: `/setdrive ${SCRIPT_URL}` });
+  assert.deepEqual(kvEnv.USERS.store.get("drive-config"), { url: SCRIPT_URL, secret: "" });
+  assert.ok(world.calls.some((call) => call.url === SCRIPT_URL && call.payload.action === "ping" && call.payload.secret === undefined));
   const status = world.calls.filter((call) => call.url.endsWith("/sendMessage")).at(-1).payload.text;
   assert.match(status, /Coptic Dictionary Voices/u);
 
-  const bad = driveWorld();
   const other = { ...env, USERS: fakeKv() };
-  await adminSay(other, { message_id: 322, text: "/setdrive https://example.com/x secret" });
+  await adminSay(other, { message_id: 322, text: "/setdrive https://example.com/x" });
   assert.equal(other.USERS.store.get("drive-config"), undefined);
-  assert.ok(bad.calls.some((call) => call.url.endsWith("/deleteMessage")));
 });
 
 test("/drive explains how to connect when nothing is configured, and only the admin can use these commands", async () => {

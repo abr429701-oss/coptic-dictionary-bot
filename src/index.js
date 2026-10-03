@@ -310,16 +310,17 @@ function arrayBufferToBase64(buffer) {
 }
 
 // ---- Drive archive (Google Apps Script web app) ----
-// Config comes from the APPS_SCRIPT_URL / APPS_SCRIPT_SECRET secrets, or from /setdrive (stored in the user store).
+// Config comes from the APPS_SCRIPT_URL secret (APPS_SCRIPT_SECRET is optional), or from /setdrive <url> (stored in the user store).
+// No password is required: the web app only needs its /exec link.
 const DRIVE_CONFIG_KEY = "drive-config";
 const SYNC_DRIVE_BATCH = 5;
 
 async function driveConfig(env) {
-  if (env.APPS_SCRIPT_URL && env.APPS_SCRIPT_SECRET) return { url: env.APPS_SCRIPT_URL, secret: env.APPS_SCRIPT_SECRET };
+  if (env.APPS_SCRIPT_URL) return { url: env.APPS_SCRIPT_URL, secret: env.APPS_SCRIPT_SECRET ?? "" };
   if (!env.USERS) return null;
   try {
     const saved = (await storeCall(env, { op: "get", key: DRIVE_CONFIG_KEY })).value;
-    return saved?.url && saved?.secret ? saved : null;
+    return saved?.url ? saved : null;
   } catch (error) {
     console.error("Drive config lookup failed", error instanceof Error ? error.message : "unknown error");
     return null;
@@ -330,7 +331,7 @@ async function callAppsScript(config, payload) {
   const response = await fetch(config.url, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ secret: config.secret, ...payload }),
+    body: JSON.stringify({ ...(config.secret ? { secret: config.secret } : {}), ...payload }),
     redirect: "follow",
     signal: AbortSignal.timeout(30000),
   });
@@ -347,7 +348,7 @@ async function callAppsScript(config, payload) {
 }
 
 // Uploads one saved recording to Drive and remembers the link. Returns { ok, error }.
-async function uploadVoiceToDrive(env, { id, record, fileId, duration }) {
+async function uploadVoiceToDrive(env, { id, record, fileId, duration, by }) {
   const config = await driveConfig(env);
   if (!config) return { ok: false, error: "not configured" };
   try {
@@ -366,6 +367,7 @@ async function uploadVoiceToDrive(env, { id, record, fileId, duration }) {
       mime_type: "audio/ogg",
       file_id: fileId,
       duration: duration ?? "",
+      by: by ?? null,
     });
     await storeCall(env, {
       op: "voicedrive",
@@ -402,7 +404,7 @@ async function archiveAndReport(env, chatId, job) {
 async function driveStatusText(env) {
   const config = await driveConfig(env);
   if (!config) {
-    return "☁️ لم يتم ربط جوجل درايف بعد.\nأرسل: /setdrive رابط_السكريبت كلمة_السر";
+    return "☁️ لم يتم ربط جوجل درايف بعد.\nأرسل: /setdrive رابط_السكريبت (بدون كلمة سر)";
   }
   const counts = await storeCall(env, { op: "voicepending", limit: 0 });
   const lines = [
@@ -414,7 +416,7 @@ async function driveStatusText(env) {
   try {
     const ping = await callAppsScript(config, { action: "ping" });
     lines.push("", `📁 الفولدر: <a href="${escapeHtml(ping.folder?.url ?? "")}">${escapeHtml(ping.folder?.name ?? "")}</a>`);
-    lines.push(`📄 الشيت: ${escapeHtml(ping.sheet?.name ?? "")}`);
+    lines.push(`📄 الشيت: ${escapeHtml(ping.sheet?.name ?? "")} — ورقة ${escapeHtml(ping.sheet?.tab ?? "Ban")}`);
   } catch (error) {
     lines.push("", `❌ تعذّر الاتصال بالسكريبت: ${escapeHtml(error instanceof Error ? error.message : "unknown error")}`);
   }
@@ -422,7 +424,7 @@ async function driveStatusText(env) {
   return lines.join("\n");
 }
 
-async function syncPendingVoices(env, chatId) {
+async function syncPendingVoices(env, chatId, by) {
   const config = await driveConfig(env);
   if (!config) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: "لم يتم ربط جوجل درايف بعد. استخدم /setdrive أولًا." });
@@ -433,7 +435,7 @@ async function syncPendingVoices(env, chatId) {
   let failure = "";
   for (const item of batch.pending) {
     const record = records[recordIndexById().get(item.id)];
-    const outcome = await uploadVoiceToDrive(env, { id: item.id, record, fileId: item.fileId, duration: item.duration });
+    const outcome = await uploadVoiceToDrive(env, { id: item.id, record, fileId: item.fileId, duration: item.duration, by });
     if (outcome.ok) uploaded += 1;
     else {
       failure = outcome.error;
@@ -449,18 +451,16 @@ async function syncPendingVoices(env, chatId) {
 }
 
 async function setDriveConfig(env, message, argument) {
-  const [url, secret] = argument.split(/\s+/u);
-  // The message holds a secret: remove it from the chat either way.
-  await telegram(env, "deleteMessage", { chat_id: message.chat.id, message_id: message.message_id });
-  if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/u.test(url ?? "") || !secret) {
+  const url = argument.split(/\s+/u)[0];
+  if (!/^https:\/\/script\.google\.com\/(?:macros\/s\/[\w-]+|a\/[^/\s]+\/macros\/s\/[\w-]+)\/exec$/u.test(url ?? "")) {
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
-      text: "الصيغة: /setdrive رابط_الويب_آب_المنتهي_بـ_exec كلمة_السر",
+      text: "أرسل: /setdrive ثم رابط الويب آب المنتهي بـ exec (بدون كلمة سر).",
     });
     return;
   }
-  await storeCall(env, { op: "put", key: DRIVE_CONFIG_KEY, value: { url, secret } });
-  await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "تم حفظ إعدادات درايف (وحُذفت رسالتك). جارٍ الاختبار…" });
+  await storeCall(env, { op: "put", key: DRIVE_CONFIG_KEY, value: { url, secret: "" } });
+  await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "تم حفظ رابط درايف. جارٍ الاختبار…" });
   await telegram(env, "sendMessage", { chat_id: message.chat.id, text: await driveStatusText(env), parse_mode: "HTML", disable_web_page_preview: true });
 }
 
@@ -866,6 +866,15 @@ function isAdmin(env, userId) {
   return adminIds(env).includes(String(userId));
 }
 
+// Who recorded: full (three-part) name when registered, else the Telegram name; plus Telegram id and username.
+function recorderInfo(from, user, userId) {
+  return {
+    name: String(user?.name || displayName(from)).trim(),
+    id: String(userId ?? from?.id ?? ""),
+    username: from?.username ?? "",
+  };
+}
+
 function displayName(person) {
   return [person?.first_name, person?.last_name].filter(Boolean).join(" ").trim() || "بدون اسم";
 }
@@ -927,6 +936,7 @@ async function captureVoiceRecording(env, message, userId, user, ctx) {
     record,
     fileId: message.voice.file_id,
     duration: message.voice.duration,
+    by: recorderInfo(message.from, user, userId),
   });
   await telegram(env, "sendMessage", {
     chat_id: message.chat.id,
@@ -1080,7 +1090,7 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     if (text === "/syncdrive") {
-      await inBackground(ctx, syncPendingVoices(env, message.chat.id));
+      await inBackground(ctx, syncPendingVoices(env, message.chat.id, recorderInfo(message.from, admin, userId)));
       return;
     }
     if (text === "/setdrive" || text.startsWith("/setdrive ")) {

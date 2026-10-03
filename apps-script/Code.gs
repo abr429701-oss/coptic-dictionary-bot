@@ -3,13 +3,15 @@
  *
  * The bot sends every admin recording here. This script:
  *   1. saves the audio file in a Drive folder (named "<word id>.ogg"),
- *   2. records it in a "Voices" tab of the dictionary spreadsheet, keyed by the word's PERMANENT id,
- *   3. writes the file link next to the matching word(s) in the main sheet (column AT).
+ *   2. writes ONE row per word in the "Ban" tab: id, word, Drive link
+ *      (https://drive.google.com/file/d/<FILE_ID>/view?usp=drivesdk), file ids, duration,
+ *      the recorder's full name, Telegram id and username.
  *
+ * No password is needed. (If you ever add a Script property named SECRET, the bot must send it.)
  * Setup: see apps-script/README.md.  Deploy as: Execute as "Me", Who has access "Anyone".
  */
 const CONFIG = {
-  // A long random text. You can instead set it as a Script property named SECRET (recommended).
+  // Optional. Leave empty = no password. (Can also be a Script property named SECRET.)
   SECRET: "",
   // Optional: the Drive folder id (the part after /folders/ in its URL). If empty, a folder named
   // FOLDER_NAME is found or created in My Drive.
@@ -17,13 +19,8 @@ const CONFIG = {
   FOLDER_NAME: "Coptic Dictionary Voices",
   // The dictionary spreadsheet (same one the bot reads).
   SHEET_ID: "1kXVA3CNgETqym5Vz3lBUu_2gZ01QNdx7ROtGVnIJp0c",
-  MAIN_SHEET_NAME: "", // empty = the first tab
-  VOICES_TAB: "Voices",
-  // Put the link next to the word in the main sheet. Column AT is free (the bot reads A..AS only).
-  WRITE_LINK_TO_MAIN_SHEET: true,
-  MAIN_LINK_COLUMN: 46, // 46 = AT
-  MAIN_LINK_HEADER: "Voice link",
-  MAX_ROWS_LINKED_PER_WORD: 50,
+  // Tab that receives one row per recorded word.
+  BAN_TAB: "Ban",
   // Anyone with the link can listen. Keep false to stay private to your Google account.
   SHARE_WITH_LINK: false,
 };
@@ -41,8 +38,7 @@ function doPost(e) {
   try {
     const body = JSON.parse((e && e.postData && e.postData.contents) || "{}");
     const secret = getSecret_();
-    if (!secret) return json_({ ok: false, error: "SECRET is not configured in the script" });
-    if (body.secret !== secret) return json_({ ok: false, error: "unauthorized" });
+    if (secret && body.secret !== secret) return json_({ ok: false, error: "unauthorized" });
     if (body.action === "ping") return json_(ping_());
     return json_(upload_(body));
   } catch (error) {
@@ -72,29 +68,13 @@ function openSpreadsheet_() {
   return SpreadsheetApp.openById(CONFIG.SHEET_ID);
 }
 
-function mainSheet_(spreadsheet) {
-  return CONFIG.MAIN_SHEET_NAME ? spreadsheet.getSheetByName(CONFIG.MAIN_SHEET_NAME) : spreadsheet.getSheets()[0];
-}
-
-// Same cleanup the bot's build script applies, so rows can be matched: jinkim ` -> combining mark.
-function cleanCoptic_(value) {
-  return String(value == null ? "" : value)
-    .replace(/`(\p{L})/gu, "$1\u0300")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function wordKey_(value) {
-  return cleanCoptic_(value).normalize("NFC").toLowerCase();
-}
-
 function ping_() {
   const folder = getFolder_();
   const spreadsheet = openSpreadsheet_();
   return {
     ok: true,
     folder: { name: folder.getName(), url: folder.getUrl() },
-    sheet: { name: spreadsheet.getName(), mainTab: mainSheet_(spreadsheet).getName() },
+    sheet: { name: spreadsheet.getName(), tab: CONFIG.BAN_TAB },
   };
 }
 
@@ -114,24 +94,42 @@ function upload_(body) {
     const file = folder.createFile(blob);
     file.setDescription(word);
     if (CONFIG.SHARE_WITH_LINK) file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-    const url = file.getUrl();
+    const url = driveLink_(file.getId());
 
-    const spreadsheet = openSpreadsheet_();
-    recordInVoicesTab_(spreadsheet, { id: id, word: word, url: url, fileId: file.getId(), body: body });
-    const linked = CONFIG.WRITE_LINK_TO_MAIN_SHEET && word ? linkInMainSheet_(spreadsheet, word, url) : 0;
-    return { ok: true, file_id: file.getId(), url: url, folder_url: folder.getUrl(), rows_linked: linked };
+    recordInBan_(openSpreadsheet_(), { id: id, word: word, url: url, fileId: file.getId(), body: body });
+    return { ok: true, file_id: file.getId(), url: url, folder_url: folder.getUrl() };
   } finally {
     lock.releaseLock();
   }
 }
 
-function recordInVoicesTab_(spreadsheet, info) {
-  let sheet = spreadsheet.getSheetByName(CONFIG.VOICES_TAB);
-  if (!sheet) {
-    sheet = spreadsheet.insertSheet(CONFIG.VOICES_TAB, spreadsheet.getNumSheets());
-    sheet.appendRow(["id", "word", "drive_url", "drive_file_id", "telegram_file_id", "duration_s", "updated_at"]);
-  }
-  const row = [info.id, info.word, info.url, info.fileId, info.body.file_id || "", info.body.duration || "", new Date()];
+function driveLink_(fileId) {
+  return "https://drive.google.com/file/d/" + fileId + "/view?usp=drivesdk";
+}
+
+const BAN_HEADER = ["id", "word", "drive_url", "drive_file_id", "telegram_file_id", "duration_s", "full_name", "user_id", "username"];
+
+function banSheet_(spreadsheet) {
+  let sheet = spreadsheet.getSheetByName(CONFIG.BAN_TAB);
+  if (!sheet) sheet = spreadsheet.insertSheet(CONFIG.BAN_TAB, spreadsheet.getNumSheets());
+  if (!sheet.getRange(1, 1).getValue()) sheet.getRange(1, 1, 1, BAN_HEADER.length).setValues([BAN_HEADER]);
+  return sheet;
+}
+
+function recordInBan_(spreadsheet, info) {
+  const sheet = banSheet_(spreadsheet);
+  const by = info.body.by || {};
+  const row = [
+    info.id,
+    info.word,
+    info.url,
+    info.fileId,
+    info.body.file_id || "",
+    info.body.duration || "",
+    by.name || "",
+    by.id == null ? "" : String(by.id),
+    by.username ? "@" + String(by.username).replace(/^@/, "") : "",
+  ];
   const last = sheet.getLastRow();
   let target = 0;
   if (info.id && last > 1) {
@@ -157,24 +155,4 @@ function recordInVoicesTab_(spreadsheet, info) {
   } else {
     sheet.appendRow(row);
   }
-}
-
-function linkInMainSheet_(spreadsheet, word, url) {
-  const sheet = mainSheet_(spreadsheet);
-  if (!sheet) return 0;
-  if (!sheet.getRange(1, CONFIG.MAIN_LINK_COLUMN).getValue()) {
-    sheet.getRange(1, CONFIG.MAIN_LINK_COLUMN).setValue(CONFIG.MAIN_LINK_HEADER);
-  }
-  const last = sheet.getLastRow();
-  if (last < 2) return 0;
-  const wanted = wordKey_(word);
-  const values = sheet.getRange(2, 1, last - 1, 1).getValues();
-  let linked = 0;
-  for (let i = 0; i < values.length && linked < CONFIG.MAX_ROWS_LINKED_PER_WORD; i += 1) {
-    if (wordKey_(values[i][0]) === wanted) {
-      sheet.getRange(i + 2, CONFIG.MAIN_LINK_COLUMN).setValue(url);
-      linked += 1;
-    }
-  }
-  return linked;
 }

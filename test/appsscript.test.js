@@ -71,65 +71,55 @@ function build({ secret = "S3CRET", mainRows = [] } = {}) {
 const audio = Buffer.from([79, 103, 103, 83, 1, 2, 3]).toString("base64");
 const upload = (extra = {}) => ({ secret: "S3CRET", action: "upload", id: 7, word: "ⲁⲧⲥ̀ϧⲁⲓ", audio_base64: audio, mime_type: "audio/ogg", file_id: "TG", duration: 3, ...extra });
 
-test("rejects a wrong secret, and refuses everything while no secret is configured", () => {
+test("works without any password; if a SECRET property exists it is enforced", () => {
+  const open = build({ secret: "" });
+  assert.equal(open.post({ action: "ping" }).ok, true);
   assert.equal(build().post({ secret: "nope", action: "ping" }).error, "unauthorized");
-  assert.match(build({ secret: "" }).post({ secret: "", action: "ping" }).error, /SECRET is not configured/u);
   assert.equal(JSON.parse(build().api.doGet().text).ok, true);
 });
 
 test("ping creates/finds the folder and reports the spreadsheet", () => {
-  const world = build();
-  const result = world.post({ secret: "S3CRET", action: "ping" });
+  const world = build({ secret: "" });
+  const result = world.post({ action: "ping" });
   assert.equal(result.ok, true);
   assert.equal(result.folder.name, "Coptic Dictionary Voices");
-  assert.equal(result.sheet.mainTab, "Dictionary");
-  world.post({ secret: "S3CRET", action: "ping" });
+  assert.equal(result.sheet.tab, "Ban");
+  world.post({ action: "ping" });
   assert.equal(world.folders.length, 1);
 });
 
-test("an upload saves the file as <id>.ogg, logs it in the Voices tab, and links matching main-sheet rows", () => {
-  const world = build({ mainRows: [["ⲁⲛⲁⲩ", ""], ["ⲁⲧ`ⲥϧⲁⲓ", ""], ["Ⲁⲧⲥ̀ϧⲁⲓ", ""], ["ⲃⲁⲓ", ""]] });
-  const result = world.post(upload());
+const by = { name: "مينا ميخائيل جرجس", id: "555", username: "mina" };
+
+test("an upload saves <id>.ogg and writes one Ban row with the drive link, recorder name, id and username", () => {
+  const world = build({ secret: "" });
+  const result = world.post(upload({ secret: undefined, by }));
   assert.equal(result.ok, true);
-  assert.equal(result.rows_linked, 2);
   const file = world.files.get(result.file_id);
   assert.equal(file.blob.name, "7.ogg");
   assert.deepEqual(file.blob.bytes, [79, 103, 103, 83, 1, 2, 3]);
-  assert.equal(file.description, "ⲁⲧⲥ̀ϧⲁⲓ");
+  assert.equal(result.url, `https://drive.google.com/file/d/${result.file_id}/view?usp=drivesdk`);
 
-  const voices = world.sheets.find((sheet) => sheet.getName() === "Voices");
-  assert.deepEqual(voices.data[0].slice(0, 4), ["id", "word", "drive_url", "drive_file_id"]);
-  assert.equal(voices.data[1][0], "7");
-  assert.equal(voices.data[1][2], result.url);
-
-  assert.equal(world.main.data[0][45], "Voice link");
-  assert.equal(world.main.data[2][45], result.url);
-  assert.equal(world.main.data[3][45], result.url);
-  assert.equal(world.main.data[1][45] ?? "", "");
-  assert.equal(world.main.data[4][45] ?? "", "");
+  const ban = world.sheets.find((sheet) => sheet.getName() === "Ban");
+  assert.deepEqual(ban.data[0], ["id", "word", "drive_url", "drive_file_id", "telegram_file_id", "duration_s", "full_name", "user_id", "username"]);
+  assert.deepEqual(ban.data[1], ["7", "ⲁⲧⲥ̀ϧⲁⲓ", result.url, result.file_id, "TG", 3, by.name, "555", "@mina"]);
+  assert.equal(world.sheets.some((sheet) => sheet.getName() === "Voices"), false);
 });
 
-test("re-recording a word replaces its row and moves the old file to trash", () => {
-  const world = build({ mainRows: [["ⲁⲛⲁⲩ", ""]] });
-  const first = world.post(upload({ id: 3, word: "ⲁⲛⲁⲩ" }));
-  const second = world.post(upload({ id: 3, word: "ⲁⲛⲁⲩ" }));
+test("re-recording a word replaces its Ban row and moves the old file to trash", () => {
+  const world = build({ secret: "" });
+  const first = world.post(upload({ secret: undefined, id: 3, word: "ⲁⲛⲁⲩ", by }));
+  const second = world.post(upload({ secret: undefined, id: 3, word: "ⲁⲛⲁⲩ", by }));
   assert.notEqual(first.file_id, second.file_id);
   assert.equal(world.files.get(first.file_id).trashed, true);
   assert.equal(world.files.get(second.file_id).trashed, false);
-  const voices = world.sheets.find((sheet) => sheet.getName() === "Voices");
-  assert.equal(voices.data.length, 2);
-  assert.equal(voices.data[1][3], second.file_id);
-  assert.equal(world.main.data[1][45], second.url);
+  const ban = world.sheets.find((sheet) => sheet.getName() === "Ban");
+  assert.equal(ban.data.length, 2);
+  assert.equal(ban.data[1][3], second.file_id);
 });
 
 test("rejects bad input without touching Drive", () => {
-  const world = build();
-  assert.match(world.post(upload({ audio_base64: "" })).error, /audio_base64/u);
-  assert.match(world.post(upload({ id: "7; drop" })).error, /id must be a number/u);
+  const world = build({ secret: "" });
+  assert.match(world.post(upload({ secret: undefined, audio_base64: "" })).error, /audio_base64/u);
+  assert.match(world.post(upload({ secret: undefined, id: "7; drop" })).error, /id must be a number/u);
   assert.equal(world.files.size, 0);
-});
-
-test("the main sheet link column stays outside the columns the bot reads (A..AS)", () => {
-  const column = Number(/MAIN_LINK_COLUMN:\s*(\d+)/u.exec(source)[1]);
-  assert.equal(column, 46); // AT; the build script reads indexes 0..44 (A..AS)
 });
