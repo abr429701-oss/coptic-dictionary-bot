@@ -26,8 +26,10 @@
 2. افتح [صفحة أسرار GitHub Actions للمستودع](https://github.com/abr429701-oss/coptic-dictionary-bot/settings/secrets/actions) وأضف:
    - `CLOUDFLARE_API_TOKEN` — التوكن المحدود لـ Workers.
    - `TELEGRAM_BOT_TOKEN` — توكين البوت من BotFather.
+   - `APPS_SCRIPT_URL` — رابط Web App المنشور في Apps Script، ويجب أن ينتهي بـ `/exec`؛ مطلوب لتفعيل أرشفة التسجيلات الصوتية.
 3. من تبويب **Variables** في صفحة الإعدادات نفسها أضف `CLOUDFLARE_ACCOUNT_ID` بمعرّف الحساب.
-4. بعد إضافة القيم، يمكن تشغيل GitHub Actions → **Deploy Coptic Dictionary Bot** → **Run workflow**. سيُنشر Worker، ويولّد سرّ webhook عشوائيًا، ويضبط الأسرار ويسجل webhook لدى Telegram. بعد نجاح النشر تُفعّل إعادة النشر التلقائية عند كل دفع إلى `main`.
+4. بعد إضافة `APPS_SCRIPT_URL` أو تغييره، شغّل GitHub Actions → **Deploy Coptic Dictionary Bot** → **Run workflow** مع `setup_webhook=false` لتحديث Worker دون إعادة ضبط webhook. يدفع الـ workflow قيمة السر إلى Worker؛ ثم استخدم `/drive` في البوت للتحقق، و`/syncdrive` لرفع التسجيلات المعلقة. عند النشر الأول الذي يحتاج إعداد webhook اترك `setup_webhook=true`.
+5. سيُنشر Worker تلقائيًا عند دفع تغييرات إلى `main` إذا كان المتغير `CF_DEPLOY_ENABLED=true`.
 
 أسرار GitHub مشفّرة ولا تظهر لي. لا ترسل التوكنات في المحادثة ولا تضعها في الملفات. عنوان Worker وسرّ webhook يُنشآن تلقائيًا.
 

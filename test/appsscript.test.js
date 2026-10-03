@@ -19,6 +19,23 @@ class FakeSheet {
       getValue: () => cell(row, col),
       setValue: (value) => { sheet.#put(row, col, value); },
       setValues: (values) => values.forEach((vals, i) => vals.forEach((value, j) => sheet.#put(row + i, col + j, value))),
+      createTextFinder: (needle) => {
+        let exact = false;
+        const finder = {
+          matchEntireCell(value) { exact = value; return finder; },
+          matchCase() { return finder; },
+          findNext() {
+            for (let i = 0; i < numRows; i += 1) {
+              const value = cell(row + i, col);
+              if (exact ? String(value) === String(needle) : String(value).includes(String(needle))) {
+                return { getRow: () => row + i };
+              }
+            }
+            return null;
+          },
+        };
+        return finder;
+      },
     };
   }
   #put(row, col, value) {
@@ -39,7 +56,7 @@ function build() {
     files.set(file.id, file);
     return file;
   };
-  const makeFolder = (name) => ({ id: `folder${folders.length + 1}`, name, getId() { return this.id; }, getName() { return this.name; },
+  const makeFolder = (name) => ({ id: `folder${folders.length + 1}`, name, getId() { return this.id; }, getName() { return this.name; }, isTrashed() { return false; },
     getUrl() { return `https://drive.google.com/drive/folders/${this.id}`; }, createFile: makeFile });
   const main = new FakeSheet("Dictionary", [["coptic", "greek"]]);
   const sheets = [main];
@@ -50,7 +67,7 @@ function build() {
   };
   const context = vm.createContext({
     ContentService: { MimeType: { JSON: "json" }, createTextOutput: (text) => ({ text, setMimeType() { return this; } }) },
-    PropertiesService: { getScriptProperties: () => ({ getProperty: (k) => props.get(k) ?? null, setProperty: (k, v) => props.set(k, v) }) },
+    PropertiesService: { getScriptProperties: () => ({ getProperty: (k) => props.get(k) ?? null, setProperty: (k, v) => props.set(k, v), deleteProperty: (k) => props.delete(k) }) },
     LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
     Utilities: { base64Decode: (b64) => [...Buffer.from(b64, "base64")], newBlob: (bytes, mime, name) => ({ bytes, mime, name }) },
     DriveApp: {

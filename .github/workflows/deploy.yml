@@ -85,6 +85,9 @@ jobs:
           for key in $keys; do
             if [ -z "${!key}" ]; then echo "Missing GitHub secret/variable: $key"; exit 1; fi
           done
+          if [ -n "$APPS_SCRIPT_URL" ] && ! printf '%s' "$APPS_SCRIPT_URL" | grep -Eq '^https://script\.google\.com/(a/[^/[:space:]]+/)?macros/s/[A-Za-z0-9_-]+/exec$'; then
+            echo "Invalid APPS_SCRIPT_URL: use the Apps Script web app URL ending in /exec."; exit 1
+          fi
 
       - name: Install dependencies
         run: npm ci

@@ -22,9 +22,25 @@ const CONFIG = {
   SHARE_WITH_LINK: false,
 };
 
+const BAN_HEADER = [
+  "id",
+  "word",
+  "drive_url",
+  "drive_file_id",
+  "telegram_file_id",
+  "duration_s",
+  "full_name",
+  "user_id",
+  "username",
+];
+
 // Run this once from the editor (Run ▶ testSetup) to grant Drive/Sheets permissions and see the folder.
 function testSetup() {
-  Logger.log(JSON.stringify(ping_()));
+  try {
+    Logger.log(JSON.stringify(ping_(), null, 2));
+  } catch (error) {
+    Logger.log("testSetup failed: " + (error && error.message ? error.message : error));
+  }
 }
 
 function doGet() {
@@ -37,27 +53,108 @@ function doPost(e) {
     if (body.action === "ping") return json_(ping_());
     return json_(upload_(body));
   } catch (error) {
-    return json_({ ok: false, error: String(error && error.message ? error.message : error) });
+    return json_({
+      ok: false,
+      error: String(error && error.message ? error.message : error),
+    });
   }
 }
 
 function json_(value) {
-  return ContentService.createTextOutput(JSON.stringify(value)).setMimeType(ContentService.MimeType.JSON);
+  return ContentService.createTextOutput(JSON.stringify(value)).setMimeType(
+    ContentService.MimeType.JSON
+  );
 }
 
+/* -------------------------------------------------------------------------- */
+/*                                   Drive                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Resolves the target folder.
+ * Order of preference:
+ *   1. CONFIG.FOLDER_ID (hard-coded in the script).
+ *   2. A cached id stored in Script Properties (validated; falls back if missing/trashed).
+ *   3. A folder named CONFIG.FOLDER_NAME in My Drive (created if not found).
+ */
 function getFolder_() {
+  // 1) Explicit id from CONFIG.
+  if (CONFIG.FOLDER_ID) {
+    return DriveApp.getFolderById(CONFIG.FOLDER_ID);
+  }
+
   const props = PropertiesService.getScriptProperties();
-  const configured = CONFIG.FOLDER_ID || props.getProperty("FOLDER_ID") || props.getProperty("FOLDER_ID_CACHE");
-  if (configured) return DriveApp.getFolderById(configured);
+
+  // 2) Cached id — validate before trusting it.
+  const cachedId = props.getProperty("FOLDER_ID_CACHE");
+  if (cachedId) {
+    try {
+      const cached = DriveApp.getFolderById(cachedId);
+      if (!cached.isTrashed()) return cached;
+    } catch (ignored) {
+      // Folder was deleted or access revoked — fall through and recreate.
+    }
+    props.deleteProperty("FOLDER_ID_CACHE");
+  }
+
+  // 3) Find or create by name.
   const found = DriveApp.getFoldersByName(CONFIG.FOLDER_NAME);
   const folder = found.hasNext() ? found.next() : DriveApp.createFolder(CONFIG.FOLDER_NAME);
   props.setProperty("FOLDER_ID_CACHE", folder.getId());
   return folder;
 }
 
+function driveLink_(fileId) {
+  return "https://drive.google.com/file/d/" + fileId + "/view?usp=drivesdk";
+}
+
+/* -------------------------------------------------------------------------- */
+/*                                  Sheets                                     */
+/* -------------------------------------------------------------------------- */
+
 function openSpreadsheet_() {
   return SpreadsheetApp.openById(CONFIG.SHEET_ID);
 }
+
+/**
+ * Returns the "Ban" sheet, creating it (with header) if needed.
+ * Recreates the header if row 1 is empty in the first column.
+ */
+function banSheet_(spreadsheet) {
+  let sheet = spreadsheet.getSheetByName(CONFIG.BAN_TAB);
+  if (!sheet) sheet = spreadsheet.insertSheet(CONFIG.BAN_TAB);
+
+  const firstRow = sheet.getRange(1, 1, 1, BAN_HEADER.length).getValues()[0];
+  const hasHeader = firstRow.some(function (cell) {
+    return cell !== "" && cell != null;
+  });
+  if (!hasHeader) {
+    sheet.getRange(1, 1, 1, BAN_HEADER.length).setValues([BAN_HEADER]);
+  }
+  return sheet;
+}
+
+/**
+ * Finds the row whose first column equals `id`. Returns 0 when not found.
+ * Uses TextFinder for speed even on large sheets.
+ */
+function findRowById_(sheet, id) {
+  if (!id) return 0;
+  const last = sheet.getLastRow();
+  if (last < 2) return 0;
+
+  const finder = sheet
+    .getRange(2, 1, last - 1, 1)
+    .createTextFinder(String(id))
+    .matchEntireCell(true)
+    .matchCase(false);
+  const cell = finder.findNext();
+  return cell ? cell.getRow() : 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/*                                   API                                       */
+/* -------------------------------------------------------------------------- */
 
 function ping_() {
   const folder = getFolder_();
@@ -71,75 +168,90 @@ function ping_() {
 
 function upload_(body) {
   if (!body.audio_base64) return { ok: false, error: "audio_base64 is missing" };
+
   const id = body.id == null || body.id === "" ? "" : String(body.id);
   if (id && !/^\d+$/.test(id)) return { ok: false, error: "id must be a number" };
+
   const word = String(body.word || "");
+  const mimeType = String(body.mime_type || "audio/ogg");
+  const extension = mimeType.indexOf("mpeg") >= 0 ? "mp3" : "ogg";
+  const fileName = (id || "voice-" + Date.now()) + "." + extension;
 
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
-  try {
-    const extension = String(body.mime_type || "audio/ogg").indexOf("mpeg") >= 0 ? "mp3" : "ogg";
-    const name = (id || "voice-" + Date.now()) + "." + extension;
-    const blob = Utilities.newBlob(Utilities.base64Decode(body.audio_base64), body.mime_type || "audio/ogg", name);
-    const folder = getFolder_();
-    const file = folder.createFile(blob);
-    file.setDescription(word);
-    if (CONFIG.SHARE_WITH_LINK) file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-    const url = driveLink_(file.getId());
 
-    recordInBan_(openSpreadsheet_(), { id: id, word: word, url: url, fileId: file.getId(), body: body });
-    return { ok: true, file_id: file.getId(), url: url, folder_url: folder.getUrl() };
+  let createdFile = null;
+  try {
+    const blob = Utilities.newBlob(Utilities.base64Decode(body.audio_base64), mimeType, fileName);
+    const folder = getFolder_();
+
+    createdFile = folder.createFile(blob);
+    createdFile.setDescription(word);
+    if (CONFIG.SHARE_WITH_LINK) {
+      createdFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    }
+
+    const url = driveLink_(createdFile.getId());
+
+    recordInBan_(openSpreadsheet_(), {
+      id: id,
+      word: word,
+      url: url,
+      fileId: createdFile.getId(),
+      body: body,
+    });
+
+    return {
+      ok: true,
+      file_id: createdFile.getId(),
+      url: url,
+      folder_url: folder.getUrl(),
+    };
+  } catch (error) {
+    // Roll back the Drive file if the sheet write failed.
+    if (createdFile) {
+      try {
+        createdFile.setTrashed(true);
+      } catch (ignored) {
+        // ignore
+      }
+    }
+    throw error;
   } finally {
     lock.releaseLock();
   }
 }
 
-function driveLink_(fileId) {
-  return "https://drive.google.com/file/d/" + fileId + "/view?usp=drivesdk";
-}
-
-const BAN_HEADER = ["id", "word", "drive_url", "drive_file_id", "telegram_file_id", "duration_s", "full_name", "user_id", "username"];
-
-function banSheet_(spreadsheet) {
-  let sheet = spreadsheet.getSheetByName(CONFIG.BAN_TAB);
-  if (!sheet) sheet = spreadsheet.insertSheet(CONFIG.BAN_TAB, spreadsheet.getNumSheets());
-  if (!sheet.getRange(1, 1).getValue()) sheet.getRange(1, 1, 1, BAN_HEADER.length).setValues([BAN_HEADER]);
-  return sheet;
-}
+/* -------------------------------------------------------------------------- */
+/*                                  Rows                                       */
+/* -------------------------------------------------------------------------- */
 
 function recordInBan_(spreadsheet, info) {
   const sheet = banSheet_(spreadsheet);
   const by = info.body.by || {};
+
   const row = [
     info.id,
     info.word,
     info.url,
     info.fileId,
     info.body.file_id || "",
-    info.body.duration || "",
+    info.body.duration == null ? "" : Number(info.body.duration) || "",
     by.name || "",
     by.id == null ? "" : String(by.id),
     by.username ? "@" + String(by.username).replace(/^@/, "") : "",
   ];
-  const last = sheet.getLastRow();
-  let target = 0;
-  if (info.id && last > 1) {
-    const ids = sheet.getRange(2, 1, last - 1, 1).getValues();
-    for (let i = 0; i < ids.length; i += 1) {
-      if (String(ids[i][0]) === info.id) {
-        target = i + 2;
-        break;
-      }
-    }
-  }
+
+  const target = findRowById_(sheet, info.id);
+
   if (target) {
-    // Re-recording: the previous Drive file is replaced (moved to trash).
+    // Re-recording: trash the previous Drive file, then overwrite the row.
     const oldFileId = sheet.getRange(target, 4).getValue();
-    if (oldFileId && oldFileId !== info.fileId) {
+    if (oldFileId && String(oldFileId) !== info.fileId) {
       try {
         DriveApp.getFileById(String(oldFileId)).setTrashed(true);
       } catch (ignored) {
-        // already deleted
+        // already deleted / no access
       }
     }
     sheet.getRange(target, 1, 1, row.length).setValues([row]);
