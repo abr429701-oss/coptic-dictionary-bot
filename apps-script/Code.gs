@@ -3,8 +3,8 @@
  *
  * The bot sends every admin recording here. This script:
  *   1. saves the audio file in a Drive folder (named "<word id>.ogg"),
- *   2. records it in a "Voices" tab of the dictionary spreadsheet, keyed by the word's PERMANENT id,
- *   3. writes the file link next to the matching word(s) in the main sheet (column AT).
+ *   2. records it in the "Ban" tab of the dictionary spreadsheet, keyed by the word's PERMANENT id,
+ *   3. stores the Drive link and recording metadata there without changing dictionary data.
  *
  * Setup: see apps-script/README.md.  Deploy as: Execute as "Me", Who has access "Anyone".
  */
@@ -17,16 +17,11 @@ const CONFIG = {
   FOLDER_NAME: "Coptic Dictionary Voices",
   // The dictionary spreadsheet (same one the bot reads).
   SHEET_ID: "1kXVA3CNgETqym5Vz3lBUu_2gZ01QNdx7ROtGVnIJp0c",
-  MAIN_SHEET_NAME: "", // empty = the first tab
-  VOICES_TAB: "Voices",
-  // Put the link next to the word in the main sheet. Column AT is free (the bot reads A..AS only).
-  WRITE_LINK_TO_MAIN_SHEET: true,
-  MAIN_LINK_COLUMN: 46, // 46 = AT
-  MAIN_LINK_HEADER: "Voice link",
-  MAX_ROWS_LINKED_PER_WORD: 50,
+  ARCHIVE_TAB: "Ban",
   // Anyone with the link can listen. Keep false to stay private to your Google account.
   SHARE_WITH_LINK: false,
 };
+const ARCHIVE_HEADERS = ["id", "word", "drive_url", "drive_file_id", "telegram_file_id", "duration_s", "updated_at"];
 
 // Run this once from the editor (Run ▶ testSetup) to grant Drive/Sheets permissions and see the folder.
 function testSetup() {
@@ -72,20 +67,31 @@ function openSpreadsheet_() {
   return SpreadsheetApp.openById(CONFIG.SHEET_ID);
 }
 
-function mainSheet_(spreadsheet) {
-  return CONFIG.MAIN_SHEET_NAME ? spreadsheet.getSheetByName(CONFIG.MAIN_SHEET_NAME) : spreadsheet.getSheets()[0];
+function archiveSheet_(spreadsheet) {
+  return spreadsheet.getSheetByName(CONFIG.ARCHIVE_TAB)
+    || spreadsheet.insertSheet(CONFIG.ARCHIVE_TAB, spreadsheet.getNumSheets());
 }
 
-// Same cleanup the bot's build script applies, so rows can be matched: jinkim ` -> combining mark.
-function cleanCoptic_(value) {
-  return String(value == null ? "" : value)
-    .replace(/`(\p{L})/gu, "$1\u0300")
-    .replace(/\s+/g, " ")
-    .trim();
-}
+// Reuse the archive table if it exists; otherwise put it after all existing Ban data.
+function archiveTable_(sheet) {
+  const lastColumn = sheet.getLastColumn();
+  const headers = lastColumn > 0
+    ? sheet.getRange(1, 1, 1, lastColumn).getValues()[0]
+    : [];
+  for (let start = 0; start <= headers.length - ARCHIVE_HEADERS.length; start += 1) {
+    if (ARCHIVE_HEADERS.every((header, offset) => String(headers[start + offset] || "").trim() === header)) {
+      return { startColumn: start + 1 };
+    }
+  }
 
-function wordKey_(value) {
-  return cleanCoptic_(value).normalize("NFC").toLowerCase();
+  const startColumn = lastColumn + 1;
+  const requiredLastColumn = startColumn + ARCHIVE_HEADERS.length - 1;
+  const maxColumns = sheet.getMaxColumns();
+  if (requiredLastColumn > maxColumns) {
+    sheet.insertColumnsAfter(maxColumns, requiredLastColumn - maxColumns);
+  }
+  sheet.getRange(1, startColumn, 1, ARCHIVE_HEADERS.length).setValues([ARCHIVE_HEADERS]);
+  return { startColumn };
 }
 
 function ping_() {
@@ -94,7 +100,7 @@ function ping_() {
   return {
     ok: true,
     folder: { name: folder.getName(), url: folder.getUrl() },
-    sheet: { name: spreadsheet.getName(), mainTab: mainSheet_(spreadsheet).getName() },
+    sheet: { name: spreadsheet.getName(), archiveTab: archiveSheet_(spreadsheet).getName() },
   };
 }
 
@@ -117,25 +123,21 @@ function upload_(body) {
     const url = file.getUrl();
 
     const spreadsheet = openSpreadsheet_();
-    recordInVoicesTab_(spreadsheet, { id: id, word: word, url: url, fileId: file.getId(), body: body });
-    const linked = CONFIG.WRITE_LINK_TO_MAIN_SHEET && word ? linkInMainSheet_(spreadsheet, word, url) : 0;
-    return { ok: true, file_id: file.getId(), url: url, folder_url: folder.getUrl(), rows_linked: linked };
+    recordInBanSheet_(spreadsheet, { id: id, word: word, url: url, fileId: file.getId(), body: body });
+    return { ok: true, file_id: file.getId(), url: url, folder_url: folder.getUrl(), archive_tab: CONFIG.ARCHIVE_TAB };
   } finally {
     lock.releaseLock();
   }
 }
 
-function recordInVoicesTab_(spreadsheet, info) {
-  let sheet = spreadsheet.getSheetByName(CONFIG.VOICES_TAB);
-  if (!sheet) {
-    sheet = spreadsheet.insertSheet(CONFIG.VOICES_TAB, spreadsheet.getNumSheets());
-    sheet.appendRow(["id", "word", "drive_url", "drive_file_id", "telegram_file_id", "duration_s", "updated_at"]);
-  }
+function recordInBanSheet_(spreadsheet, info) {
+  const sheet = archiveSheet_(spreadsheet);
+  const { startColumn } = archiveTable_(sheet);
   const row = [info.id, info.word, info.url, info.fileId, info.body.file_id || "", info.body.duration || "", new Date()];
   const last = sheet.getLastRow();
   let target = 0;
   if (info.id && last > 1) {
-    const ids = sheet.getRange(2, 1, last - 1, 1).getValues();
+    const ids = sheet.getRange(2, startColumn, last - 1, 1).getValues();
     for (let i = 0; i < ids.length; i += 1) {
       if (String(ids[i][0]) === info.id) {
         target = i + 2;
@@ -143,38 +145,19 @@ function recordInVoicesTab_(spreadsheet, info) {
       }
     }
   }
+  let oldFileId = "";
   if (target) {
-    // Re-recording: the previous Drive file is replaced (moved to trash).
-    const oldFileId = sheet.getRange(target, 4).getValue();
-    if (oldFileId && oldFileId !== info.fileId) {
-      try {
-        DriveApp.getFileById(String(oldFileId)).setTrashed(true);
-      } catch (ignored) {
-        // already deleted
-      }
-    }
-    sheet.getRange(target, 1, 1, row.length).setValues([row]);
+    oldFileId = sheet.getRange(target, startColumn + 3).getValue();
   } else {
-    sheet.appendRow(row);
+    target = Math.max(last + 1, 2);
   }
-}
-
-function linkInMainSheet_(spreadsheet, word, url) {
-  const sheet = mainSheet_(spreadsheet);
-  if (!sheet) return 0;
-  if (!sheet.getRange(1, CONFIG.MAIN_LINK_COLUMN).getValue()) {
-    sheet.getRange(1, CONFIG.MAIN_LINK_COLUMN).setValue(CONFIG.MAIN_LINK_HEADER);
-  }
-  const last = sheet.getLastRow();
-  if (last < 2) return 0;
-  const wanted = wordKey_(word);
-  const values = sheet.getRange(2, 1, last - 1, 1).getValues();
-  let linked = 0;
-  for (let i = 0; i < values.length && linked < CONFIG.MAX_ROWS_LINKED_PER_WORD; i += 1) {
-    if (wordKey_(values[i][0]) === wanted) {
-      sheet.getRange(i + 2, CONFIG.MAIN_LINK_COLUMN).setValue(url);
-      linked += 1;
+  // Save the replacement link before trashing the old Drive file.
+  sheet.getRange(target, startColumn, 1, row.length).setValues([row]);
+  if (oldFileId && oldFileId !== info.fileId) {
+    try {
+      DriveApp.getFileById(String(oldFileId)).setTrashed(true);
+    } catch (ignored) {
+      // already deleted
     }
   }
-  return linked;
 }
