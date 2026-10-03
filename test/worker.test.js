@@ -217,7 +217,11 @@ function fakeKv() {
     get: async (key) => store.get(key),
     put: async (key, value) => { store.set(key, value); },
     delete: async (key) => store.delete(key),
-    list: async ({ prefix = "" } = {}) => new Map([...store].filter(([key]) => key.startsWith(prefix))),
+    list: async ({ prefix = "", startAfter, limit } = {}) => {
+      let entries = [...store].filter(([key]) => key.startsWith(prefix)).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+      if (startAfter) entries = entries.filter(([key]) => key > startAfter);
+      return new Map(limit ? entries.slice(0, limit) : entries);
+    },
     setAlarm: async (when) => { alarms.push(when); },
   };
   const object = new UserStore({ storage }, env);
@@ -714,4 +718,50 @@ test("/drive explains how to connect when nothing is configured, and only the ad
   const stranger = await asUser(kvEnv, 4242, { text: "/setdrive " + SCRIPT_URL + " x" });
   assert.equal(kvEnv.USERS.store.get("drive-config"), undefined);
   assert.ok(stranger.length >= 0);
+});
+
+// ---- User directory (Apps Script "User" tab) ----
+test("a new user's name, username and id are sent to the User tab; a changed username is sent again", async () => {
+  const kvEnv = driveEnv();
+  const world = driveWorld();
+  const from = { id: 5001, first_name: "مينا", last_name: "جرجس", username: "mina_g" };
+  await worker.fetch(updateRequest({ message: { text: "/start", chat: { id: 5001, type: "private" }, from } }), kvEnv);
+  const push = world.calls.find((call) => call.url === SCRIPT_URL && call.payload.action === "users");
+  const row = push.payload.users[0];
+  assert.deepEqual([row.id, row.name, row.username, row.registered_at], ["5001", "مينا جرجس", "mina_g", ""]);
+  assert.ok(row.joined_at);
+
+  world.calls.length = 0;
+  await worker.fetch(updateRequest({ message: { text: "مرحبا", chat: { id: 5001, type: "private" }, from } }), kvEnv);
+  assert.ok(!world.calls.some((call) => call.payload?.action === "users"));
+  await worker.fetch(updateRequest({ message: { text: "مرحبا", chat: { id: 5001, type: "private" }, from: { ...from, username: "mina_new" } } }), kvEnv);
+  assert.equal(world.calls.find((call) => call.payload?.action === "users").payload.users[0].username, "mina_new");
+});
+
+test("finishing registration sends the registered full name", async () => {
+  const kvEnv = driveEnv();
+  const world = driveWorld();
+  const from = { id: 5002, first_name: "J", username: "j_user" };
+  const say2 = (text) => worker.fetch(updateRequest({ message: { text, chat: { id: 5002, type: "private" }, from } }), kvEnv);
+  await say2("/start");
+  await say2("مينا جرجس بشرى");
+  const pushes = world.calls.filter((call) => call.payload?.action === "users");
+  assert.equal(pushes.at(-1).payload.users[0].name, "مينا جرجس بشرى");
+  assert.ok(pushes.at(-1).payload.users[0].registered_at);
+});
+
+test("/syncusers pushes existing users in batches, reading old users' Telegram profile once", async () => {
+  const kvEnv = driveEnv();
+  const world = driveWorld();
+  kvEnv.USERS.store.set("user:6001", { firstSeen: "2026-10-01T00:00:00Z", name: "بيشوي مجدي فرج" });
+  kvEnv.USERS.store.set("user:6002", { firstSeen: "2026-10-02T00:00:00Z", tgName: "Mark", username: "mark" });
+  const origin = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    if (String(url).endsWith("/getChat")) return Response.json({ ok: true, result: { first_name: "Bishoy", username: "bishoy_m" } });
+    return origin(url, options);
+  };
+  await adminSay(kvEnv, { text: "/syncusers" });
+  const push = world.calls.find((call) => call.payload?.action === "users");
+  assert.deepEqual(push.payload.users.map((user) => [user.id, user.name, user.username]), [["6001", "بيشوي مجدي فرج", "bishoy_m"], ["6002", "Mark", "mark"]]);
+  assert.equal(kvEnv.USERS.store.get("user:6001").username, "bishoy_m");
 });

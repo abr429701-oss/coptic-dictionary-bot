@@ -596,7 +596,7 @@ export class UserStore {
   }
 
   async fetch(request) {
-    const { op, key, value, userId, input, kb, exclude, fromChat, messageId, id, fileId, drive, limit } = await request.json();
+    const { op, key, value, userId, input, kb, exclude, fromChat, messageId, id, fileId, drive, limit, profile, cursor } = await request.json();
     const storage = this.state.storage;
     if (op === "get") return Response.json({ value: (await storage.get(key)) ?? null });
     if (op === "put") {
@@ -606,14 +606,27 @@ export class UserStore {
     if (op === "register") {
       // Atomic "first contact" check so two quick messages never announce the same user twice.
       const existing = await storage.get(`user:${userId}`);
+      const username = profile?.username ?? "";
+      const tgName = profile?.tgName ?? "";
       if (!existing) {
-        const created = { firstSeen: new Date().toISOString() };
+        const created = { firstSeen: new Date().toISOString(), ...(username ? { username } : {}), ...(tgName ? { tgName } : {}) };
         await storage.put(`user:${userId}`, created);
         return Response.json({ created: true, user: created, total: (await storage.list({ prefix: "user:" })).size });
       }
-      const user = existing.blocked ? { ...existing, blocked: false } : existing;
-      if (existing.blocked) await storage.put(`user:${userId}`, user);
-      return Response.json({ created: false, user });
+      let user = existing.blocked ? { ...existing, blocked: false } : existing;
+      let changed = false;
+      if (profile && (username !== (existing.username ?? "") || tgName !== (existing.tgName ?? ""))) {
+        user = { ...user, username, tgName };
+        changed = true;
+      }
+      if (user !== existing) await storage.put(`user:${userId}`, user);
+      return Response.json({ created: false, user, changed });
+    }
+    if (op === "userpage") {
+      const size = limit ?? 40;
+      const page = await storage.list({ prefix: "user:", ...(cursor ? { startAfter: cursor } : {}), limit: size });
+      const users = [...page].map(([storedKey, record]) => ({ key: storedKey, id: storedKey.slice("user:".length), record }));
+      return Response.json({ users, next: users.length === size ? users.at(-1).key : null });
     }
     if (op === "bccount") return Response.json({ count: (await this.recipients(exclude)).length });
     if (op === "bcstatus") {
@@ -959,17 +972,87 @@ async function stopVoiceRecording(env, chatId, userId, user) {
   await telegram(env, "sendMessage", { chat_id: chatId, text: "⏸️ تم إيقاف جلسة التسجيل. أرسل /record لاستكمالها من أول كلمة غير مسجلة." });
 }
 
-async function registerOnFirstContact(env, message, userId) {
+// ---- User directory in the spreadsheet ("User" tab, written by the Apps Script) ----
+const USERS_SYNC_CURSOR = "users-sync-cursor";
+const USERS_SYNC_BATCH = 30;
+
+function userSheetRow(id, record, from = {}) {
+  const tgName = record?.tgName || displayNameOrEmpty(from);
+  return {
+    id: String(id),
+    name: record?.name || tgName || "",
+    username: record?.username || from?.username || "",
+    joined_at: record?.firstSeen ?? "",
+    registered_at: record?.registeredAt ?? "",
+  };
+}
+
+function displayNameOrEmpty(person) {
+  return [person?.first_name, person?.last_name].filter(Boolean).join(" ").trim();
+}
+
+async function pushUsers(env, rows) {
+  const config = await driveConfig(env);
+  if (!config || !rows.length) return { ok: false, skipped: true };
+  try {
+    await callAppsScript(config, { action: "users", users: rows });
+    return { ok: true };
+  } catch (error) {
+    console.error("User sheet sync failed", error instanceof Error ? error.message : "unknown error");
+    return { ok: false, error: error instanceof Error ? error.message : "unknown error" };
+  }
+}
+
+async function syncUsersBatch(env, chatId) {
+  const config = await driveConfig(env);
+  if (!config) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "لم يتم ربط جوجل درايف بعد. استخدم /setdrive أولًا." });
+    return;
+  }
+  const cursor = (await storeCall(env, { op: "get", key: USERS_SYNC_CURSOR })).value ?? null;
+  const page = await storeCall(env, { op: "userpage", cursor, limit: USERS_SYNC_BATCH });
+  const rows = [];
+  for (const item of page.users) {
+    let record = item.record ?? {};
+    if (!record.tgName && !record.username) {
+      // Older users: read their current Telegram profile once and remember it.
+      const chat = await telegram(env, "getChat", { chat_id: item.id }).catch(() => null);
+      if (chat?.ok && chat.result) {
+        record = { ...record, tgName: displayNameOrEmpty(chat.result), username: chat.result.username ?? "" };
+        await saveUser(env, item.id, record);
+      }
+    }
+    rows.push(userSheetRow(item.id, record));
+  }
+  const outcome = await pushUsers(env, rows);
+  if (!outcome.ok) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ تعذّرت مزامنة المستخدمين: ${outcome.error ?? "الربط غير مفعّل"}` });
+    return;
+  }
+  if (page.next) await storeCall(env, { op: "put", key: USERS_SYNC_CURSOR, value: page.next });
+  else await storeCall(env, { op: "put", key: USERS_SYNC_CURSOR, value: null });
+  await telegram(env, "sendMessage", {
+    chat_id: chatId,
+    text: page.next
+      ? `👥 تمت مزامنة ${rows.length} مستخدم إلى ورقة User.\nأرسل /syncusers لمتابعة الباقي.`
+      : `👥 تمت مزامنة ${rows.length} مستخدم. 🎉 كل المستخدمين الآن في ورقة User.`,
+  });
+}
+
+async function registerOnFirstContact(env, message, userId, ctx) {
   if (isAdmin(env, userId) || (message.chat.type ?? "private") !== "private" || !env.USERS) return undefined;
+  const from = message.from ?? {};
   let result;
   try {
-    result = await storeCall(env, { op: "register", userId });
+    result = await storeCall(env, { op: "register", userId, profile: { username: from.username ?? "", tgName: displayNameOrEmpty(from) } });
   } catch (error) {
     console.error("Register failed", error instanceof Error ? error.message : "unknown error");
     return undefined;
   }
+  if (result?.created || result?.changed) {
+    await inBackground(ctx, pushUsers(env, [userSheetRow(userId, result.user, from)]));
+  }
   if (!result?.created) return result?.user;
-  const from = message.from ?? {};
   await notifyAdmins(env, [
     "🆕 <b>انضم مستخدم جديد إلى البوت</b>",
     `👤 الاسم: ${escapeHtml(displayName(from))}`,
@@ -1075,7 +1158,7 @@ async function handleUpdate(update, env, ctx) {
   const text = String(message.text ?? "").trim();
   const userId = message.from?.id ?? message.chat.id;
   const isPrivate = (message.chat.type ?? "private") === "private";
-  const known = await registerOnFirstContact(env, message, userId);
+  const known = await registerOnFirstContact(env, message, userId, ctx);
   if (isAdmin(env, userId) && isPrivate) {
     const admin = await getUser(env, userId);
     if (text === "/cancel" && admin?.bc) {
@@ -1098,6 +1181,10 @@ async function handleUpdate(update, env, ctx) {
     }
     if (text === "/syncdrive") {
       await inBackground(ctx, syncPendingVoices(env, message.chat.id, recorderInfo(message.from, admin, userId)));
+      return;
+    }
+    if (text === "/syncusers") {
+      await inBackground(ctx, syncUsersBatch(env, message.chat.id));
       return;
     }
     if (text === "/setdrive" || text.startsWith("/setdrive ")) {
@@ -1173,7 +1260,9 @@ async function handleUpdate(update, env, ctx) {
         return;
       }
       const name = text.replace(/\s+/gu, " ").trim();
-      await saveUser(env, userId, { ...user, name, awaitingName: undefined, registeredAt: new Date().toISOString() });
+      const completed = { ...user, name, awaitingName: undefined, registeredAt: new Date().toISOString() };
+      await saveUser(env, userId, completed);
+      await inBackground(ctx, pushUsers(env, [userSheetRow(userId, completed, message.from)]));
       await sendWelcome(env, message.chat.id, name);
       if (!isAdmin(env, userId)) {
         await notifyAdmins(env, `✅ أكمل التسجيل: <b>${escapeHtml(name)}</b> (🆔 <code>${escapeHtml(userId)}</code>)`);

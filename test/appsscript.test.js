@@ -138,3 +138,22 @@ test("rejects bad input without touching Drive", () => {
   assert.match(world.post(upload({ id: "7; drop" })).error, /id must be a number/u);
   assert.equal(world.files.size, 0);
 });
+
+test("users are added to the User tab and updated by Telegram id without duplicates", () => {
+  const world = build();
+  const first = world.post({ action: "users", users: [
+    { id: "11", name: "مينا جرجس", username: "mina", joined_at: "2026-10-01", registered_at: "" },
+    { id: "12", name: "Mark", username: "@mark", joined_at: "2026-10-02", registered_at: "" },
+  ] });
+  assert.deepEqual([first.added, first.updated], [2, 0]);
+  const tab = world.sheets.find((sheet) => sheet.getName() === "User");
+  assert.deepEqual(tab.data[0].slice(0, 3), ["name", "username", "id"]);
+  assert.deepEqual(tab.data[1].slice(0, 3), ["مينا جرجس", "@mina", "11"]);
+  assert.equal(tab.data[2][1], "@mark");
+
+  const again = world.post({ action: "users", users: [{ id: "11", name: "مينا جرجس بشرى", username: "", joined_at: "", registered_at: "2026-10-03" }] });
+  assert.deepEqual([again.added, again.updated], [0, 1]);
+  assert.equal(tab.data.length, 3);
+  assert.deepEqual(tab.data[1].slice(0, 5), ["مينا جرجس بشرى", "@mina", "11", "2026-10-01", "2026-10-03"]);
+  assert.equal(world.post({ action: "users", users: [{ id: "x; drop" }] }).added, 0);
+});
