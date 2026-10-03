@@ -415,6 +415,11 @@ async function driveStatusText(env) {
     const ping = await callAppsScript(config, { action: "ping" });
     lines.push("", `📁 الفولدر: <a href="${escapeHtml(ping.folder?.url ?? "")}">${escapeHtml(ping.folder?.name ?? "")}</a>`);
     lines.push(`📄 الشيت: ${escapeHtml(ping.sheet?.name ?? "")}`);
+    if (ping.sheet?.archiveTab === "Ban") {
+      lines.push("📑 تبويب روابط التسجيل: Ban");
+    } else {
+      lines.push("⚠️ النسخة المنشورة من السكربت لا تؤكد أن روابط التسجيل تُحفظ في Ban؛ حدّثها وانشر نسخة جديدة.");
+    }
   } catch (error) {
     lines.push("", `❌ تعذّر الاتصال بالسكريبت: ${escapeHtml(error instanceof Error ? error.message : "unknown error")}`);
   }
