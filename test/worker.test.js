@@ -1061,3 +1061,13 @@ test("empty fields are skipped and doubled full stops are not added", async () =
   assert.ok(!caption.includes(".."));
   assert.ok(caption.includes(records[index].coptic.trim()));
 });
+
+test("the entry text has no Gregorian or Coptic date lines", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const calls = pickWorld(kvEnv);
+  await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲁϫⲓⲛⲓ", chat: { id: 961 }, from: { id: 961 }, date: 1790000000 } }), kvEnv);
+  await pick(kvEnv, `s|${sonIndex}|1`, 961);
+  const texts = calls.map((call) => String(call.payload?.text ?? call.payload?.caption ?? ""));
+  assert.ok(texts.some((text) => text.includes("<b>الكلمة:</b>")));
+  for (const text of texts) assert.doesNotMatch(text, /التاريخ الميلادي|التاريخ القبطي/u);
+});

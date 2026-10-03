@@ -168,38 +168,6 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;");
 }
 
-const COPTIC_MONTHS = [
-  "توت", "بابه", "هاتور", "كيهك", "طوبه", "أمشير",
-  "برمهات", "برموده", "بشنس", "بؤونه", "أبيب", "مسرى", "النسيء",
-];
-
-function gregorianToCoptic(year, month, day) {
-  const a = Math.floor((14 - month) / 12);
-  const y = year + 4800 - a;
-  const m = month + 12 * a - 3;
-  const julianDay = day + Math.floor((153 * m + 2) / 5) + 365 * y + Math.floor(y / 4)
-    - Math.floor(y / 100) + Math.floor(y / 400) - 32045;
-  const days = julianDay - 1825029;
-  const copticYear = Math.floor((4 * days + 1463) / 1461);
-  const firstDay = 365 * (copticYear - 1) + Math.floor(copticYear / 4);
-  const dayOfYear = days - firstDay;
-  return { year: copticYear, month: Math.floor(dayOfYear / 30) + 1, day: (dayOfYear % 30) + 1 };
-}
-
-function formatRequestDate(timestamp) {
-  const instant = Number.isFinite(Number(timestamp)) ? new Date(Number(timestamp) * 1000) : new Date();
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "Africa/Cairo", year: "numeric", month: "numeric", day: "numeric",
-  }).formatToParts(instant);
-  const get = (type) => Number(parts.find((part) => part.type === type)?.value);
-  const year = get("year");
-  const month = get("month");
-  const day = get("day");
-  const coptic = gregorianToCoptic(year, month, day);
-  const arabicDigits = (value) => String(value).replace(/\d/gu, (digit) => "٠١٢٣٤٥٦٧٨٩"[digit]);
-  return `\n\n<b>التاريخ الميلادي:</b> ${arabicDigits(day)} / ${arabicDigits(month)} / ${arabicDigits(year)}\n<b>التاريخ القبطي:</b> ${arabicDigits(coptic.day)} ${COPTIC_MONTHS[coptic.month - 1]} ${arabicDigits(coptic.year)}`;
-}
-
 function formatRecord(record, partIndex = -1) {
   const parts = splitMeaning(record.meaning);
   const meaning = partIndex >= 0 && parts[partIndex] ? parts[partIndex] : parts.join("، ");
@@ -565,7 +533,7 @@ async function sendCardEntry(env, chatId, record, text, media) {
   return true;
 }
 
-async function sendSearch(env, chatId, query, page = 0, messageId = undefined, requestTimestamp = undefined) {
+async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
   const cleanQuery = String(query ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, 160);
   const normalizedQuery = normalize(cleanQuery);
   const deliver = (payload) => messageId === undefined
@@ -592,7 +560,7 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined, r
   const media = messageId === undefined ? lookupMedia(env, record) : null;
   const voice = prepareWordVoice(env, record, media);
   const part = matchedPartIndex(record, normalizedQuery);
-  const text = `${formatRecord(record, part)}${formatRequestDate(requestTimestamp)}`.slice(0, MAX_MESSAGE_LENGTH);
+  const text = formatRecord(record, part).slice(0, MAX_MESSAGE_LENGTH);
   if (await sendCardEntry(env, chatId, record, text, media)) {
     await sendPreparedVoice(env, chatId, record, voice, part);
     return undefined;
@@ -602,12 +570,12 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined, r
   return response;
 }
 
-async function sendRecord(env, chatId, index, partIndex = -1, requestTimestamp = undefined) {
+async function sendRecord(env, chatId, index, partIndex = -1) {
   const record = records[index];
   if (!record) return;
   const media = lookupMedia(env, record);
   const voice = prepareWordVoice(env, record, media);
-  const text = `${formatRecord(record, partIndex)}${formatRequestDate(requestTimestamp)}`.slice(0, MAX_MESSAGE_LENGTH);
+  const text = formatRecord(record, partIndex).slice(0, MAX_MESSAGE_LENGTH);
   if (!(await sendCardEntry(env, chatId, record, text, media))) {
     await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML" });
   }
@@ -986,7 +954,7 @@ async function handleKeyboardInput(env, message, userId) {
       return;
     }
     await showTyping(env, chatId);
-    await sendSearch(env, chatId, query, 0, undefined, message?.date);
+    await sendSearch(env, chatId, query, 0);
     // Continue below the results with a fresh, empty composition message.
     const sent = await telegram(env, "sendMessage", { chat_id: chatId, text: keyboardText("") });
     await storeCall(env, { op: "kbset", userId, kb: { word: "", msgId: sent?.result?.message_id ?? null } });
@@ -1483,13 +1451,13 @@ async function handleUpdate(update, env, ctx) {
     const pick = /^s\|(\d{1,6})(?:\|(\d{1,3}))?$/u.exec(callback.data ?? "");
     if (pick) {
       if (callback.message?.chat?.id) {
-        await sendRecord(env, callback.message.chat.id, Number(pick[1]), pick[2] === undefined ? -1 : Number(pick[2]), callback.message.date);
+        await sendRecord(env, callback.message.chat.id, Number(pick[1]), pick[2] === undefined ? -1 : Number(pick[2]));
       }
       return;
     }
     const match = /^p\|(\d{1,6})\|(.+)$/su.exec(callback.data ?? "");
     if (!match || !callback.message?.chat?.id || !callback.message?.message_id) return;
-    await sendSearch(env, callback.message.chat.id, match[2], Number(match[1]), callback.message.message_id, callback.message.date);
+    await sendSearch(env, callback.message.chat.id, match[2], Number(match[1]), callback.message.message_id);
     return;
   }
 
@@ -1627,7 +1595,7 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     await showTyping(env, message.chat.id);
-    await sendSearch(env, message.chat.id, text, 0, undefined, message.date);
+    await sendSearch(env, message.chat.id, text, 0);
   }
 }
 
