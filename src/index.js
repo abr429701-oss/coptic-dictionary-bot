@@ -1243,7 +1243,7 @@ async function sendUsageReport(env, chatId) {
 const INLINE_LIMIT = 20;
 const INLINE_CACHE_SECONDS = 300;
 
-function inlineArticle(index, normalizedQuery, fileId) {
+function inlineArticle(index, normalizedQuery, fileId, audioUrl = "") {
   const record = records[index];
   const part = matchedPartIndex(record, normalizedQuery);
   const parts = splitMeaning(record.meaning);
@@ -1257,6 +1257,17 @@ function inlineArticle(index, normalizedQuery, fileId) {
       type: "voice",
       id,
       voice_file_id: fileId,
+      title: `🔊 ${word}${meaning ? ` — ${meaning}` : ""}`.slice(0, 100),
+      caption: text,
+      parse_mode: "HTML",
+    };
+  }
+  if (audioUrl && spokenText(record) && text.length <= 1000) {
+    // No recording: Telegram fetches the generated speech (Google) from this Worker and sends it with the entry.
+    return {
+      type: "audio",
+      id,
+      audio_url: `${audioUrl}/tts/${index}.mp3`,
       title: `🔊 ${word}${meaning ? ` — ${meaning}` : ""}`.slice(0, 100),
       caption: text,
       parse_mode: "HTML",
@@ -1303,12 +1314,62 @@ async function answerInline(env, inlineQuery) {
   if (!indexes.length && short) indexes = findMatches(raw);
   indexes = indexes.slice(0, INLINE_LIMIT);
   const voices = await recordedVoices(env, indexes);
-  const results = indexes.map((index) => inlineArticle(index, normalizedQuery, voices[records[index].id]));
+  const audioBase = lastOrigin && (await speechAvailable()) ? lastOrigin : "";
+  const results = indexes.map((index) => inlineArticle(index, normalizedQuery, voices[records[index].id], audioBase));
   const response = await answer(results, INLINE_CACHE_SECONDS);
-  if (response && response.ok === false && results.some((item) => item.type === "voice")) {
+  if (response && response.ok === false && results.some((item) => item.type === "voice" || item.type === "audio")) {
     // A stored recording was rejected by Telegram: answer again with text only.
     await answer(indexes.map((index) => inlineArticle(index, normalizedQuery, null)), INLINE_CACHE_SECONDS);
   }
+}
+
+let lastOrigin = "";
+const speechHealth = { ok: false, checkedAt: 0 };
+
+// Is Google's speech reachable from this Worker? Cached so inline answers do not probe every time.
+async function speechAvailable() {
+  const age = Date.now() - speechHealth.checkedAt;
+  if (speechHealth.checkedAt && age < (speechHealth.ok ? 30 * 60000 : 5 * 60000)) return speechHealth.ok;
+  speechHealth.ok = Boolean(await fetchSpeech("hello"));
+  speechHealth.checkedAt = Date.now();
+  return speechHealth.ok;
+}
+
+async function serveSpeech(request, ctx, index) {
+  const spoken = spokenText(records[index]);
+  if (!spoken) return new Response("Not found", { status: 404 });
+  const cache = globalThis.caches?.default;
+  const cacheKey = new Request(new URL(request.url).toString(), { method: "GET" });
+  const cached = cache ? await cache.match(cacheKey) : undefined;
+  if (cached) return cached;
+  const audio = await fetchSpeech(spoken);
+  if (!audio) return new Response("Speech unavailable", { status: 502 });
+  const response = new Response(request.method === "HEAD" ? null : audio, {
+    headers: { "content-type": "audio/mpeg", "content-length": String(audio.byteLength), "cache-control": "public, max-age=2592000" },
+  });
+  if (cache && request.method === "GET") await inBackground(ctx, cache.put(cacheKey, response.clone()));
+  return response;
+}
+
+async function sendBotInfo(env, chatId) {
+  const [me, hook, speech] = await Promise.all([
+    telegram(env, "getMe", {}),
+    telegram(env, "getWebhookInfo", {}),
+    fetchSpeech("hello").then(Boolean),
+  ]);
+  const info = hook?.result ?? {};
+  const allowed = info.allowed_updates ?? [];
+  const lines = [
+    `🤖 <b>@${escapeHtml(me?.result?.username ?? "?")}</b>`,
+    `البحث من المحادثات (inline): ${me?.result?.supports_inline_queries ? "مفعّل ✅" : "غير مفعّل ❌ — من @BotFather أرسل /setinline"}`,
+    `الـ webhook يستقبل inline: ${allowed.includes("inline_query") ? "نعم ✅" : "لا ❌"}`,
+    `طلبات معلّقة: ${info.pending_update_count ?? 0}`,
+    `آخر خطأ في الـ webhook: ${info.last_error_message ? escapeHtml(info.last_error_message) : "لا يوجد"}`,
+    `صوت جوجل (TTS) من السيرفر: ${speech ? "يعمل ✅" : "لا يعمل ❌ (جوجل ترفض الطلب)"}`,
+    "",
+    "نص البلاس هولدر (التلميح داخل خانة الكتابة) يُضبط من @BotFather ← /setinline ولا يمكن قراءته أو تغييره من الكود.",
+  ];
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML" });
 }
 
 async function handleUpdate(update, env, ctx) {
@@ -1364,6 +1425,10 @@ async function handleUpdate(update, env, ctx) {
     }
     if (text === "/syncdrive") {
       await inBackground(ctx, syncPendingVoices(env, message.chat.id, recorderInfo(message.from, admin, userId)));
+      return;
+    }
+    if (text === "/botinfo") {
+      await sendBotInfo(env, message.chat.id);
       return;
     }
     if (text === "/usage") {
@@ -1474,6 +1539,11 @@ export default {
   async fetch(request, env, ctx) {
     countRequest(env, ctx);
     const url = new URL(request.url);
+    lastOrigin = url.origin;
+    const speech = /^\/tts\/(\d{1,6})\.mp3$/u.exec(url.pathname);
+    if (speech && (request.method === "GET" || request.method === "HEAD") && records[Number(speech[1])]) {
+      return serveSpeech(request, ctx, Number(speech[1]));
+    }
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
       return new Response("Coptic dictionary bot is ready.", { status: 200 });
     }

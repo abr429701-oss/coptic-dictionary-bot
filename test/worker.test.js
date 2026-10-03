@@ -864,3 +864,55 @@ test("inline: if Telegram rejects a stored recording, the answer is repeated as 
   assert.equal(answers.length, 2);
   assert.ok(answers[1].payload.results.every((item) => item.type === "article"));
 });
+
+test("inline: words without a recording become audio results when Google speech works", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const payload = typeof options.body === "string" ? JSON.parse(options.body) : null;
+    calls.push({ url: String(url), payload });
+    if (String(url).includes("translate_tts")) {
+      return new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "audio/mpeg" } });
+    }
+    return Response.json({ ok: true, result: true });
+  };
+  // A fresh module instance, so the cached "speech is down" state from other tests does not leak in.
+  const fresh = (await import(`../src/index.js?speech=${Date.now()}`)).default;
+  await fresh.fetch(updateRequest({ inline_query: { id: "a1", from: { id: 77 }, query: "ⲁⲃⲏⲧ", offset: "" } }), env);
+  const answer = calls.find((call) => call.url.endsWith("/answerInlineQuery")).payload;
+  const audio = answer.results.find((item) => item.type === "audio");
+  assert.ok(audio, "expected an audio result");
+  assert.match(audio.audio_url, /^https:\/\/bot\.test\/tts\/\d+\.mp3$/u);
+  assert.match(audio.caption, /<b>الكلمة:<\/b> /u);
+});
+
+test("the /tts endpoint serves generated speech and only for dictionary entries", async () => {
+  globalThis.fetch = async (url) => String(url).includes("translate_tts")
+    ? new Response(new Uint8Array([9, 9, 9, 9]), { headers: { "content-type": "audio/mpeg" } })
+    : Response.json({ ok: true });
+  const index = records.findIndex((record) => String(record.phonetic || record.english || "").trim());
+  const ok = await worker.fetch(new Request(`https://bot.test/tts/${index}.mp3`), env);
+  assert.equal(ok.status, 200);
+  assert.equal(ok.headers.get("content-type"), "audio/mpeg");
+  assert.equal((await ok.arrayBuffer()).byteLength, 4);
+  const missing = await worker.fetch(new Request("https://bot.test/tts/99999999.mp3"), env);
+  assert.equal(missing.status, 404);
+});
+
+test("/botinfo (admin) reports inline support, webhook updates and Google speech", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const payload = typeof options.body === "string" ? JSON.parse(options.body) : null;
+    calls.push({ url: String(url), payload });
+    if (String(url).endsWith("/getMe")) return Response.json({ ok: true, result: { username: "Uploade33_bot", supports_inline_queries: true } });
+    if (String(url).endsWith("/getWebhookInfo")) return Response.json({ ok: true, result: { allowed_updates: ["message", "inline_query"], pending_update_count: 0 } });
+    if (String(url).includes("translate_tts")) return new Response("blocked", { status: 403 });
+    return Response.json({ ok: true, result: true });
+  };
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await adminSay(kvEnv, { text: "/botinfo" });
+  const text = calls.filter((call) => call.url.endsWith("/sendMessage")).at(-1).payload.text;
+  assert.match(text, /Uploade33_bot/u);
+  assert.match(text, /inline\): مفعّل/u);
+  assert.match(text, /يستقبل inline: نعم/u);
+  assert.match(text, /لا يعمل/u);
+});
