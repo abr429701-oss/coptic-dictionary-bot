@@ -1,6 +1,7 @@
 import records from "../data/dictionary.json" with { type: "json" };
 import cardManifest from "../data/cards.json" with { type: "json" };
 import welcomeImageBase64 from "./welcome-image.js";
+import welcomeImage2Base64 from "./welcome-image-2.js";
 
 const BOT_TITLE = "📖 القاموس القبطي البحيري";
 const PAGE_SIZE = 1;
@@ -818,21 +819,30 @@ function isValidFullName(value) {
 async function sendWelcome(env, chatId, name) {
   const caption =
     `مرحبًا بك يا ${escapeHtml(name)} في القاموس الرقمي الناطق للغة القبطية, تفضل الان بكتابة أي كلمة للبحث عنها`;
+  let sentPhotos = 0;
   try {
-    // Upload the bundled image bytes directly: no dependency on Telegram fetching an external URL.
-    const bytes = Uint8Array.from(atob(welcomeImageBase64), (char) => char.charCodeAt(0));
-    const form = new FormData();
-    form.append("chat_id", String(chatId));
-    form.append("caption", caption);
-    form.append("parse_mode", "HTML");
-    form.append("photo", new Blob([bytes], { type: "image/jpeg" }), "welcome.jpg");
-    const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, {
-      method: "POST",
-      body: form,
-    });
-    const result = await response.json().catch(() => ({}));
-    if (response.ok && result.ok) return;
-    console.error("Telegram sendPhoto failed", result.description ?? response.status);
+    // Upload both bundled images directly; Telegram does not need to fetch an external URL.
+    for (const [image, filename, imageCaption] of [
+      [welcomeImageBase64, "welcome.jpg", caption],
+      [welcomeImage2Base64, "welcome-word-card.jpg", ""],
+    ]) {
+      const bytes = Uint8Array.from(atob(image), (char) => char.charCodeAt(0));
+      const form = new FormData();
+      form.append("chat_id", String(chatId));
+      if (imageCaption) {
+        form.append("caption", imageCaption);
+        form.append("parse_mode", "HTML");
+      }
+      form.append("photo", new Blob([bytes], { type: "image/jpeg" }), filename);
+      const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, {
+        method: "POST",
+        body: form,
+      });
+      const result = await response.json().catch(() => ({}));
+      if (response.ok && result.ok) sentPhotos += 1;
+      else console.error("Telegram sendPhoto failed", result.description ?? response.status);
+    }
+    if (sentPhotos > 0) return;
   } catch (error) {
     console.error("Welcome photo failed", error instanceof Error ? error.message : "unknown error");
   }
