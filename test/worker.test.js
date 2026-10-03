@@ -686,6 +686,25 @@ test("/setdrive needs only the link and rejects bad input", async () => {
   assert.equal(other.USERS.store.get("drive-config"), undefined);
 });
 
+test("/setdrive overrides a stale APPS_SCRIPT_URL secret", async () => {
+  const staleUrl = "https://script.google.com/macros/s/OLD_DEPLOYMENT/exec";
+  const kvEnv = driveEnv({ APPS_SCRIPT_URL: staleUrl });
+  const world = driveWorld();
+  await adminSay(kvEnv, { message_id: 323, text: `/setdrive ${SCRIPT_URL}` });
+  assert.deepEqual(kvEnv.USERS.store.get("drive-config"), { url: SCRIPT_URL });
+  assert.ok(world.calls.some((call) => call.url === SCRIPT_URL && call.payload.action === "ping"));
+  assert.ok(!world.calls.some((call) => call.url === staleUrl));
+});
+
+test("/setdrive reset removes the override and falls back to APPS_SCRIPT_URL", async () => {
+  const kvEnv = driveEnv();
+  kvEnv.USERS.store.set("drive-config", { url: "https://script.google.com/macros/s/OLD_DEPLOYMENT/exec" });
+  const world = driveWorld();
+  await adminSay(kvEnv, { message_id: 324, text: "/setdrive reset" });
+  assert.equal(kvEnv.USERS.store.get("drive-config"), null);
+  assert.ok(world.calls.some((call) => call.url === SCRIPT_URL && call.payload.action === "ping"));
+});
+
 test("/drive explains how to connect when nothing is configured, and only the admin can use these commands", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const world = driveWorld();

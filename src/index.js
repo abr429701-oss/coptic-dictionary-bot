@@ -315,15 +315,16 @@ const DRIVE_CONFIG_KEY = "drive-config";
 const SYNC_DRIVE_BATCH = 5;
 
 async function driveConfig(env) {
-  if (env.APPS_SCRIPT_URL) return { url: env.APPS_SCRIPT_URL };
-  if (!env.USERS) return null;
-  try {
-    const saved = (await storeCall(env, { op: "get", key: DRIVE_CONFIG_KEY })).value;
-    return saved?.url ? saved : null;
-  } catch (error) {
-    console.error("Drive config lookup failed", error instanceof Error ? error.message : "unknown error");
-    return null;
+  // An explicit admin /setdrive URL is an override; the repository secret is only the fallback.
+  if (env.USERS) {
+    try {
+      const saved = (await storeCall(env, { op: "get", key: DRIVE_CONFIG_KEY })).value;
+      if (saved?.url) return saved;
+    } catch (error) {
+      console.error("Drive config lookup failed", error instanceof Error ? error.message : "unknown error");
+    }
   }
+  return env.APPS_SCRIPT_URL ? { url: env.APPS_SCRIPT_URL } : null;
 }
 
 async function callAppsScript(config, payload) {
@@ -450,7 +451,14 @@ async function syncPendingVoices(env, chatId, by) {
 }
 
 async function setDriveConfig(env, message, argument) {
-  const url = argument.split(/\s+/u)[0];
+  const input = argument.trim();
+  if (input.toLowerCase() === "reset") {
+    await storeCall(env, { op: "put", key: DRIVE_CONFIG_KEY, value: null });
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "تم حذف رابط /setdrive. سيستخدم البوت سرّ APPS_SCRIPT_URL إن كان مضبوطًا." });
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: await driveStatusText(env), parse_mode: "HTML", disable_web_page_preview: true });
+    return;
+  }
+  const url = input.split(/\s+/u)[0];
   if (!/^https:\/\/script\.google\.com\/(?:macros\/s\/[\w-]+|a\/[^/\s]+\/macros\/s\/[\w-]+)\/exec$/u.test(url ?? "")) {
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,

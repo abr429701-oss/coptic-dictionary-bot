@@ -20,7 +20,7 @@
 
 ## النشر التلقائي من GitHub
 
-المستودع الخاص: [abr429701-oss/coptic-dictionary-bot](https://github.com/abr429701-oss/coptic-dictionary-bot). ملفات النشر موجودة في `.github/workflows/deploy.yml`.
+المستودع العام: [abr429701-oss/coptic-dictionary-bot](https://github.com/abr429701-oss/coptic-dictionary-bot). ملفات النشر موجودة في `.github/workflows/deploy.yml`.
 
 1. أنشئ API Token من [صفحة Cloudflare API Tokens](https://dash.cloudflare.com/profile/api-tokens) بصلاحية **Edit Cloudflare Workers** للحساب المطلوب، وفعّل عنوان `workers.dev` للحساب مرة واحدة. خذ `Account ID` من لوحة Cloudflare.
 2. افتح [صفحة أسرار GitHub Actions للمستودع](https://github.com/abr429701-oss/coptic-dictionary-bot/settings/secrets/actions) وأضف:
@@ -29,7 +29,8 @@
    - `APPS_SCRIPT_URL` — رابط Web App المنشور في Apps Script، ويجب أن ينتهي بـ `/exec`؛ مطلوب لتفعيل أرشفة التسجيلات الصوتية.
 3. من تبويب **Variables** في صفحة الإعدادات نفسها أضف `CLOUDFLARE_ACCOUNT_ID` بمعرّف الحساب.
 4. بعد إضافة `APPS_SCRIPT_URL` أو تغييره، شغّل GitHub Actions → **Deploy Coptic Dictionary Bot** → **Run workflow** مع `setup_webhook=false` لتحديث Worker دون إعادة ضبط webhook. يدفع الـ workflow قيمة السر إلى Worker؛ ثم استخدم `/drive` في البوت للتحقق، و`/syncdrive` لرفع التسجيلات المعلقة. عند النشر الأول الذي يحتاج إعداد webhook اترك `setup_webhook=true`.
-5. سيُنشر Worker تلقائيًا عند دفع تغييرات إلى `main` إذا كان المتغير `CF_DEPLOY_ENABLED=true`.
+5. الرابط الذي يُدخل عبر `/setdrive <الرابط>` يتقدّم على سرّ Worker. استخدم `/setdrive reset` لحذف هذا التجاوز والعودة إلى `APPS_SCRIPT_URL`.
+6. سيُنشر Worker تلقائيًا عند دفع تغييرات إلى `main` إذا كان المتغير `CF_DEPLOY_ENABLED=true`.
 
 أسرار GitHub مشفّرة ولا تظهر لي. لا ترسل التوكنات في المحادثة ولا تضعها في الملفات. عنوان Worker وسرّ webhook يُنشآن تلقائيًا.
 
