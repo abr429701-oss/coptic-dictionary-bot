@@ -189,6 +189,19 @@ test("one or two letters show 10 tappable suggestions per page", async () => {
   assert.ok(!calls.some((call) => call.url.endsWith("/sendVoice")));
 });
 
+test("Arabic suggestions use Arabic labels instead of Coptic headwords", async () => {
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: "كو", chat: { id: 151 } } }), env);
+  const message = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
+  assert.equal(message.text, "اختر من الاقتراحات التالية:");
+  const labels = message.reply_markup.inline_keyboard
+    .filter((row) => row[0].callback_data.startsWith("s|"))
+    .map((row) => row[0].text);
+  assert.ok(labels.some((label) => /ك/u.test(label)));
+  assert.ok(labels.every((label) => !/[\u2c80-\u2cff\u03e2-\u03ef]/u.test(label)));
+});
+
 test("tapping a suggestion sends the entry without a heading", async () => {
   const calls = [];
   fakeTelegramApi(calls);

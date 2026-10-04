@@ -56,6 +56,8 @@ const recordIndexById = lazy(() => {
 });
 
 const ARABIC_LETTER = /[\u0600-\u06ff]/u;
+const COPTIC_LETTER = /[\u2c80-\u2cff\u03e2-\u03ef]/u;
+const LATIN_LETTER = /[a-z]/iu;
 
 // Lowercase/strip marks, then keep only letters/digits separated by single spaces.
 function toTokens(normalized) {
@@ -119,10 +121,16 @@ function matchedPartIndex(record, normalizedQuery) {
   return parts.findIndex((part) => normalize(part).startsWith(normalizedQuery) || hasWholeWords(tokens(part), needle));
 }
 
-// Suggestions show the word only; meanings appear after tapping.
-function suggestionLabel(record) {
-  const word = String(record.coptic ?? "").replaceAll("`", "").trim();
-  return (word || String(record.english ?? "").trim() || "—").slice(0, 48);
+// Suggestions use the same language the user searched in; full meanings appear after tapping.
+function suggestionLabel(record, normalizedQuery) {
+  if (ARABIC_LETTER.test(normalizedQuery)) {
+    const part = matchedPartIndex(record, normalizedQuery);
+    const meanings = splitMeaning(record.meaning);
+    return (meanings[part >= 0 ? part : 0] || meanings[0] || record.english || "—").trim().slice(0, 48);
+  }
+  if (COPTIC_LETTER.test(normalizedQuery)) return String(record.coptic ?? "").replaceAll("`", "").trim().slice(0, 48) || "—";
+  if (LATIN_LETTER.test(normalizedQuery)) return String(record.english ?? "").trim().slice(0, 48) || String(record.phonetic ?? "").trim().slice(0, 48) || "—";
+  return String(record.greek ?? record.coptic ?? record.english ?? "—").replaceAll("`", "").trim().slice(0, 48);
 }
 
 function truncateBytes(value, maxBytes) {
@@ -150,7 +158,7 @@ function renderSuggestions(query, normalizedQuery, matches, requestedPage) {
   const keyboard = slice.map((index) => {
     const part = matchedPartIndex(records[index], normalizedQuery);
     return [{
-      text: suggestionLabel(records[index]),
+      text: suggestionLabel(records[index], normalizedQuery),
       callback_data: part >= 0 ? `s|${index}|${part}` : `s|${index}`,
     }];
   });
