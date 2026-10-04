@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { renderCards } from "./card.mjs";
+import { renderCard } from "./card.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SHEET_ID = process.env.SHEET_ID || "1kXVA3CNgETqym5Vz3lBUu_2gZ01QNdx7ROtGVnIJp0c";
@@ -14,7 +14,7 @@ const BAN_TAB = process.env.BAN_TAB || "Ban";
 const BOT_USERNAME = process.env.BOT_USERNAME || "Uploade33_bot";
 const SCOPE = process.env.CARD_SCOPE || "recorded";
 const MAX_PER_RUN = Number(process.env.MAX_CARDS || 500);
-const CARD_VERSION = 2; // the supplied two-template design replaces the previous one-card layout
+const CARD_VERSION = 3; // single supplied layout, centered circles, and the supplied Coptic font
 const DICTIONARY = process.env.DICTIONARY_JSON || path.join(ROOT, "data", "dictionary.json");
 const MANIFEST = process.env.CARDS_MANIFEST || path.join(ROOT, "data", "cards.json");
 const CARDS_DIR = process.env.CARDS_DIR || path.join(ROOT, "cards");
@@ -83,7 +83,21 @@ export function cardData(group, voiceLink) {
     typeLabel: pick("gender") || pick("kind"),
     origin: pick("origin"),
     qrText: voiceLink || `https://t.me/${BOT_USERNAME}`,
+    dateText: formatCardDate(new Date()),
   };
+}
+
+const COPTIC_MONTHS = ["توت", "بابه", "هاتور", "كيهك", "طوبه", "أمشير", "برمهات", "برموده", "بشنس", "بؤونه", "أبيب", "مسرى", "النسيء"];
+function formatCardDate(date) {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: "Africa/Cairo", year: "numeric", month: "numeric", day: "numeric" }).formatToParts(date);
+  const get = (type) => Number(parts.find((part) => part.type === type)?.value);
+  const year = get("year"); const month = get("month"); const day = get("day");
+  const a = Math.floor((14 - month) / 12); const y = year + 4800 - a; const m = month + 12 * a - 3;
+  const jdn = day + Math.floor((153 * m + 2) / 5) + 365 * y + Math.floor(y / 4) - Math.floor(y / 100) + Math.floor(y / 400) - 32045;
+  const days = jdn - 1825029; const copticYear = Math.floor((4 * days + 1463) / 1461);
+  const dayOfYear = days - (365 * (copticYear - 1) + Math.floor(copticYear / 4));
+  const copticDay = (dayOfYear % 30) + 1; const copticMonth = Math.floor(dayOfYear / 30) + 1;
+  return `${day}/${month}/${year}|${copticDay} ${COPTIC_MONTHS[copticMonth - 1]} ${copticYear}`;
 }
 
 const hashOf = (data) => createHash("sha1").update(JSON.stringify([CARD_VERSION, data])).digest("hex").slice(0, 10);
@@ -109,18 +123,16 @@ export async function main() {
     const data = cardData(group, voiceLink);
     if (!data.word || !data.meaning) continue;
     const hash = hashOf(data);
-    const files = [path.join(CARDS_DIR, `${id}-1.png`), path.join(CARDS_DIR, `${id}-2.png`)];
-    if (manifest[id] === hash && files.every((file) => existsSync(file))) { next[id] = hash; continue; }
+    const file = path.join(CARDS_DIR, `${id}.png`);
+    if (manifest[id] === hash && existsSync(file)) { next[id] = hash; continue; }
     if (rendered >= MAX_PER_RUN) { deferred += 1; if (manifest[id]) next[id] = manifest[id]; continue; }
-    const renderedCards = renderCards(data);
-    writeFileSync(files[0], renderedCards.first);
-    writeFileSync(files[1], renderedCards.second);
+    writeFileSync(file, renderCard(data));
     next[id] = hash;
     rendered += 1;
   }
   for (const file of readdirSync(CARDS_DIR)) {
-    const match = /^(\d+)-(?:1|2)\.png$/u.exec(file);
-    if (match && !(match[1] in next)) rmSync(path.join(CARDS_DIR, file));
+    const match = /^(\d+)(-1|-2)?\.png$/u.exec(file);
+    if (match && (match[2] || !(match[1] in next))) rmSync(path.join(CARDS_DIR, file));
   }
   const sorted = Object.fromEntries(Object.entries(next).sort(([a], [b]) => Number(a) - Number(b)));
   writeFileSync(MANIFEST, `${JSON.stringify(sorted)}\n`);

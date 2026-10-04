@@ -200,6 +200,31 @@ test("tapping a suggestion sends the entry without a heading", async () => {
   assert.ok(message.text.startsWith("<b>الكلمة:</b> "));
 });
 
+test("multiple meanings are shown separately with a button for the next meaning", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const index = records.findIndex((item) => item.coptic === "ⲟⲩⲁⲓ");
+  assert.ok(index >= 0);
+  const firstCalls = [];
+  fakeTelegramApi(firstCalls);
+  await worker.fetch(updateRequest({ callback_query: {
+    id: "meaning-1", data: `s|${index}|0`, message: { chat: { id: 74 }, message_id: 1, date: 1728000000 },
+  } }), kvEnv);
+  const first = firstCalls.find((call) => call.url.endsWith("/sendMessage")).payload;
+  assert.match(first.text, /المعنى/u);
+  assert.match(first.text, /هناك معنى آخر للكلمة التي بحثت بها/u);
+  const next = first.reply_markup.inline_keyboard[0][0];
+  assert.equal(next.text, "اضغط هنا لعرضه");
+
+  const secondCalls = [];
+  fakeTelegramApi(secondCalls);
+  await worker.fetch(updateRequest({ callback_query: {
+    id: "meaning-2", data: next.callback_data, message: { chat: { id: 74 }, message_id: 2, date: 1728000000 },
+  } }), kvEnv);
+  const second = secondCalls.find((call) => call.url.endsWith("/sendMessage")).payload;
+  assert.match(second.text, /المعنى/u);
+  assert.doesNotMatch(second.text, /،/u);
+});
+
 test("Arabic search matches whole words only, never inside a longer word", async () => {
   const calls = [];
   fakeTelegramApi(calls);
@@ -937,7 +962,7 @@ function photoWorld({ photoOk = true } = {}) {
   return calls;
 }
 
-test("a word with a card is sent as text, two card photos, then voice, and both file ids are cached", async () => {
+test("a word with a card is sent as text, one card photo, then voice, and the file id is cached", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const record = records.find((item) => item.coptic === "ⲁⲃⲱⲕ");
   cardManifest[String(record.id)] = "hash0001";
@@ -947,15 +972,14 @@ test("a word with a card is sent as text, two card photos, then voice, and both 
     const textIndex = calls.findIndex((call) => call.url.endsWith("/sendMessage") && /<b>الكلمة/u.test(call.payload?.text ?? ""));
     const photos = calls.filter((call) => call.url.endsWith("/sendPhoto"));
     assert.ok(textIndex >= 0);
-    assert.equal(photos.length, 2);
-    assert.equal(photos[0].payload.photo, `https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/main/cards/${record.id}-1.png?v=hash0001`);
-    assert.equal(photos[1].payload.photo, `https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/main/cards/${record.id}-2.png?v=hash0001`);
+    assert.equal(photos.length, 1);
+    assert.equal(photos[0].payload.photo, `https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/main/cards/${record.id}.png?v=hash0001`);
     assert.ok(calls.indexOf(photos[0]) > textIndex);
-    assert.deepEqual(kvEnv.USERS.store.get(`card:${record.id}`), { hash: "hash0001", fileIds: ["PHOTO-FILE-1", "PHOTO-FILE-1"] });
+    assert.deepEqual(kvEnv.USERS.store.get(`card:${record.id}`), { hash: "hash0001", fileId: "PHOTO-FILE-1" });
 
     const again = photoWorld();
     await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲱⲕ", chat: { id: 70 } } }), kvEnv);
-    assert.equal(again.filter((call) => call.url.endsWith("/sendPhoto")).length, 2);
+    assert.equal(again.filter((call) => call.url.endsWith("/sendPhoto")).length, 1);
     assert.equal(again.find((call) => call.url.endsWith("/sendPhoto")).payload.photo, "PHOTO-FILE-1");
 
     cardManifest[String(record.id)] = "hash0002"; // the card was redrawn: the old file id must not be used
@@ -984,12 +1008,12 @@ test("if the card cannot be sent the entry still arrives as text; words without 
   assert.ok(plain.some((call) => call.url.endsWith("/sendMessage")));
 });
 
-test("the card renderer produces both supplied card layouts", async () => {
-  const { renderCards } = await import("../scripts/card.mjs");
-  const png = renderCards({ word: "ⲙⲟⲣⲫⲏ", meaning: "صورة", typeLabel: "مؤنثة", origin: "يونانية", qrText: "https://t.me/Uploade33_bot" }).first;
+test("the card renderer produces the single supplied card layout", async () => {
+  const { renderCard } = await import("../scripts/card.mjs");
+  const png = renderCard({ word: "ⲙⲟⲣⲫⲏ", meaning: "صورة", typeLabel: "مؤنثة", origin: "يونانية", qrText: "https://t.me/Uploade33_bot", dateText: "4/10/2026 — 25 توت 1743" });
   assert.equal(Buffer.from(png).subarray(1, 4).toString(), "PNG");
-  assert.equal(Buffer.from(png).readUInt32BE(16), 1080);
-  assert.equal(Buffer.from(png).readUInt32BE(20), 2340);
+  assert.equal(Buffer.from(png).readUInt32BE(16), 907);
+  assert.equal(Buffer.from(png).readUInt32BE(20), 1280);
   const { cardData } = await import("../scripts/render_cards.mjs");
   const data = cardData([{ coptic: "ⲁ", meaning: "أ، ب", gender: "", kind: "اسم", origin: "قبطية" }, { coptic: "ⲁ", meaning: "ب، ج", gender: "مذكرة", kind: "", origin: "" }], "");
   assert.deepEqual([data.meaning, data.typeLabel, data.origin], ["أ، ب، ج", "مذكرة", "قبطية"]);
@@ -1032,11 +1056,11 @@ test("voice caption shows the meaning the user searched for, then the word, orig
   assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption, "أخ. ⲥⲟⲛ. قبطية. مذكرة.");
 });
 
-test("a Coptic search puts every meaning in the voice caption", async () => {
+test("a Coptic search starts with one meaning in the voice caption", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const calls = pickWorld(kvEnv);
   await pick(kvEnv, `s|${sonIndex}`);
-  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption, "أخ، شقيق، أخ في الإيمان. ⲥⲟⲛ. قبطية. مذكرة.");
+  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption, "أخ. ⲥⲟⲛ. قبطية. مذكرة.");
 });
 
 test("the recorded voice from the admin uses the same caption", async () => {

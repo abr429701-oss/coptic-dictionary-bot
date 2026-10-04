@@ -185,6 +185,45 @@ function formatRecord(record, partIndex = -1) {
   return lines.join("\n");
 }
 
+function sameDictionaryWord(left, right) {
+  const keys = ["coptic", "greek", "english", "phonetic"];
+  return keys.some((key) => {
+    const value = normalize(left?.[key] ?? "");
+    return value && value === normalize(right?.[key] ?? "");
+  });
+}
+
+// Keep meanings separate. The first option is the meaning that matched the query;
+// following options are exposed one at a time through an inline button.
+function meaningOptions(index, normalizedQuery = "", preferredPart = -1) {
+  const base = records[index];
+  if (!base) return [];
+  const group = records.map((record, row) => ({ record, row })).filter(({ record }) => sameDictionaryWord(base, record));
+  const options = [];
+  const add = (row, part) => {
+    const partText = splitMeaning(records[row]?.meaning)[part] ?? "";
+    const key = normalize(partText) || `${row}:${part}`;
+    if (!options.some((item) => item.key === key)) options.push({ key, index: row, part });
+  };
+  const firstPart = preferredPart >= 0 ? preferredPart : matchedPartIndex(base, normalizedQuery);
+  if (firstPart >= 0) add(index, firstPart);
+  else if (splitMeaning(base.meaning).length) add(index, 0);
+  for (const { record, row } of group) {
+    const parts = splitMeaning(record.meaning);
+    for (let part = 0; part < parts.length; part += 1) add(row, part);
+  }
+  return options;
+}
+
+function moreMeaning(options, baseIndex) {
+  if (options.length < 2) return {};
+  const next = options[1];
+  return {
+    notice: "\n\n<b>هناك معنى آخر للكلمة التي بحثت بها</b>",
+    reply_markup: { inline_keyboard: [[{ text: "اضغط هنا لعرضه", callback_data: `m|${baseIndex}|${next.index}|${next.part}` }]] },
+  };
+}
+
 function findMatches(query) {
   const normalizedQuery = normalize(query);
   if (!normalizedQuery) return [];
@@ -507,28 +546,21 @@ function lookupMedia(env, record) {
   });
 }
 
-// Sends the card with the entry as its caption (one message). Returns false when it could not be sent.
-async function sendCardEntry(env, chatId, record, text, media) {
+// Sends the entry text first, then the single supplied card image. The voice is sent by the caller.
+async function sendCardEntry(env, chatId, record, text, media, replyMarkup = undefined) {
   const hash = cardHash(record);
   if (!hash || !media) return false;
   const saved = (await media).card;
-  const cachedIds = saved?.hash === hash
-    ? (Array.isArray(saved.fileIds) ? saved.fileIds : saved.fileId ? [saved.fileId] : [])
-    : [];
+  const cachedId = saved?.hash === hash ? (saved.fileId || saved.fileIds?.[0] || "") : "";
   const base = String(env.CARDS_BASE_URL || CARDS_BASE_URL).replace(/\/$/u, "");
-  // The requested order is intentionally text -> first card -> second card -> voice.
-  await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML" });
-  const fileIds = [];
-  for (const number of [1, 2]) {
-    const url = `${base}/${record.id}-${number}.png?v=${hash}`;
-    let result = await telegram(env, "sendPhoto", { chat_id: chatId, photo: cachedIds[number - 1] || url });
-    if (!result?.ok && cachedIds[number - 1]) result = await telegram(env, "sendPhoto", { chat_id: chatId, photo: url });
-    if (!result?.ok) continue;
+  // The requested order is intentionally text -> card -> voice.
+  await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(replyMarkup ? { reply_markup: replyMarkup } : {}) });
+  const url = `${base}/${record.id}.png?v=${hash}`;
+  let result = await telegram(env, "sendPhoto", { chat_id: chatId, photo: cachedId || url });
+  if (!result?.ok && cachedId) result = await telegram(env, "sendPhoto", { chat_id: chatId, photo: url });
+  if (result?.ok && env.USERS) {
     const fileId = result.result?.photo?.at(-1)?.file_id;
-    if (fileId) fileIds[number - 1] = fileId;
-  }
-  if (fileIds.length && env.USERS) {
-    await storeCall(env, { op: "put", key: `card:${record.id}`, value: { hash, fileIds } }).catch(() => {});
+    if (fileId && fileId !== cachedId) await storeCall(env, { op: "put", key: `card:${record.id}`, value: { hash, fileId } }).catch(() => {});
   }
   return true;
 }
@@ -556,30 +588,35 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
     const view = renderSuggestions(cleanQuery, normalizedQuery, matches, page);
     return deliver({ text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup });
   }
-  const record = records[matches[0]];
+  const options = meaningOptions(matches[0], normalizedQuery);
+  const selected = options[0] ?? { index: matches[0], part: matchedPartIndex(records[matches[0]], normalizedQuery) };
+  const record = records[selected.index];
   const media = messageId === undefined ? lookupMedia(env, record) : null;
   const voice = prepareWordVoice(env, record, media);
-  const part = matchedPartIndex(record, normalizedQuery);
-  const text = formatRecord(record, part).slice(0, MAX_MESSAGE_LENGTH);
-  if (await sendCardEntry(env, chatId, record, text, media)) {
-    await sendPreparedVoice(env, chatId, record, voice, part);
+const more = moreMeaning(options, matches[0]);
+  const text = `${formatRecord(record, selected.part)}${more.notice ?? ""}`.slice(0, MAX_MESSAGE_LENGTH);
+  if (await sendCardEntry(env, chatId, record, text, media, more.reply_markup)) {
+    await sendPreparedVoice(env, chatId, record, voice, selected.part);
     return undefined;
   }
-  const response = await deliver({ text, parse_mode: "HTML" });
-  await sendPreparedVoice(env, chatId, record, voice, part);
+  const response = await deliver({ text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
+  await sendPreparedVoice(env, chatId, record, voice, selected.part);
   return response;
 }
 
 async function sendRecord(env, chatId, index, partIndex = -1) {
-  const record = records[index];
+  const options = meaningOptions(index, "", partIndex);
+  const selected = options[0] ?? { index, part: partIndex };
+  const record = records[selected.index];
   if (!record) return;
   const media = lookupMedia(env, record);
   const voice = prepareWordVoice(env, record, media);
-  const text = formatRecord(record, partIndex).slice(0, MAX_MESSAGE_LENGTH);
-  if (!(await sendCardEntry(env, chatId, record, text, media))) {
-    await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML" });
+  const more = moreMeaning(options, index);
+  const text = `${formatRecord(record, selected.part)}${more.notice ?? ""}`.slice(0, MAX_MESSAGE_LENGTH);
+  if (!(await sendCardEntry(env, chatId, record, text, media, more.reply_markup))) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
   }
-  await sendPreparedVoice(env, chatId, record, voice, partIndex);
+  await sendPreparedVoice(env, chatId, record, voice, selected.part);
 }
 
 // Registered users live in one SQLite-backed Durable Object (no extra Cloudflare token permission needed).
@@ -1448,6 +1485,13 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
+    const meaningPick = /^m\|(\d{1,6})\|(\d{1,6})\|(\d{1,3})$/u.exec(callback.data ?? "");
+    if (meaningPick) {
+      if (callback.message?.chat?.id) {
+        await sendRecord(env, callback.message.chat.id, Number(meaningPick[2]), Number(meaningPick[3]), callback.message.date);
+      }
+      return;
+    }
     const pick = /^s\|(\d{1,6})(?:\|(\d{1,3}))?$/u.exec(callback.data ?? "");
     if (pick) {
       if (callback.message?.chat?.id) {
