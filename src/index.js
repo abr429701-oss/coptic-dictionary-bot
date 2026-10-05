@@ -84,15 +84,30 @@ const SUGGESTION_PAGE_SIZE = 10;
 const SUGGESTION_TITLE = "اختر من الاقتراحات التالية:";
 const SHORT_QUERY_MAX = 2;
 const UI_TEXT = {
-  ar: { more: "هناك معنى آخر للكلمة التي بحثت بها", next: "اضغط هنا لعرضه", end: "انتهت المعاني المتاحة لهذه الكلمة" },
-  en: { more: "There is another meaning for the word you searched", next: "Click here to view it", end: "No more meanings are available for this word" },
-  fr: { more: "Il existe un autre sens pour le mot recherché", next: "Cliquez ici pour l’afficher", end: "Il n’y a plus de sens disponible pour ce mot" },
-  de: { more: "Es gibt eine weitere Bedeutung für das gesuchte Wort", next: "Hier klicken, um sie anzuzeigen", end: "Für dieses Wort sind keine weiteren Bedeutungen verfügbar" },
+  ar: { word: "الكلمة", meaning: "المعنى", kind: "النوع", origin: "الأصل", more: "هناك معنى آخر للكلمة التي بحثت بها", next: "اضغط هنا لعرضه", end: "انتهت المعاني المتاحة لهذه الكلمة", choose: "اختر من الاقتراحات التالية:", previous: "السابق", pageNext: "التالي", noResult: "القاموس قيد التطوير حاليًا وسيتم إضافة معنى هذه الكلمة لاحقًا" },
+  en: { word: "Word", meaning: "Meaning", kind: "Part of speech", origin: "Origin", more: "There is another meaning for the word you searched", next: "Click here to view it", end: "No more meanings are available for this word", choose: "Choose from the following suggestions:", previous: "Previous", pageNext: "Next", noResult: "The dictionary is still under development; this word will be added later" },
+  fr: { word: "Mot", meaning: "Sens", kind: "Nature", origin: "Origine", more: "Il existe un autre sens pour le mot recherché", next: "Cliquez ici pour l’afficher", end: "Il n’y a plus de sens disponible pour ce mot", choose: "Choisissez parmi les suggestions suivantes :", previous: "Précédent", pageNext: "Suivant", noResult: "Le dictionnaire est encore en développement ; ce mot sera ajouté plus tard" },
+  de: { word: "Wort", meaning: "Bedeutung", kind: "Wortart", origin: "Herkunft", more: "Es gibt eine weitere Bedeutung für das gesuchte Wort", next: "Hier klicken, um sie anzuzeigen", end: "Für dieses Wort sind keine weiteren Bedeutungen verfügbar", choose: "Wählen Sie aus den folgenden Vorschlägen:", previous: "Zurück", pageNext: "Weiter", noResult: "Das Wörterbuch wird noch entwickelt; dieses Wort wird später hinzugefügt" },
+};
+
+const VALUE_TRANSLATIONS = {
+  en: { "اسم": "noun", "فعل": "verb", "صفة": "adjective", "ظرف": "adverb", "حرف جر": "preposition", "أداة ربط": "conjunction", "رقم": "numeral", "ضمير": "pronoun", "حرف": "letter", "أداة": "particle", "أداة نفي": "negative particle", "جملة": "sentence", "بادئة": "prefix", "زائدة": "suffix", "أداة استفهام": "interrogative particle", "أداة تعريف": "definite article", "أداة تنكير": "indefinite article", "صيغة تفضيل": "comparative form", "حال": "adverbial", "اسم موصول": "relative noun", "قبطية": "Coptic", "يونانية": "Greek", "عبرية": "Hebrew", "لاتينية": "Latin", "آرامية": "Aramaic", "سريانية": "Syriac" },
+  fr: { "اسم": "nom", "فعل": "verbe", "صفة": "adjectif", "ظرف": "adverbe", "حرف جر": "préposition", "أداة ربط": "conjonction", "رقم": "numéral", "ضمير": "pronom", "حرف": "lettre", "أداة": "particule", "أداة نفي": "particule négative", "جملة": "phrase", "بادئة": "préfixe", "زائدة": "suffixe", "أداة استفهام": "particule interrogative", "أداة تعريف": "article défini", "أداة تنكير": "article indéfini", "صيغة تفضيل": "comparatif", "حال": "adverbial", "اسم موصول": "nom relatif", "قبطية": "copte", "يونانية": "grec", "عبرية": "hébreu", "لاتينية": "latin", "آرامية": "araméen", "سريانية": "syriaque" },
+  de: { "اسم": "Substantiv", "فعل": "Verb", "صفة": "Adjektiv", "ظرف": "Adverb", "حرف جر": "Präposition", "أداة ربط": "Konjunktion", "رقم": "Zahlwort", "ضمير": "Pronomen", "حرف": "Buchstabe", "أداة": "Partikel", "أداة نفي": "Verneinungspartikel", "جملة": "Satz", "بادئة": "Präfix", "زائدة": "Suffix", "أداة استفهام": "Fragepartikel", "أداة تعريف": "bestimmter Artikel", "أداة تنكير": "unbestimmter Artikel", "صيغة تفضيل": "Komparativ", "حال": "adverbial", "اسم موصول": "Relativnomen", "قبطية": "Koptisch", "يونانية": "Griechisch", "عبرية": "Hebräisch", "لاتينية": "Lateinisch", "آرامية": "Aramäisch", "سريانية": "Syrisch" },
 };
 
 function uiLanguage(searchKey = "") {
   const kind = searchKey ? scriptKind(normalize(searchKey)) : "ar";
   return UI_TEXT[kind] ? kind : "ar";
+}
+
+function uiTextFor(searchKey = "") {
+  return UI_TEXT[uiLanguage(searchKey)] ?? UI_TEXT.ar;
+}
+
+function localizedValue(value, language) {
+  const raw = String(value ?? "").trim();
+  return VALUE_TRANSLATIONS[language]?.[raw] ?? raw;
 }
 
 function splitMeaning(value) {
@@ -173,21 +188,23 @@ function pageCallback(page, query) {
 }
 
 function renderSuggestions(query, normalizedQuery, matches, requestedPage) {
+  const ui = uiTextFor(query);
   const totalPages = Math.max(1, Math.ceil(matches.length / SUGGESTION_PAGE_SIZE));
   const page = Math.max(0, Math.min(requestedPage, totalPages - 1));
   const slice = matches.slice(page * SUGGESTION_PAGE_SIZE, (page + 1) * SUGGESTION_PAGE_SIZE);
+  const languageQuery = uiLanguage(query) === "ar" ? "" : truncateBytes(query, CALLBACK_DATA_MAX_BYTES - 18);
   const keyboard = slice.map((index) => {
     const part = matchedPartIndex(records[index], normalizedQuery);
     return [{
       text: suggestionLabel(records[index], normalizedQuery),
-      callback_data: part >= 0 ? `s|${index}|${part}` : `s|${index}`,
+      callback_data: part >= 0 ? `s|${index}|${part}${languageQuery ? `|${languageQuery}` : ""}` : `s|${index}${languageQuery ? `|${languageQuery}` : ""}`,
     }];
   });
   const navigation = [];
-  if (page > 0) navigation.push({ text: "السابق", callback_data: pageCallback(page - 1, query) });
-  if (page < totalPages - 1) navigation.push({ text: "التالي", callback_data: pageCallback(page + 1, query) });
+  if (page > 0) navigation.push({ text: ui.previous, callback_data: pageCallback(page - 1, query) });
+  if (page < totalPages - 1) navigation.push({ text: ui.pageNext, callback_data: pageCallback(page + 1, query) });
   if (navigation.length) keyboard.push(navigation);
-  return { text: SUGGESTION_TITLE, reply_markup: { inline_keyboard: keyboard } };
+  return { text: ui.choose, reply_markup: { inline_keyboard: keyboard } };
 }
 
 function escapeHtml(value) {
@@ -204,19 +221,21 @@ function formatRecord(record, partIndex = -1, searchedWord = "") {
   // English, Greek, etc.) must show the Coptic headword as its counterpart;
   // only a Coptic search shows the Arabic meaning parts.
   const isCopticSearch = searchedWord === "" || scriptKind(normalize(searchedWord)) === "cop";
+  const language = isCopticSearch ? "ar" : uiLanguage(searchedWord);
+  const labels = UI_TEXT[language] ?? UI_TEXT.ar;
   const displayedWord = searchedWord || record.coptic;
   const fields = !isCopticSearch
     ? [
-        ["الكلمة", displayedWord],
-        ["المعنى", record.coptic],
-        ["النوع", record.kind],
-        ["الأصل", record.origin],
+        [labels.word, displayedWord],
+        [labels.meaning, record.coptic],
+        [labels.kind, localizedValue(record.kind, language)],
+        [labels.origin, localizedValue(record.origin, language)],
       ]
     : [
-        ["الكلمة", displayedWord],
-        ["المعنى", arabicPart],
-        ["النوع", record.kind],
-        ["الأصل", record.origin],
+        [UI_TEXT.ar.word, displayedWord],
+        [UI_TEXT.ar.meaning, arabicPart],
+        [UI_TEXT.ar.kind, record.kind],
+        [UI_TEXT.ar.origin, record.origin],
       ];
   const lines = [];
   for (const [label, raw] of fields) {
@@ -409,6 +428,7 @@ function chainCallback(key) {
 }
 
 function renderWordSuggestions(query, words, requestedPage) {
+  const ui = uiTextFor(query);
   const totalPages = Math.max(1, Math.ceil(words.length / SUGGESTION_PAGE_SIZE));
   const page = Math.max(0, Math.min(requestedPage, totalPages - 1));
   const keyboard = words.slice(page * SUGGESTION_PAGE_SIZE, (page + 1) * SUGGESTION_PAGE_SIZE).map((word) => [{
@@ -416,10 +436,10 @@ function renderWordSuggestions(query, words, requestedPage) {
     callback_data: `w|${truncateBytes(word.key, CALLBACK_DATA_MAX_BYTES - 2)}`,
   }]);
   const navigation = [];
-  if (page > 0) navigation.push({ text: "السابق", callback_data: pageCallback(page - 1, query) });
-  if (page < totalPages - 1) navigation.push({ text: "التالي", callback_data: pageCallback(page + 1, query) });
+  if (page > 0) navigation.push({ text: ui.previous, callback_data: pageCallback(page - 1, query) });
+  if (page < totalPages - 1) navigation.push({ text: ui.pageNext, callback_data: pageCallback(page + 1, query) });
   if (navigation.length) keyboard.push(navigation);
-  return { text: SUGGESTION_TITLE, reply_markup: { inline_keyboard: keyboard } };
+  return { text: ui.choose, reply_markup: { inline_keyboard: keyboard } };
 }
 
 function findMatches(query) {
@@ -444,11 +464,16 @@ function findMatches(query) {
     }
     return exact.concat(matches);
   }
-  const { text: allText } = searchIndex();
-  for (let index = 0; index < allText.length; index += 1) {
-    if (allText[index].includes(normalizedQuery)) matches.push(index);
+  const needle = toTokens(normalizedQuery);
+  if (!needle) return [];
+  const exact = [];
+  const partial = [];
+  for (let index = 0; index < records.length; index += 1) {
+    const fields = SEARCH_FIELDS.flatMap((field) => splitMeaning(records[index]?.[field]).map(normalize));
+    if (fields.some((field) => field === normalizedQuery)) exact.push(index);
+    else if (fields.some((field) => hasWholeWords(toTokens(field), needle))) partial.push(index);
   }
-  return matches;
+  return exact.concat(partial);
 }
 
 const TYPING_DELAY_MS = 0; // raise (e.g. 400) for a longer visible "typing…"
@@ -520,10 +545,16 @@ function spokenText(record) {
 
 // Caption under the voice sent to the user: "<meaning>. <Coptic word>. <origin>. <gender>."
 // The meaning is the one the user searched for (the whole meaning when they searched by Coptic/Latin text).
-function voiceCaption(record, partIndex = -1) {
+function voiceCaption(record, partIndex = -1, searchedWord = "") {
   const parts = splitMeaning(record?.meaning);
   const meaning = partIndex >= 0 && parts[partIndex] ? parts[partIndex] : parts.join("، ");
-  return [meaning, record?.coptic, record?.origin, record?.gender]
+  const isCopticSearch = searchedWord === "" || scriptKind(normalize(searchedWord)) === "cop";
+  const language = isCopticSearch ? "ar" : uiLanguage(searchedWord);
+  const labels = UI_TEXT[language] ?? UI_TEXT.ar;
+  const values = isCopticSearch
+    ? [[UI_TEXT.ar.meaning, meaning], [UI_TEXT.ar.word, record?.coptic], [UI_TEXT.ar.origin, record?.origin], [UI_TEXT.ar.kind, record?.kind]]
+    : [[labels.word, searchedWord || record?.coptic], [labels.meaning, record?.coptic], [labels.origin, localizedValue(record?.origin, language)], [labels.kind, localizedValue(record?.kind, language)]];
+  return values.map(([label, value]) => `${label}: ${String(value ?? "").replace(/\s+/gu, " ").trim().replace(/\.+$/u, "")}`)
     .map((value) => String(value ?? "").replace(/\s+/gu, " ").trim().replace(/\.+$/u, ""))
     .filter(Boolean)
     .join(". ")
@@ -549,10 +580,10 @@ function prepareWordVoice(env, record, media = null) {
   })();
 }
 
-async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1) {
+async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1, searchedWord = "") {
   let voice = await prepared;
   if (!voice) return;
-  const caption = voiceCaption(record, partIndex);
+  const caption = voiceCaption(record, partIndex, searchedWord);
   if (voice.fileId) {
     const result = await telegram(env, "sendVoice", { chat_id: chatId, voice: voice.fileId, caption });
     if (result?.ok) return;
@@ -813,7 +844,7 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
   }
   const matches = findMatches(cleanQuery);
   if (!matches.length) {
-    return deliver({ text: "القاموس قيد التطوير حاليًا وسيتم إضافة معنى هذه الكلمة لاحقًا" });
+    return deliver({ text: uiTextFor(cleanQuery).noResult });
   }
   if (matches.length > 1) {
     const view = renderSuggestions(cleanQuery, normalizedQuery, matches, page);
@@ -827,17 +858,19 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
   const more = moreMeaning(options, matches[0], 1, undefined, false, uiLanguage(normalizedQuery));
   const text = `${formatRecord(record, selected.part, normalizedQuery)}${more.notice ?? ""}`.slice(0, MAX_MESSAGE_LENGTH);
   if (await sendCardEntry(env, chatId, record, text, media, more.reply_markup)) {
-    await sendPreparedVoice(env, chatId, record, voice, selected.part);
+    await sendPreparedVoice(env, chatId, record, voice, selected.part, normalizedQuery);
     return undefined;
   }
   const response = await deliver({ text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
-  await sendPreparedVoice(env, chatId, record, voice, selected.part);
+  await sendPreparedVoice(env, chatId, record, voice, selected.part, normalizedQuery);
   return response;
 }
 
-async function sendRecord(env, chatId, index, partIndex = -1) {
-  const options = meaningOptions(index, "", partIndex);
-  await sendOption(env, chatId, options, index, 0, { index, part: partIndex });
+async function sendRecord(env, chatId, index, partIndex = -1, searchKey = "") {
+  const options = searchKey && scriptKind(normalize(searchKey)) !== "cop"
+    ? [{ key: String(index), index, part: -1 }]
+    : meaningOptions(index, "", partIndex);
+  await sendOption(env, chatId, options, index, 0, { index, part: partIndex }, undefined, searchKey);
 }
 
 // Step n of the next-meaning button: shows meaning number `step` of the word's fixed list.
@@ -852,12 +885,12 @@ async function sendOption(env, chatId, options, baseIndex, step, fallback = unde
   if (!record) return;
   const media = lookupMedia(env, record);
   const voice = prepareWordVoice(env, record, media);
-  const more = moreMeaning(options, baseIndex, step + 1, callbackFor, step > 0, uiLanguage(searchKey));
+  const more = moreMeaning(options, baseIndex, step + 1, callbackFor ?? (searchKey ? chainCallback(searchKey) : undefined), step > 0, uiLanguage(searchKey));
   const text = `${formatRecord(record, selected.part, searchKey)}${more.notice ?? ""}`.slice(0, MAX_MESSAGE_LENGTH);
   if (!(await sendCardEntry(env, chatId, record, text, media, more.reply_markup))) {
     await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
   }
-  if (sendVoice) await sendPreparedVoice(env, chatId, record, voice, selected.part);
+  if (sendVoice) await sendPreparedVoice(env, chatId, record, voice, selected.part, searchKey);
 }
 
 // Registered users live in one SQLite-backed Durable Object (no extra Cloudflare token permission needed).
@@ -1842,10 +1875,10 @@ async function handleUpdate(update, env, ctx) {
       }
       return;
     }
-    const pick = /^s\|(\d{1,6})(?:\|(\d{1,3}))?$/u.exec(callback.data ?? "");
+    const pick = /^s\|(\d{1,6})(?:\|(\d{1,3}))?(?:\|(.+))?$/su.exec(callback.data ?? "");
     if (pick) {
       if (callback.message?.chat?.id) {
-        await inBackground(ctx, sendRecord(env, callback.message.chat.id, Number(pick[1]), pick[2] === undefined ? -1 : Number(pick[2])));
+        await inBackground(ctx, sendRecord(env, callback.message.chat.id, Number(pick[1]), pick[2] === undefined ? -1 : Number(pick[2]), pick[3] ?? ""));
       }
       return;
     }
