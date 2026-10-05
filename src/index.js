@@ -264,8 +264,14 @@ function meaningOptions(index, normalizedQuery = "", preferredPart = -1) {
 
 // The button walks one fixed list of meanings: each meaning is shown once, and the last one has no button.
 // callback: n|<word row>|<first meaning part>|<step to show next>  (the list is rebuilt the same way every time).
-function moreMeaning(options, baseIndex, nextStep = 1, callbackFor = undefined) {
-  if (options.length <= nextStep) return {};
+function moreMeaning(options, baseIndex, nextStep = 1, callbackFor = undefined, keepSize = false) {
+  if (options.length <= nextStep) {
+    if (!keepSize) return {};
+    return {
+      notice: "\n\n<b>انتهت المعاني المتاحة لهذه الكلمة</b>",
+      reply_markup: { inline_keyboard: [[{ text: "انتهت المعاني", callback_data: "e" }]] },
+    };
+  }
   const firstPart = Math.max(0, options[0].part);
   const data = callbackFor?.(nextStep) ?? `n|${baseIndex}|${firstPart}|${nextStep}`;
   return {
@@ -783,7 +789,7 @@ async function sendOption(env, chatId, options, baseIndex, step, fallback = unde
   if (!record) return;
   const media = lookupMedia(env, record);
   const voice = prepareWordVoice(env, record, media);
-  const more = moreMeaning(options, baseIndex, step + 1, callbackFor);
+  const more = moreMeaning(options, baseIndex, step + 1, callbackFor, step > 0);
   const text = `${formatRecord(record, selected.part, searchKey)}${more.notice ?? ""}`.slice(0, MAX_MESSAGE_LENGTH);
   if (!(await sendCardEntry(env, chatId, record, text, media, more.reply_markup))) {
     await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
