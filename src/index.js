@@ -223,12 +223,14 @@ function meaningOptions(index, normalizedQuery = "", preferredPart = -1) {
   return options;
 }
 
-function moreMeaning(options, baseIndex) {
-  if (options.length < 2) return {};
-  const next = options[1];
+// The button walks one fixed list of meanings: each meaning is shown once, and the last one has no button.
+// callback: n|<word row>|<first meaning part>|<step to show next>  (the list is rebuilt the same way every time).
+function moreMeaning(options, baseIndex, nextStep = 1) {
+  if (options.length <= nextStep) return {};
+  const firstPart = Math.max(0, options[0].part);
   return {
     notice: "\n\n<b>هناك معنى آخر للكلمة التي بحثت بها</b>",
-    reply_markup: { inline_keyboard: [[{ text: "اضغط هنا لعرضه", callback_data: `m|${baseIndex}|${next.index}|${next.part}` }]] },
+    reply_markup: { inline_keyboard: [[{ text: "اضغط هنا لعرضه", callback_data: `n|${baseIndex}|${firstPart}|${nextStep}` }]] },
   };
 }
 
@@ -614,12 +616,23 @@ const more = moreMeaning(options, matches[0]);
 
 async function sendRecord(env, chatId, index, partIndex = -1) {
   const options = meaningOptions(index, "", partIndex);
-  const selected = options[0] ?? { index, part: partIndex };
-  const record = records[selected.index];
+  await sendOption(env, chatId, options, index, 0, { index, part: partIndex });
+}
+
+// Step n of the next-meaning button: shows meaning number `step` of the word's fixed list.
+async function sendMeaningStep(env, chatId, baseIndex, firstPart, step) {
+  const options = meaningOptions(baseIndex, "", firstPart);
+  if (!options[step]) return;
+  await sendOption(env, chatId, options, baseIndex, step);
+}
+
+async function sendOption(env, chatId, options, baseIndex, step, fallback = undefined) {
+  const selected = options[step] ?? fallback;
+  const record = records[selected?.index];
   if (!record) return;
   const media = lookupMedia(env, record);
   const voice = prepareWordVoice(env, record, media);
-  const more = moreMeaning(options, index);
+  const more = moreMeaning(options, baseIndex, step + 1);
   const text = `${formatRecord(record, selected.part)}${more.notice ?? ""}`.slice(0, MAX_MESSAGE_LENGTH);
   if (!(await sendCardEntry(env, chatId, record, text, media, more.reply_markup))) {
     await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
@@ -1493,6 +1506,14 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
+    const nextMeaning = /^n\|(\d{1,6})\|(\d{1,3})\|(\d{1,3})$/u.exec(callback.data ?? "");
+    if (nextMeaning) {
+      if (callback.message?.chat?.id) {
+        await sendMeaningStep(env, callback.message.chat.id, Number(nextMeaning[1]), Number(nextMeaning[2]), Number(nextMeaning[3]));
+      }
+      return;
+    }
+    // Buttons already sitting in old chats (m|...) still work: show that meaning, then follow the fixed list.
     const meaningPick = /^m\|(\d{1,6})\|(\d{1,6})\|(\d{1,3})$/u.exec(callback.data ?? "");
     if (meaningPick) {
       if (callback.message?.chat?.id) {

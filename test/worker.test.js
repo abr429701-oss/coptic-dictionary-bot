@@ -238,6 +238,35 @@ test("multiple meanings are shown separately with a button for the next meaning"
   assert.doesNotMatch(second.text, /،/u);
 });
 
+test("the next-meaning button shows every meaning exactly once and then stops", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const meaningLine = (text) => /<b>المعنى:<\/b> ([^\n]*)/u.exec(text)?.[1];
+  const candidates = [];
+  records.forEach((record, index) => {
+    if (candidates.length < 40 && String(record.meaning ?? "").split(/[،,؛;\n]/u).filter((part) => part.trim()).length >= 2) candidates.push(index);
+  });
+  assert.ok(candidates.length > 5);
+  let longest = 0;
+  for (const index of candidates) {
+    const shown = [];
+    let data = `s|${index}|0`;
+    for (let tap = 0; tap < 40 && data; tap += 1) {
+      const calls = [];
+      fakeTelegramApi(calls);
+      await worker.fetch(updateRequest({ callback_query: {
+        id: `walk-${index}-${tap}`, data, message: { chat: { id: 90 }, message_id: tap + 1, date: 1728000000 },
+      } }), kvEnv);
+      const sent = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
+      shown.push(meaningLine(sent.text));
+      data = sent.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data;
+    }
+    assert.equal(data, undefined, `row ${index}: the button never disappears`);
+    assert.equal(new Set(shown).size, shown.length, `row ${index}: a meaning was shown twice: ${shown.join(" | ")}`);
+    longest = Math.max(longest, shown.length);
+  }
+  assert.ok(longest >= 2);
+});
+
 test("Arabic search matches whole words only, never inside a longer word", async () => {
   const calls = [];
   fakeTelegramApi(calls);
