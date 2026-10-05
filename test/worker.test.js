@@ -182,6 +182,8 @@ test("a single result shows only word, meaning, kind and origin with no heading"
   assert.ok(text.startsWith("<b>Word:</b> "));
   assert.match(text, /<b>Meaning:<\/b> /u);
   assert.doesNotMatch(text, /القاموس القبطي|نتائج|الصفحة|اليونانية|النطق|التهجئة|الجنس|الإنجليزية|كلمات مرتبطة/u);
+  assert.match(text, /No more meanings are available/u);
+  assert.ok(calls.find((call) => call.url.endsWith("/sendMessage"))?.payload.reply_markup);
 });
 
 test("tapping a suggestion from an Arabic search shows only the searched meaning", async () => {
