@@ -54,6 +54,8 @@ const SEARCH_FIELDS = ["coptic", "greek", "pronunciation", "english", "phonetic"
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
 const VOICE_PREFIX = "voiceid:";
 const voiceKey = (id) => `${VOICE_PREFIX}${id}`;
+const CARD_DISABLED_PREFIX = "card-disabled:";
+const cardDisabledKey = (id) => `${CARD_DISABLED_PREFIX}${id}`;
 const recordIndexById = lazy(() => {
   const map = new Map();
   records.forEach((record, index) => {
@@ -806,7 +808,7 @@ function lookupMedia(env, record) {
 // Sends the entry text first, then the single supplied card image. The voice is sent by the caller.
 async function sendCardEntry(env, chatId, record, text, media, replyMarkup = undefined) {
   const hash = cardHash(record);
-  if (!hash || !media) return false;
+  if (!hash || !media || (await media).disabled) return false;
   const base = String(env.CARDS_BASE_URL || CARDS_BASE_URL).replace(/\/$/u, "");
   // The requested order is intentionally text -> card -> voice. The text goes out first, without waiting for the lookup.
   await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(replyMarkup ? { reply_markup: replyMarkup } : {}) });
@@ -820,6 +822,32 @@ async function sendCardEntry(env, chatId, record, text, media, replyMarkup = und
     if (fileId && fileId !== cachedId) await storeCall(env, { op: "put", key: `card:${record.id}`, value: { hash, fileId } }).catch(() => {});
   }
   return true;
+}
+
+function cardRecord(query) {
+  const clean = String(query ?? "").trim();
+  if (!clean) return null;
+  const normalized = normalize(clean);
+  const exact = records.find((record) => [record.coptic, record.english, record.pronunciation]
+    .some((value) => normalize(value) === normalized));
+  return exact ?? records[findMatches(clean)[0]] ?? null;
+}
+
+async function setCardVisibility(env, chatId, query, visible) {
+  const record = cardRecord(query);
+  if (record?.id == null || !cardHash(record)) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "لم أجد بطاقة لهذه الكلمة. أرسل الكلمة كما هي أو تأكد أن لها بطاقة." });
+    return;
+  }
+  if (visible) {
+    await storeCall(env, { op: "delete", key: cardDisabledKey(record.id) });
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `✅ ستظهر بطاقة «${record.coptic}» مرة أخرى في البحث التالي.` });
+    await sendSearch(env, chatId, record.coptic, 0);
+    return;
+  }
+  await storeCall(env, { op: "put", key: cardDisabledKey(record.id), value: true });
+  await storeCall(env, { op: "delete", key: `card:${record.id}` });
+  await telegram(env, "sendMessage", { chat_id: chatId, text: `🗑️ تم إخفاء بطاقة «${record.coptic}». ستعود فقط عند تسجيل Voice جديد أو استخدام /card_show.` });
 }
 
 async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
@@ -978,6 +1006,10 @@ export class UserStore {
       await storage.put(key, value);
       return Response.json({ ok: true });
     }
+    if (op === "delete") {
+      await storage.delete(key);
+      return Response.json({ ok: true });
+    }
     if (op === "register") {
       // Atomic "first contact" check so two quick messages never announce the same user twice.
       const existing = await storage.get(`user:${userId}`);
@@ -1036,8 +1068,10 @@ export class UserStore {
     }
     if (op === "media") {
       // One call returns both the saved recording and the cached card photo of a word.
-      const [voice, card] = await Promise.all([storage.get(voiceKey(id)), storage.get(`card:${id}`)]);
-      return Response.json({ voice: voice ?? null, card: card ?? null });
+      const [voice, card, disabled] = await Promise.all([
+        storage.get(voiceKey(id)), storage.get(`card:${id}`), storage.get(cardDisabledKey(id)),
+      ]);
+      return Response.json({ voice: voice ?? null, card: card ?? null, disabled: disabled === true });
     }
     if (op === "bccount") return Response.json({ count: (await this.recipients(exclude)).length });
     if (op === "bcstatus") {
@@ -1399,6 +1433,8 @@ async function captureVoiceRecording(env, message, userId, user, ctx) {
     key: voiceKey(id),
     value: { fileId: message.voice.file_id, duration: message.voice.duration ?? null, savedAt: new Date().toISOString() },
   });
+  // A fresh recording explicitly reactivates the word's card.
+  await storeCall(env, { op: "delete", key: cardDisabledKey(id) });
   const archive = archiveAndReport(env, message.chat.id, {
     id,
     record,
@@ -1928,6 +1964,14 @@ async function handleUpdate(update, env, ctx) {
     }
     if (text === "/syncusers") {
       await inBackground(ctx, syncUsersBatch(env, message.chat.id));
+      return;
+    }
+    if (text === "/card_hide" || text.startsWith("/card_hide ")) {
+      await setCardVisibility(env, message.chat.id, text.slice("/card_hide".length), false);
+      return;
+    }
+    if (text === "/card_show" || text.startsWith("/card_show ")) {
+      await setCardVisibility(env, message.chat.id, text.slice("/card_show".length), true);
       return;
     }
     if (text === "/setdrive" || text.startsWith("/setdrive ")) {

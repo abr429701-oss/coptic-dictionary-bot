@@ -1254,8 +1254,36 @@ test("if the card cannot be sent the entry still arrives as text; words without 
   assert.ok(plain.some((call) => call.url.endsWith("/sendMessage")));
 });
 
+test("admin can hide a card until showing it or recording a new voice", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const record = records.find((item) => item.coptic === "ⲁⲃⲱⲕ");
+  cardManifest[String(record.id)] = "hash-hide";
+  try {
+    await worker.fetch(updateRequest({ message: { text: `/card_hide ${record.coptic}`, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+    assert.equal(kvEnv.USERS.store.get(`card-disabled:${record.id}`), true);
+    const hidden = photoWorld();
+    await worker.fetch(updateRequest({ message: { text: record.coptic, chat: { id: 73 } } }), kvEnv);
+    assert.equal(hidden.filter((call) => call.url.endsWith("/sendPhoto")).length, 0);
+
+    const shown = photoWorld();
+    await worker.fetch(updateRequest({ message: { text: `/card_show ${record.coptic}`, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+    assert.equal(kvEnv.USERS.store.get(`card-disabled:${record.id}`), undefined);
+    assert.equal(shown.filter((call) => call.url.endsWith("/sendPhoto")).length, 1);
+
+    await worker.fetch(updateRequest({ message: { text: `/card_hide ${record.coptic}`, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+    kvEnv.USERS.store.set(`user:${ADMIN}`, { voiceRec: { id: record.id, mode: "chosen" } });
+    photoWorld();
+    await worker.fetch(updateRequest({ message: { voice: { file_id: "new-voice", duration: 2 }, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+    assert.equal(kvEnv.USERS.store.get(`card-disabled:${record.id}`), undefined);
+  } finally {
+    delete cardManifest[String(record.id)];
+  }
+});
+
 test("the card renderer produces the single supplied card layout", async () => {
-  const { renderCard } = await import("../scripts/card.mjs");
+  const { cardSvg, renderCard } = await import("../scripts/card.mjs");
+  assert.match(cardSvg({ word: "ⲁ", meaning: "صورة", typeLabel: "", origin: "", qrText: "" }), /font-size="42"/u);
+  assert.match(cardSvg({ word: "ⲁ", meaning: "صورة، معنى طويل", typeLabel: "", origin: "", qrText: "" }), /font-size="42"/u);
   const png = renderCard({ word: "ⲙⲟⲣⲫⲏ", meaning: "صورة", typeLabel: "مؤنثة", origin: "يونانية", qrText: "https://t.me/Uploade33_bot", dateText: "4/10/2026 — 25 توت 1743" });
   assert.equal(Buffer.from(png).subarray(1, 4).toString(), "PNG");
   assert.equal(Buffer.from(png).readUInt32BE(16), 907);

@@ -30,7 +30,8 @@ function text({ x, y, value, size, fill = "#fff", family = "Tajawal", weight = 7
 
 export function cardSvg({ word, meaning, typeLabel, origin, qrText, dateText = "" }) {
   const meaningLines = wrap(meaning, 18);
-  const meaningSvg = meaningLines.map((line, i) => text({ x: 600, y: 470 + i * 60, value: line, size: meaningLines.length > 1 ? 42 : fit(line, 60, 240, 0.5) })).join("");
+  // Keep the meaning typography identical whether the entry has one meaning or several.
+  const meaningSvg = meaningLines.map((line, i) => text({ x: 600, y: 470 + i * 60, value: line, size: 42 })).join("");
   return `<svg xmlns="http://www.w3.org/2000/svg" width="907" height="1280" viewBox="0 0 907 1280">
 <image href="data:image/jpeg;base64,${TEMPLATE}" width="907" height="1280"/>
 <!-- Cover only the sample values; the supplied layout remains unchanged. -->
