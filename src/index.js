@@ -855,7 +855,7 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
   const record = records[selected.index];
   const media = messageId === undefined ? lookupMedia(env, record) : null;
   const voice = prepareWordVoice(env, record, media);
-  const more = moreMeaning(options, matches[0], 1, undefined, false, uiLanguage(normalizedQuery));
+  const more = moreMeaning(options, matches[0], 1, undefined, true, uiLanguage(normalizedQuery));
   const text = `${formatRecord(record, selected.part, normalizedQuery)}${more.notice ?? ""}`.slice(0, MAX_MESSAGE_LENGTH);
   if (await sendCardEntry(env, chatId, record, text, media, more.reply_markup)) {
     await sendPreparedVoice(env, chatId, record, voice, selected.part, normalizedQuery);
@@ -885,7 +885,7 @@ async function sendOption(env, chatId, options, baseIndex, step, fallback = unde
   if (!record) return;
   const media = lookupMedia(env, record);
   const voice = prepareWordVoice(env, record, media);
-  const more = moreMeaning(options, baseIndex, step + 1, callbackFor ?? (searchKey ? chainCallback(searchKey) : undefined), step > 0, uiLanguage(searchKey));
+  const more = moreMeaning(options, baseIndex, step + 1, callbackFor ?? (searchKey ? chainCallback(searchKey) : undefined), true, uiLanguage(searchKey));
   const text = `${formatRecord(record, selected.part, searchKey)}${more.notice ?? ""}`.slice(0, MAX_MESSAGE_LENGTH);
   if (!(await sendCardEntry(env, chatId, record, text, media, more.reply_markup))) {
     await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
