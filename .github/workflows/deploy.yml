@@ -77,7 +77,6 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       SETUP_WEBHOOK: ${{ github.event_name == 'workflow_dispatch' && inputs.setup_webhook != 'false' }}
     steps:
       - name: Check out repository (latest main)
@@ -140,11 +139,6 @@ jobs:
         if: ${{ env.APPS_SCRIPT_URL != '' }}
         run: |
           printf '%s' "$APPS_SCRIPT_URL" | npx wrangler secret put APPS_SCRIPT_URL --name coptic-dictionary-bot
-
-      - name: Store the voice transcription key on the Worker
-        if: ${{ env.OPENAI_API_KEY != '' }}
-        run: |
-          printf '%s' "$OPENAI_API_KEY" | npx wrangler secret put OPENAI_API_KEY --name coptic-dictionary-bot
 
       - name: Register Telegram webhook
         if: ${{ env.SETUP_WEBHOOK == 'true' }}
