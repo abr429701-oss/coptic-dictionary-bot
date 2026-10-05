@@ -1062,10 +1062,25 @@ test("the /tts endpoint serves generated speech and only for dictionary entries"
   assert.equal((await ok.arrayBuffer()).byteLength, 4);
   assert.match(speechUrl, /ttsspeed=0\.5/u);
   const spoken = decodeURIComponent(new URL(speechUrl).searchParams.get("q"));
-  const word = String(records[index].phonetic || records[index].english).trim();
+  const word = String(records[index].english || records[index].phonetic).trim();
   assert.equal(spoken, `${word}, ${word}, ${word}`);
   const missing = await worker.fetch(new Request("https://bot.test/tts/99999999.mp3"), env);
   assert.equal(missing.status, 404);
+});
+
+test("TTS prefers the sheet English spelling for precise Coptic pronunciation", async () => {
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    return new Response(new Uint8Array([7]), { headers: { "content-type": "audio/mpeg" } });
+  };
+  for (const [greek, expected] of [["ουαι", "ouai"], ["αιγυπτια", "aijuptia"]]) {
+    const index = records.findIndex((record) => record.greek === greek);
+    assert.ok(index >= 0, `missing ${greek}`);
+    await worker.fetch(new Request(`https://bot.test/tts/${index}.mp3`), env);
+    const spoken = new URL(calls.at(-1)).searchParams.get("q");
+    assert.equal(spoken, `${expected}, ${expected}, ${expected}`);
+  }
 });
 
 test("/botinfo (admin) reports inline support, webhook updates and Google speech", async () => {
