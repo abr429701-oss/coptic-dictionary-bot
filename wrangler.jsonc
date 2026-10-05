@@ -4,7 +4,6 @@
   "main": "src/index.js",
   "compatibility_date": "2026-10-02",
   "workers_dev": true,
-  "ai": { "binding": "AI" },
   "durable_objects": {
     "bindings": [{ "name": "USERS", "class_name": "UserStore" }]
   },

@@ -631,19 +631,20 @@ test("typing plain ⲉ finds headwords written with accented ὲ, and backticks 
 });
 
 test("voice search transcribes multilingual audio, searches it, and caches the file", async () => {
-  let transcriptions = 0;
-  const kvEnv = { ...env, USERS: fakeKv(), AI: { run: async (model, input) => {
-    transcriptions += 1;
-    assert.equal(model, "@cf/openai/whisper");
-    assert.ok(Array.isArray(input.audio));
-    return { text: "water" };
-  } } };
+  const kvEnv = { ...env, OPENAI_API_KEY: "test-openai-key", USERS: fakeKv() };
   const calls = [];
+  let transcriptions = 0;
   globalThis.fetch = async (url, options = {}) => {
     const address = String(url);
     calls.push({ url: address, options });
     if (address.endsWith("/getFile")) return Response.json({ ok: true, result: { file_path: "voice/file.ogg" } });
     if (address.includes("/file/bot")) return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+    if (address.endsWith("/audio/transcriptions")) {
+      transcriptions += 1;
+      assert.ok(options.body instanceof FormData);
+      assert.equal(options.body.get("model"), "whisper-1");
+      return Response.json({ text: "water" });
+    }
     if (address.includes("translate_tts")) return new Response("blocked", { status: 403 });
     return Response.json({ ok: true, result: { message_id: 900 } });
   };
@@ -656,7 +657,7 @@ test("voice search transcribes multilingual audio, searches it, and caches the f
 });
 
 test("voice search rejects recordings over the safe duration limit before transcription", async () => {
-  const kvEnv = { ...env, USERS: fakeKv(), AI: { run: async () => ({ text: "water" }) } };
+  const kvEnv = { ...env, OPENAI_API_KEY: "test-openai-key", USERS: fakeKv() };
   const calls = [];
   fakeTelegramApi(calls);
   await worker.fetch(updateRequest({ message: {

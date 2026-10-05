@@ -14,7 +14,7 @@ const VOICE_SEARCH_MAX_SECONDS = 45;
 const VOICE_SEARCH_MAX_FILE_BYTES = 20 * 1024 * 1024;
 const VOICE_SEARCH_LIMIT = 5;
 const VOICE_SEARCH_WINDOW_MS = 10 * 60 * 1000;
-const VOICE_SEARCH_MODEL = "@cf/openai/whisper";
+const VOICE_SEARCH_MODEL = "whisper-1";
 const FIRST_TIME_TEXT =
   "مرحبًا بك! يبدو أنك تستخدم البوت لأول مرة, الرجاء إدخال اسمك ثلاثي للبدء في استخدام القاموس القبطي الناطق";
 const NAME_RETRY_TEXT = "الرجاء إدخال اسمك ثلاثيًا (ثلاث كلمات على الأقل) بالحروف فقط، مثل: مينا جرجس بشرى.";
@@ -509,8 +509,8 @@ async function voiceSearchText(env, message) {
   if (Number(media.file_size ?? 0) > VOICE_SEARCH_MAX_FILE_BYTES) {
     return { error: "حجم التسجيل كبير جدًا للبحث الصوتي." };
   }
-  if (!env.AI?.run) {
-    return { error: "البحث الصوتي غير مفعّل على Worker حاليًا. اكتب الكلمة نصيًا من فضلك." };
+  if (!env.OPENAI_API_KEY) {
+    return { error: "البحث الصوتي غير مفعّل حاليًا. اكتب الكلمة نصيًا من فضلك." };
   }
 
   const uniqueId = media.file_unique_id || media.file_id;
@@ -532,9 +532,23 @@ async function voiceSearchText(env, message) {
     return { error: "حجم التسجيل كبير جدًا للبحث الصوتي." };
   }
 
-  const result = await env.AI.run(VOICE_SEARCH_MODEL, { audio: [...new Uint8Array(audio)] });
-  const text = String(result?.text ?? result?.transcription_info?.text ?? "")
-    .replace(/[\r\n]+/gu, " ").trim().slice(0, 160);
+  const form = new FormData();
+  form.append("file", new Blob([audio], { type: media.mime_type || "audio/ogg" }), path.split("/").pop() || "voice.ogg");
+  form.append("model", env.OPENAI_TRANSCRIPTION_MODEL || VOICE_SEARCH_MODEL);
+  form.append("response_format", "json");
+  const base = String(env.OPENAI_API_BASE || "https://api.openai.com/v1").replace(/\/$/u, "");
+  const response = await fetch(`${base}/audio/transcriptions`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${env.OPENAI_API_KEY}` },
+    body: form,
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!response.ok) {
+    console.error("Voice transcription failed", response.status);
+    return { error: "تعذر فهم التسجيل الصوتي الآن. اكتب الكلمة نصيًا أو أعد التسجيل بوضوح." };
+  }
+  const result = await response.json();
+  const text = String(result.text ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, 160);
   if (!text) return { error: "لم أفهم كلمة واضحة من التسجيل. أعد التسجيل بوضوح من فضلك." };
   await storeCall(env, { op: "voiceSearchSave", key: uniqueId, value: text });
   return { text };
