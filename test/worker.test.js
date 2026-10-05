@@ -715,11 +715,120 @@ test("broadcast marks blocked users, skips them next time, and backs off on rate
   await kvEnv.USERS.object.alarm();
   assert.equal(kvEnv.USERS.store.get("broadcast"), undefined);
   const report = calls.filter((call) => call.url.endsWith("/sendMessage")).at(-1).payload.text;
-  assert.match(report, /وصلت إلى: 2[^]*لم تصل[^]*: 1/u);
+  assert.match(report, /وصلت إلى: 2[^]*تعذّر الإرسال: 1[^]*استُبعدت بسبب منع البوت \(403\): 1/u);
 
   await asUser(kvEnv, ADMIN, { text: "/broadcast" });
   const again = await asUser(kvEnv, ADMIN, { message_id: 10, text: "again" });
   assert.match(sent(again)[0].text, /إلى 2 مستخدم/u);
+});
+
+test("a quiz poll that cannot be copied is recreated for each recipient with its answer key", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedUsers(kvEnv, [501]);
+  await asUser(kvEnv, ADMIN, { text: "/broadcast" });
+  const poll = {
+    id: "poll-id",
+    question: "ما معنى الكلمة؟",
+    options: [{ text: "الأول" }, { text: "الثاني" }],
+    is_anonymous: false,
+    type: "quiz",
+    allows_multiple_answers: false,
+    correct_option_ids: [1],
+    explanation: "الإجابة الثانية صحيحة",
+  };
+  const captured = await asUser(kvEnv, ADMIN, { message_id: 88, poll });
+  assert.match(sent(captured)[0].text, /هل تريد التأكيد/u);
+  await adminCallback(kvEnv, ADMIN, "bc|go");
+
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const payload = options.body ? JSON.parse(options.body) : null;
+    calls.push({ url: String(url), payload });
+    if (String(url).endsWith("/copyMessage")) {
+      return Response.json({ ok: false, error_code: 400, description: "Quiz poll cannot be copied" }, { status: 400 });
+    }
+    return Response.json({ ok: true, result: { message_id: 1 } });
+  };
+
+  await kvEnv.USERS.object.alarm();
+  const sendPoll = calls.find((call) => call.url.endsWith("/sendPoll"))?.payload;
+  assert.ok(sendPoll);
+  assert.equal(String(sendPoll.chat_id), "501");
+  assert.equal(sendPoll.question, poll.question);
+  assert.deepEqual(sendPoll.options, [{ text: "الأول" }, { text: "الثاني" }]);
+  assert.equal(sendPoll.type, "quiz");
+  assert.deepEqual(sendPoll.correct_option_ids, [1]);
+  assert.equal(kvEnv.USERS.store.get("broadcast"), undefined);
+  assert.match(calls.find((call) => call.url.endsWith("/sendMessage"))?.payload.text, /وصلت إلى: 1/u);
+});
+
+test("a content-related 400 failure is reported but does not mark recipients as blocked", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedUsers(kvEnv, [511]);
+  await asUser(kvEnv, ADMIN, { text: "/broadcast" });
+  await asUser(kvEnv, ADMIN, { message_id: 89, document: { file_id: "doc" } });
+  await adminCallback(kvEnv, ADMIN, "bc|go");
+
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const payload = options.body ? JSON.parse(options.body) : null;
+    calls.push({ url: String(url), payload });
+    return Response.json({ ok: false, error_code: 400, description: "Message can't be copied" }, { status: 400 });
+  };
+  await kvEnv.USERS.object.alarm();
+
+  assert.notEqual(kvEnv.USERS.store.get("user:511").blocked, true);
+  const report = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload.text;
+  assert.match(report, /تعذّر الإرسال: 1/u);
+  assert.match(report, /Message can't be copied/u);
+});
+
+test("voice and document broadcasts use Telegram's type-preserving copy method", async () => {
+  for (const payload of [
+    { voice: { file_id: "voice-file" } },
+    { document: { file_id: "document-file", file_name: "dictionary.pdf" } },
+  ]) {
+    const kvEnv = { ...env, USERS: fakeKv() };
+    seedUsers(kvEnv, [521]);
+    await asUser(kvEnv, ADMIN, { text: "/broadcast" });
+    const captured = await asUser(kvEnv, ADMIN, { message_id: 90, ...payload });
+    assert.match(sent(captured)[0].text, /هل تريد التأكيد/u);
+    await adminCallback(kvEnv, ADMIN, "bc|go");
+
+    const calls = [];
+    fakeTelegramApi(calls);
+    await kvEnv.USERS.object.alarm();
+    const copy = calls.find((call) => call.url.endsWith("/copyMessage"))?.payload;
+    assert.ok(copy);
+    assert.equal(copy.chat_id, "521");
+    assert.equal(copy.message_id, 90);
+  }
+});
+
+test("temporary network failures retry the same recipient and keep the broadcast alive", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedUsers(kvEnv, [531]);
+  await asUser(kvEnv, ADMIN, { text: "/broadcast" });
+  await asUser(kvEnv, ADMIN, { message_id: 91, text: "رسالة" });
+  await adminCallback(kvEnv, ADMIN, "bc|go");
+
+  let attempts = 0;
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const payload = options.body ? JSON.parse(options.body) : null;
+    calls.push({ url: String(url), payload });
+    if (String(url).endsWith("/copyMessage") && attempts++ === 0) throw new Error("temporary connection reset");
+    return Response.json({ ok: true, result: { message_id: 1 } });
+  };
+  await kvEnv.USERS.object.alarm();
+  assert.deepEqual(kvEnv.USERS.store.get("broadcast").queue, ["531"]);
+  assert.equal(kvEnv.USERS.store.get("broadcast").retryCount, 1);
+  assert.ok(kvEnv.USERS.alarms.at(-1) > Date.now());
+
+  await kvEnv.USERS.object.alarm();
+  assert.equal(kvEnv.USERS.store.get("broadcast"), undefined);
+  assert.equal(calls.filter((call) => call.url.endsWith("/copyMessage")).length, 2);
+  assert.match(calls.find((call) => call.url.endsWith("/sendMessage"))?.payload.text, /وصلت إلى: 1/u);
 });
 
 test("cancel and non-admin confirmation do nothing harmful", async () => {
