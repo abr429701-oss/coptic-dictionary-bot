@@ -453,12 +453,12 @@ async function fetchSpeech(spoken) {
 }
 
 function speechSpelling(record) {
-  // The sheet's English column follows the supplied Coptic/Greek reading table
-  // (ouai, aijuptia, leshg, xulon, ...), so it is a better TTS input than the
-  // phonetic/IPA helper column. Fall back to phonetic, then convert common IPA.
+  // Prefer the sheet's IPA pronunciation, converted to an English-friendly
+  // phoneme spelling. Google Translate TTS does not parse IPA syntax itself.
+  const ipa = String(record?.pronunciation || "").trim();
   const sheetSpelling = String(record?.english || record?.phonetic || "").trim();
-  const usesIpaFallback = !sheetSpelling;
-  let word = (sheetSpelling || String(record?.pronunciation || "")).trim();
+  const usesIpa = Boolean(ipa);
+  let word = (ipa || sheetSpelling).trim();
   word = word
     .replaceAll("`", "")
     .replaceAll("ü", "u")
@@ -467,9 +467,10 @@ function speechSpelling(record) {
     .replaceAll("ā", "a")
     .replaceAll("ē", "e")
     .replace(/ɑʊ|iː|oː|eː|tʃ|ʃ|ʒ|kʰ|tʰ|pʰ|ŋ|ɣ|x|ɑ|ː/gu, (symbol) => {
-      if (!usesIpaFallback) return symbol;
-      return { "ɑʊ": "au", "iː": "ee", "oː": "o", "eː": "e", tʃ: "tsch", "ʃ": "sh", "ʒ": "j", "kʰ": "kh", "tʰ": "th", "pʰ": "ph", "ŋ": "ng", "ɣ": "gh", x: "kh", "ɑ": "a", "ː": "" }[symbol] ?? symbol;
+      if (!usesIpa) return symbol;
+      return { "ɑʊ": "au", "iː": "ee", "oː": "oh", "eː": "eh", tʃ: "tsch", "ʃ": "sh", "ʒ": "j", "kʰ": "kh", "tʰ": "th", "pʰ": "ph", "ŋ": "ng", "ɣ": "gh", x: "kh", "ɑ": "a", "ː": "" }[symbol] ?? symbol;
     })
+    .replace(/^i(?=[aeiou])/u, "y")
     .replace(/\s*\/\s*/gu, ", ")
     .replace(/\s+/gu, " ")
     .trim()
@@ -1713,7 +1714,8 @@ async function handleUpdate(update, env, ctx) {
       const chain = exactChain(scriptKind(normalizedChainQuery), normalizedChainQuery);
       const step = Number(chainPick[1]);
       if (chatForPick && chain[step]) {
-        await inBackground(ctx, sendOption(env, chatForPick, chain, chain[0].index, step, undefined, chainCallback(chainQuery), chainQuery, false));
+        const sendVoice = ARABIC_LETTER.test(normalizedChainQuery);
+        await inBackground(ctx, sendOption(env, chatForPick, chain, chain[0].index, step, undefined, chainCallback(chainQuery), chainQuery, sendVoice));
       }
       return;
     }
