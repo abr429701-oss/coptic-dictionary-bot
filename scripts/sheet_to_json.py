@@ -27,8 +27,9 @@ IDS_FILE = Path(os.environ.get("WORD_IDS_JSON", ROOT / "data" / "word_ids.json")
 MIN_RECORDS = int(os.environ.get("MIN_RECORDS", "8000"))
 
 # Columns: A coptic, B greek, C pronunciation, D english, E phonetic, F kind,
-# G gender, H origin, I..AS Arabic meanings (one per column).
-MEANING_FIRST, MEANING_LAST = 8, 44
+# G gender, H origin, BM Arabic meanings. BM is the sheet's canonical Arabic
+# column and already contains the meanings separated by Arabic commas.
+MEANING_COLUMN = 64  # BM (A=0, B=1, ..., BM=64)
 
 
 JINKIM = "\u0300"  # combining grave: the real jinkim, drawn over the letter it follows
@@ -132,11 +133,6 @@ def main() -> None:
         def cell(index: int) -> str:
             return row[index].strip() if index < len(row) else ""
 
-        meanings: list[str] = []
-        for index in range(MEANING_FIRST, MEANING_LAST + 1):
-            value = cell(index)
-            if value and value not in meanings:
-                meanings.append(value)
         record = {
             "coptic": clean_coptic(cell(0)),
             "greek": cell(1),
@@ -146,7 +142,7 @@ def main() -> None:
             "kind": cell(5),
             "gender": cell(6),
             "origin": cell(7),
-            "meaning": "، ".join(meanings),
+            "meaning": cell(MEANING_COLUMN),
         }
         if not any(record.values()):
             continue
