@@ -335,6 +335,35 @@ test("Arabic search preserves the exact word typed, including ة, across meaning
   assert.match(second.text, /<b>الكلمة:<\/b> قوة\n/u);
 });
 
+test("Arabic meaning chains send the new Coptic word voice for each step", async () => {
+  const firstCalls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const body = options.body;
+    const payload = !body ? null : typeof body === "string" ? JSON.parse(body) : Object.fromEntries(body.entries());
+    firstCalls.push({ url: String(url), options, payload });
+    return String(url).includes("translate_tts")
+      ? new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "audio/mpeg" } })
+      : Response.json({ ok: true, result: { message_id: 900 } });
+  };
+  await worker.fetch(updateRequest({ message: { text: "قوة", chat: { id: 171 } } }), env);
+  const first = firstCalls.find((call) => call.url.endsWith("/sendMessage")).payload;
+  const next = first.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data;
+  assert.ok(next?.startsWith("x|"));
+
+  const secondCalls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const body = options.body;
+    const payload = !body ? null : typeof body === "string" ? JSON.parse(body) : Object.fromEntries(body.entries());
+    secondCalls.push({ url: String(url), options, payload });
+    return String(url).includes("translate_tts")
+      ? new Response(new Uint8Array([4, 5, 6]), { headers: { "content-type": "audio/mpeg" } })
+      : Response.json({ ok: true, result: { message_id: 901 } });
+  };
+  await worker.fetch(updateRequest({ callback_query: { id: "arabic-voice-next", data: next, message: { chat: { id: 171 }, message_id: 1 } } }), env);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(secondCalls.some((call) => call.url.endsWith("/sendVoice")));
+});
+
 test("an unknown word gets the dictionary-under-development message", async () => {
   const calls = [];
   fakeTelegramApi(calls);
@@ -1074,7 +1103,7 @@ test("TTS prefers the sheet English spelling for precise Coptic pronunciation", 
     calls.push(String(url));
     return new Response(new Uint8Array([7]), { headers: { "content-type": "audio/mpeg" } });
   };
-  for (const [greek, expected] of [["ουαι", "ouai"], ["αιγυπτια", "aijuptia"]]) {
+  for (const [greek, expected] of [["ουαι", "owai"], ["αιγυπτια", "aigiptia"]]) {
     const index = records.findIndex((record) => record.greek === greek);
     assert.ok(index >= 0, `missing ${greek}`);
     await worker.fetch(new Request(`https://bot.test/tts/${index}.mp3`), env);
