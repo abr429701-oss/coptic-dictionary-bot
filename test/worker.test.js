@@ -556,6 +556,7 @@ test("without a keyboard session a typed letter is a normal search, and a real w
   await kbSay(kvEnv, "/keyboard");
   calls = await kbSay(kvEnv, "abagini");
   assert.match(sent(calls)[0].text, /<b>الكلمة:<\/b> abagini/u);
+  assert.match(sent(calls)[0].text, /<b>المعنى:<\/b> ⲁⲃⲁϫⲓⲛⲓ/u);
 });
 
 test("typing plain ⲉ finds headwords written with accented ὲ, and backticks are ignored", async () => {
