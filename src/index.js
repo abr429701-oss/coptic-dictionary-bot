@@ -738,7 +738,8 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
 
   if (normalizedQuery) {
     const kind = scriptKind(normalizedQuery);
-    if (messageId === undefined) {
+    const isShortQuery = [...normalizedQuery.replace(/\s+/gu, "")].length <= SHORT_QUERY_MAX;
+    if (messageId === undefined && !isShortQuery) {
       const chain = exactChain(kind, normalizedQuery);
       if (chain.length) return sendOption(env, chatId, chain, chain[0].index, 0, undefined, chainCallback(cleanQuery), cleanQuery);
     }
