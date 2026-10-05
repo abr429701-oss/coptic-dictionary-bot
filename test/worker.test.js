@@ -1048,14 +1048,22 @@ test("inline: words without a recording become audio results when Google speech 
 });
 
 test("the /tts endpoint serves generated speech and only for dictionary entries", async () => {
-  globalThis.fetch = async (url) => String(url).includes("translate_tts")
-    ? new Response(new Uint8Array([9, 9, 9, 9]), { headers: { "content-type": "audio/mpeg" } })
-    : Response.json({ ok: true });
+  let speechUrl = "";
+  globalThis.fetch = async (url) => {
+    speechUrl = String(url);
+    return speechUrl.includes("translate_tts")
+      ? new Response(new Uint8Array([9, 9, 9, 9]), { headers: { "content-type": "audio/mpeg" } })
+      : Response.json({ ok: true });
+  };
   const index = records.findIndex((record) => String(record.phonetic || record.english || "").trim());
   const ok = await worker.fetch(new Request(`https://bot.test/tts/${index}.mp3`), env);
   assert.equal(ok.status, 200);
   assert.equal(ok.headers.get("content-type"), "audio/mpeg");
   assert.equal((await ok.arrayBuffer()).byteLength, 4);
+  assert.match(speechUrl, /ttsspeed=0\.5/u);
+  const spoken = decodeURIComponent(new URL(speechUrl).searchParams.get("q"));
+  const word = String(records[index].phonetic || records[index].english).trim();
+  assert.equal(spoken, `${word}, ${word}, ${word}`);
   const missing = await worker.fetch(new Request("https://bot.test/tts/99999999.mp3"), env);
   assert.equal(missing.status, 404);
 });
