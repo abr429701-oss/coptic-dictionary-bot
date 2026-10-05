@@ -186,22 +186,14 @@ function escapeHtml(value) {
 function formatRecord(record, partIndex = -1, searchedWord = "") {
   const parts = splitMeaning(record.meaning);
   const arabicPart = partIndex >= 0 && parts[partIndex] ? parts[partIndex] : parts.join("، ");
-  // When the user searched by an Arabic word: show the Arabic as "الكلمة" and Coptic as "المعنى".
-  // For Coptic / Latin / other searches: keep the default order (الكلمة = Coptic, المعنى = Arabic).
-  const isArabicSearch = searchedWord !== "" && ARABIC_LETTER.test(searchedWord);
-  const fields = isArabicSearch
-    ? [
-        ["الكلمة", arabicPart],
-        ["المعنى", record.coptic],
-        ["النوع", record.kind],
-        ["الأصل", record.origin],
-      ]
-    : [
-        ["الكلمة", record.coptic],
-        ["المعنى", arabicPart],
-        ["النوع", record.kind],
-        ["الأصل", record.origin],
-      ];
+  // Always keep the dictionary's headword as "الكلمة" and the selected translation
+  // as "المعنى", regardless of which language the user searched in.
+  const fields = [
+    ["الكلمة", record.coptic],
+    ["المعنى", arabicPart],
+    ["النوع", record.kind],
+    ["الأصل", record.origin],
+  ];
   const lines = [];
   for (const [label, raw] of fields) {
     const value = String(raw ?? "").trim();
@@ -337,11 +329,15 @@ function exactChain(kind, key) {
     for (const row of entry.rows) {
       const matchedPart = matchedPartIndex(records[row], key);
       if (matchedPart < 0) continue;
-      const uniqueKey = `${row}:${matchedPart}`;
+      const partText = splitMeaning(records[row]?.meaning)[matchedPart] ?? "";
+      const uniqueKey = `${normalize(records[row]?.coptic ?? row)}|${normalize(partText)}`;
       if (seen.has(uniqueKey)) continue;
       seen.add(uniqueKey);
-      const partText = splitMeaning(records[row]?.meaning)[matchedPart] ?? "";
-      options.push({ key: normalize(partText) || uniqueKey, index: row, part: matchedPart });
+      // The same Arabic translation may legitimately belong to several different
+      // Coptic headwords. Keep each row as a separate option instead of merging
+      // them by translation text, while duplicate rows for the same headword are
+      // still collapsed.
+      options.push({ key: uniqueKey, index: row, part: matchedPart });
     }
   } else {
     for (const row of entry.rows) {
