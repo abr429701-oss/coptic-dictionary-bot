@@ -12,20 +12,27 @@ const BROADCAST_BATCH_DELAY_MS = 1200;
 const FIRST_TIME_TEXT =
   "مرحبًا بك! يبدو أنك تستخدم البوت لأول مرة, الرجاء إدخال اسمك ثلاثي للبدء في استخدام القاموس القبطي الناطق";
 const NAME_RETRY_TEXT = "الرجاء إدخال اسمك ثلاثيًا (ثلاث كلمات على الأقل) بالحروف فقط، مثل: مينا جرجس بشرى.";
-const HELP_TEXT = `${BOT_TITLE}\n\nأهلًا بك في القاموس.\n\nاكتب الكلمة مباشرة، مثل:\nⲁⲛⲁⲩ\nwater\nماء\n\nسأبحث في القبطية والعربية والإنجليزية والنطق والتهجئة.\n\nاكتب حرفًا أو حرفين لتظهر لك اقتراحات بالكلمات التي تبدأ بهما.\n\n⌨️ لا يوجد كيبورد قبطي على جهازك؟ أرسل /keyboard لتكتب الكلمة بالأزرار.`;
+const HELP_TEXT = `${BOT_TITLE}\n\nأهلًا بك في القاموس.\n\nاكتب الكلمة مباشرة، مثل:\nⲁⲛⲁⲩ\nwater\nماء\n\nسأبحث في القبطية والعربية والإنجليزية والنطق والتهجئة.\n\nاكتب الكلمة أو أول حروفها لتظهر لك اقتراحات بالكلمات التي تبدأ بها.\n\n⌨️ لا يوجد كيبورد قبطي على جهازك؟ أرسل /keyboard لتكتب الكلمة بالأزرار.`;
 
 const ACCENT_MAP = { ὲ: "ⲉ", έ: "ⲉ", ὶ: "ⲓ", ί: "ⲓ", ὸ: "ⲟ", ό: "ⲟ", ὼ: "ⲱ", ώ: "ⲱ", ὴ: "ⲏ", ή: "ⲏ", ὰ: "ⲁ", ά: "ⲁ", ὺ: "ⲩ", ύ: "ⲩ" };
-const ALEF_MAP = { أ: "ا", إ: "ا", آ: "ا", ٱ: "ا", ى: "ي" };
+const ALEF_MAP = { أ: "ا", إ: "ا", آ: "ا", ٱ: "ا", ى: "ي", ة: "ه" };
 
+const PLAIN_ASCII = /^[\x20-\x5f\x61-\x7e]*$/u;
+const MARK_CHARS = /[\u0300-\u036f\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06edـ]/u;
+const MARK_CHARS_ALL = /[\u0300-\u036f\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06edـ]/gu;
+const FOLD_CHARS = /[أإآٱىةὲέὶίὸόὼώὴήὰάὺύ`]/u;
+const FOLD_CHARS_ALL = /[أإآٱىةὲέὶίὸόὼώὴήὰάὺύ`]/gu;
+const FOLD_MAP = { ...ALEF_MAP, ...ACCENT_MAP, "`": "" };
+
+// Hot path (the search index normalizes ~130k words): plain Latin text skips every regex, other text only
+// runs the replacements it actually needs.
 function normalize(value) {
-  return String(value ?? "")
-    .normalize("NFKC")
-    .toLowerCase()
-    .replace(/[\u0300-\u036f\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06edـ]/gu, "")
-    .replace(/[أإآٱى]/gu, (char) => ALEF_MAP[char])
-    .replace(/[ὲέὶίὸόὼώὴήὰάὺύ`]/gu, (char) => ACCENT_MAP[char] ?? "")
-    .replace(/\s+/gu, " ")
-    .trim();
+  const text = String(value ?? "");
+  if (PLAIN_ASCII.test(text)) return text.toLowerCase().replace(/\s+/gu, " ").trim();
+  let out = text.normalize("NFKC").toLowerCase();
+  if (MARK_CHARS.test(out)) out = out.replace(MARK_CHARS_ALL, "");
+  if (FOLD_CHARS.test(out)) out = out.replace(FOLD_CHARS_ALL, (char) => FOLD_MAP[char] ?? "");
+  return out.replace(/\s+/gu, " ").trim();
 }
 
 // Build heavy structures only when first needed (cold starts and the user store never pay for them).
@@ -193,12 +200,32 @@ function formatRecord(record, partIndex = -1) {
   return lines.join("\n");
 }
 
-function sameDictionaryWord(left, right) {
-  const keys = ["coptic", "greek", "english", "phonetic"];
-  return keys.some((key) => {
-    const value = normalize(left?.[key] ?? "");
-    return value && value === normalize(right?.[key] ?? "");
+const SAME_WORD_FIELDS = ["coptic", "greek", "english", "phonetic"];
+
+// Rows sharing a normalized coptic/greek/english/phonetic value, built once (instead of scanning every row per lookup).
+const sameWordRows = lazy(() => {
+  const map = new Map();
+  records.forEach((record, row) => {
+    for (const field of SAME_WORD_FIELDS) {
+      const value = normalize(record[field] ?? "");
+      if (!value) continue;
+      const list = map.get(value);
+      if (!list) map.set(value, [row]);
+      else if (list[list.length - 1] !== row) list.push(row);
+    }
   });
+  return map;
+});
+
+// Every row that is the same dictionary word as `index`, in sheet order.
+function groupRows(index) {
+  const base = records[index];
+  const rows = new Set();
+  for (const field of SAME_WORD_FIELDS) {
+    const value = normalize(base?.[field] ?? "");
+    if (value) for (const row of sameWordRows().get(value) ?? []) rows.add(row);
+  }
+  return [...rows].sort((a, b) => a - b);
 }
 
 // Keep meanings separate. The first option is the meaning that matched the query;
@@ -206,7 +233,7 @@ function sameDictionaryWord(left, right) {
 function meaningOptions(index, normalizedQuery = "", preferredPart = -1) {
   const base = records[index];
   if (!base) return [];
-  const group = records.map((record, row) => ({ record, row })).filter(({ record }) => sameDictionaryWord(base, record));
+  const group = groupRows(index).map((row) => ({ record: records[row], row }));
   const options = [];
   const add = (row, part) => {
     const partText = splitMeaning(records[row]?.meaning)[part] ?? "";
@@ -225,13 +252,103 @@ function meaningOptions(index, normalizedQuery = "", preferredPart = -1) {
 
 // The button walks one fixed list of meanings: each meaning is shown once, and the last one has no button.
 // callback: n|<word row>|<first meaning part>|<step to show next>  (the list is rebuilt the same way every time).
-function moreMeaning(options, baseIndex, nextStep = 1) {
+function moreMeaning(options, baseIndex, nextStep = 1, callbackFor = undefined) {
   if (options.length <= nextStep) return {};
   const firstPart = Math.max(0, options[0].part);
+  const data = callbackFor?.(nextStep) ?? `n|${baseIndex}|${firstPart}|${nextStep}`;
   return {
     notice: "\n\n<b>هناك معنى آخر للكلمة التي بحثت بها</b>",
-    reply_markup: { inline_keyboard: [[{ text: "اضغط هنا لعرضه", callback_data: `n|${baseIndex}|${firstPart}|${nextStep}` }]] },
+    reply_markup: { inline_keyboard: [[{ text: "اضغط هنا لعرضه", callback_data: data }]] },
   };
+}
+
+// ---- Search like the original Apps Script bot ----
+// 1) the typed word is an exact word -> show it (other meanings behind one button, each shown once);
+// 2) otherwise -> the unique words that start with what was typed, as buttons; tapping one shows it.
+function scriptKind(key) {
+  if (ARABIC_LETTER.test(key)) return "ar";
+  if (COPTIC_LETTER.test(key)) return "cop";
+  if (LATIN_LETTER.test(key)) return "lat";
+  return "other";
+}
+
+const WORD_FIELDS = { cop: ["coptic"], lat: ["english", "phonetic"], other: ["greek", "pronunciation"] };
+const wordIndexes = {};
+
+// Built lazily per script, so an Arabic search never pays for the Coptic/Latin words.
+function wordIndex(kind) {
+  if (wordIndexes[kind]) return wordIndexes[kind];
+  const map = new Map();
+  const add = (text, row) => {
+    const label = String(text ?? "").replaceAll("`", "").trim();
+    const key = normalize(label);
+    if (!key) return;
+    const entry = map.get(key);
+    if (!entry) map.set(key, { key, label, rows: [row] });
+    else if (entry.rows[entry.rows.length - 1] !== row) entry.rows.push(row);
+  };
+  records.forEach((record, row) => {
+    if (kind === "ar") {
+      for (const part of splitMeaning(record.meaning)) add(part, row);
+    } else {
+      for (const field of WORD_FIELDS[kind]) for (const part of splitMeaning(record[field])) add(part, row);
+    }
+  });
+  const sorted = [...map.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  wordIndexes[kind] = { map, sorted };
+  return wordIndexes[kind];
+}
+
+// Unique words starting with `key`, in sheet order.
+function prefixWords(kind, key, limit = 5000) {
+  const { sorted } = wordIndex(kind);
+  let low = 0;
+  let high = sorted.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (sorted[mid].key < key) low = mid + 1;
+    else high = mid;
+  }
+  const found = [];
+  for (let i = low; i < sorted.length && found.length < limit && sorted[i].key.startsWith(key); i += 1) found.push(sorted[i]);
+  return found.sort((a, b) => a.rows[0] - b.rows[0]);
+}
+
+// Every meaning to show for an exact word, once each, in order.
+function exactChain(kind, key) {
+  const entry = wordIndex(kind).map.get(key);
+  if (!entry) return [];
+  const options = [];
+  const seen = new Set();
+  for (const row of entry.rows) {
+    for (const option of meaningOptions(row, kind === "ar" ? key : "", -1)) {
+      if (seen.has(option.key)) continue;
+      seen.add(option.key);
+      options.push(option);
+    }
+  }
+  return options;
+}
+
+function chainCallback(key) {
+  return (step) => {
+    const data = `x|${step}|${key}`;
+    return new TextEncoder().encode(data).length <= CALLBACK_DATA_MAX_BYTES ? data : null;
+  };
+}
+
+function renderWordSuggestions(query, words, requestedPage) {
+  const totalPages = Math.max(1, Math.ceil(words.length / SUGGESTION_PAGE_SIZE));
+  const page = Math.max(0, Math.min(requestedPage, totalPages - 1));
+  const keyboard = words.slice(page * SUGGESTION_PAGE_SIZE, (page + 1) * SUGGESTION_PAGE_SIZE).map((word) => [{
+    text: word.label.slice(0, 48),
+    callback_data: `w|${truncateBytes(word.key, CALLBACK_DATA_MAX_BYTES - 2)}`,
+  }]);
+  const navigation = [];
+  if (page > 0) navigation.push({ text: "السابق", callback_data: pageCallback(page - 1, query) });
+  if (page < totalPages - 1) navigation.push({ text: "التالي", callback_data: pageCallback(page + 1, query) });
+  if (navigation.length) keyboard.push(navigation);
+  return { text: SUGGESTION_TITLE, reply_markup: { inline_keyboard: keyboard } };
 }
 
 function findMatches(query) {
@@ -560,11 +677,11 @@ function lookupMedia(env, record) {
 async function sendCardEntry(env, chatId, record, text, media, replyMarkup = undefined) {
   const hash = cardHash(record);
   if (!hash || !media) return false;
+  const base = String(env.CARDS_BASE_URL || CARDS_BASE_URL).replace(/\/$/u, "");
+  // The requested order is intentionally text -> card -> voice. The text goes out first, without waiting for the lookup.
+  await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(replyMarkup ? { reply_markup: replyMarkup } : {}) });
   const saved = (await media).card;
   const cachedId = saved?.hash === hash ? (saved.fileId || saved.fileIds?.[0] || "") : "";
-  const base = String(env.CARDS_BASE_URL || CARDS_BASE_URL).replace(/\/$/u, "");
-  // The requested order is intentionally text -> card -> voice.
-  await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(replyMarkup ? { reply_markup: replyMarkup } : {}) });
   const url = `${base}/${record.id}.png?v=${hash}`;
   let result = await telegram(env, "sendPhoto", { chat_id: chatId, photo: cachedId || url });
   if (!result?.ok && cachedId) result = await telegram(env, "sendPhoto", { chat_id: chatId, photo: url });
@@ -582,17 +699,21 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
     ? telegram(env, "sendMessage", { chat_id: chatId, ...payload })
     : telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, ...payload });
 
-  if (normalizedQuery && Array.from(normalizedQuery).length <= SHORT_QUERY_MAX) {
-    const prefixMatches = findPrefixMatches(normalizedQuery);
-    if (prefixMatches.length) {
-      const view = renderSuggestions(cleanQuery, normalizedQuery, prefixMatches, page);
+  if (normalizedQuery) {
+    const kind = scriptKind(normalizedQuery);
+    if (messageId === undefined) {
+      const chain = exactChain(kind, normalizedQuery);
+      if (chain.length) return sendOption(env, chatId, chain, chain[0].index, 0, undefined, chainCallback(normalizedQuery));
+    }
+    const words = prefixWords(kind, normalizedQuery);
+    if (words.length) {
+      const view = renderWordSuggestions(cleanQuery, words, page);
       return deliver({ text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup });
     }
   }
   const matches = findMatches(cleanQuery);
   if (!matches.length) {
-    const text = `لم أجد نتائج لـ <b>${escapeHtml(cleanQuery)}</b>.\nجرّب القبطية أو العربية أو الإنجليزية أو تهجئة أقرب.`;
-    return deliver({ text, parse_mode: "HTML" });
+    return deliver({ text: "القاموس قيد التطوير حاليًا وسيتم إضافة معنى هذه الكلمة لاحقًا" });
   }
   if (matches.length > 1) {
     const view = renderSuggestions(cleanQuery, normalizedQuery, matches, page);
@@ -626,13 +747,13 @@ async function sendMeaningStep(env, chatId, baseIndex, firstPart, step) {
   await sendOption(env, chatId, options, baseIndex, step);
 }
 
-async function sendOption(env, chatId, options, baseIndex, step, fallback = undefined) {
+async function sendOption(env, chatId, options, baseIndex, step, fallback = undefined, callbackFor = undefined) {
   const selected = options[step] ?? fallback;
   const record = records[selected?.index];
   if (!record) return;
   const media = lookupMedia(env, record);
   const voice = prepareWordVoice(env, record, media);
-  const more = moreMeaning(options, baseIndex, step + 1);
+  const more = moreMeaning(options, baseIndex, step + 1, callbackFor);
   const text = `${formatRecord(record, selected.part)}${more.notice ?? ""}`.slice(0, MAX_MESSAGE_LENGTH);
   if (!(await sendCardEntry(env, chatId, record, text, media, more.reply_markup))) {
     await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
@@ -1193,9 +1314,16 @@ async function syncUsersBatch(env, chatId) {
   });
 }
 
+// Fully registered users are remembered briefly in this isolate (registration never goes backwards),
+// so their searches do not wait for a user-store round trip.
+const registeredCache = new Map();
+const REGISTERED_CACHE_MS = 60000;
+
 async function registerOnFirstContact(env, message, userId, ctx) {
   if (isAdmin(env, userId) || (message.chat.type ?? "private") !== "private" || !env.USERS) return undefined;
   const from = message.from ?? {};
+  const cached = registeredCache.get(userId);
+  if (cached && Date.now() - cached.at < REGISTERED_CACHE_MS) return cached.user;
   let result;
   try {
     result = await storeCall(env, { op: "register", userId, profile: { username: from.username ?? "", tgName: displayNameOrEmpty(from) } });
@@ -1206,7 +1334,13 @@ async function registerOnFirstContact(env, message, userId, ctx) {
   if (result?.created || result?.changed) {
     await inBackground(ctx, pushUsers(env, [userSheetRow(userId, result.user, from)]));
   }
-  if (!result?.created) return result?.user;
+  if (!result?.created) {
+    if (result?.user?.name && !result.user.awaitingName) {
+      if (registeredCache.size > 5000) registeredCache.clear();
+      registeredCache.set(userId, { at: Date.now(), user: result.user });
+    }
+    return result?.user;
+  }
   await notifyAdmins(env, [
     "🆕 <b>انضم مستخدم جديد إلى البوت</b>",
     `👤 الاسم: ${escapeHtml(displayName(from))}`,
@@ -1505,7 +1639,34 @@ async function handleUpdate(update, env, ctx) {
       await handleBroadcastCallback(env, callback);
       return;
     }
-    await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
+    // Acknowledge the tap in the background so the answer is not delayed by a round trip.
+    await inBackground(ctx, telegram(env, "answerCallbackQuery", { callback_query_id: callback.id }));
+    const chatForPick = callback.message?.chat?.id;
+    const chainPick = /^x\|(\d{1,3})\|(.+)$/su.exec(callback.data ?? "");
+    if (chainPick) {
+      const chain = exactChain(scriptKind(chainPick[2]), chainPick[2]);
+      const step = Number(chainPick[1]);
+      if (chatForPick && chain[step]) await sendOption(env, chatForPick, chain, chain[0].index, step, undefined, chainCallback(chainPick[2]));
+      return;
+    }
+    const wordPick = /^w\|(.+)$/su.exec(callback.data ?? "");
+    if (wordPick) {
+      if (chatForPick) {
+        let key = wordPick[1];
+        const kind = scriptKind(key);
+        let chain = exactChain(kind, key);
+        if (!chain.length) {
+          // The button text was cut to fit Telegram's limit: take the first word that starts with it.
+          const [first] = prefixWords(kind, key, 1);
+          if (first) {
+            key = first.key;
+            chain = exactChain(kind, key);
+          }
+        }
+        if (chain.length) await sendOption(env, chatForPick, chain, chain[0].index, 0, undefined, chainCallback(key));
+      }
+      return;
+    }
     const nextMeaning = /^n\|(\d{1,6})\|(\d{1,3})\|(\d{1,3})$/u.exec(callback.data ?? "");
     if (nextMeaning) {
       if (callback.message?.chat?.id) {
@@ -1667,7 +1828,7 @@ async function handleUpdate(update, env, ctx) {
       await handleKeyboardInput(env, message, userId);
       return;
     }
-    await showTyping(env, message.chat.id);
+    await inBackground(ctx, showTyping(env, message.chat.id));
     await sendSearch(env, message.chat.id, text, 0);
   }
 }

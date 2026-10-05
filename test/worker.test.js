@@ -58,17 +58,41 @@ test("/stats returns the number of dictionary records", async () => {
   assert.ok(calls[0].payload.text.includes(records.length.toLocaleString("en-US")));
 });
 
-test("several matches show only the suggestions title and word-only buttons", async () => {
+test("an exact word is shown directly, without a suggestions list", async () => {
   const calls = [];
   fakeTelegramApi(calls);
   const response = await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲏⲧ", chat: { id: 8 } } }), env);
   assert.equal(response.status, 200);
   const message = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload;
   assert.ok(message);
+  assert.notEqual(message.text, "اختر من الاقتراحات التالية:");
+  assert.match(message.text, /<b>الكلمة:<\/b> ⲁⲃⲏⲧ/u);
+  assert.match(message.text, /<b>المعنى:<\/b> [^\n،]+\n/u);
+});
+
+test("a word that is not exact shows unique words starting with it as word-only buttons", async () => {
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: "ⲁⲃ", chat: { id: 18 } } }), env);
+  const message = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
   assert.equal(message.text, "اختر من الاقتراحات التالية:");
-  for (const row of message.reply_markup.inline_keyboard) {
-    for (const button of row) assert.doesNotMatch(button.text, /—/u);
-  }
+  const wordRows = message.reply_markup.inline_keyboard.filter((row) => row[0].callback_data.startsWith("w|"));
+  const labels = wordRows.map((row) => row[0].text);
+  assert.ok(labels.length > 1);
+  assert.equal(new Set(labels).size, labels.length, "a suggestion is repeated");
+  assert.ok(labels.every((label) => label.replaceAll("`", "").startsWith("ⲁⲃ")));
+});
+
+test("tapping a suggested word shows that word", async () => {
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: "ⲁⲃ", chat: { id: 19 } } }), env);
+  const first = calls.find((call) => call.url.endsWith("/sendMessage")).payload.reply_markup.inline_keyboard[0][0];
+  calls.length = 0;
+  await worker.fetch(updateRequest({ callback_query: { id: "w1", data: first.callback_data, message: { message_id: 1, chat: { id: 19 }, text: "x" } } }), env);
+  const text = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
+  assert.ok(text.startsWith("<b>الكلمة:</b> "));
+  assert.ok(text.replaceAll("`", "").includes(first.text.replaceAll("`", "")));
 });
 
 test("callback pagination edits the suggestions message using the query in the callback data", async () => {
@@ -183,7 +207,7 @@ test("one or two letters show 10 tappable suggestions per page", async () => {
   const message = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
   assert.equal(message.text, "اختر من الاقتراحات التالية:");
   const rows = message.reply_markup.inline_keyboard;
-  const wordRows = rows.filter((row) => row[0].callback_data.startsWith("s|"));
+  const wordRows = rows.filter((row) => row[0].callback_data.startsWith("w|"));
   assert.equal(wordRows.length, 10);
   assert.ok(rows.at(-1).some((button) => button.callback_data.startsWith("p|1|")));
   assert.ok(!calls.some((call) => call.url.endsWith("/sendVoice")));
@@ -196,8 +220,10 @@ test("Arabic suggestions use Arabic labels instead of Coptic headwords", async (
   const message = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
   assert.equal(message.text, "اختر من الاقتراحات التالية:");
   const labels = message.reply_markup.inline_keyboard
-    .filter((row) => row[0].callback_data.startsWith("s|"))
+    .filter((row) => row[0].callback_data.startsWith("w|"))
     .map((row) => row[0].text);
+  assert.ok(labels.length > 0);
+  assert.ok(labels.every((label) => label.startsWith("كو")));
   assert.ok(labels.some((label) => /ك/u.test(label)));
   assert.ok(labels.every((label) => !/[\u2c80-\u2cff\u03e2-\u03ef]/u.test(label)));
 });
@@ -267,18 +293,49 @@ test("the next-meaning button shows every meaning exactly once and then stops", 
   assert.ok(longest >= 2);
 });
 
-test("Arabic search matches whole words only, never inside a longer word", async () => {
+test("Arabic search matches the word itself, never the inside of a longer word", async () => {
   const calls = [];
   fakeTelegramApi(calls);
   await worker.fetch(updateRequest({ message: { text: "غراب", chat: { id: 17 } } }), env);
-  const message = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
-  assert.equal(message.text, "اختر من الاقتراحات التالية:");
-  const data = message.reply_markup.inline_keyboard[0][0].callback_data;
-  calls.length = 0;
-  await worker.fetch(updateRequest({ callback_query: { id: "c", data, message: { message_id: 1, chat: { id: 17 }, text: "x" } } }), env);
   const text = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
-  assert.match(text, /<b>المعنى:<\/b> [^\n]*غراب/u);
+  assert.match(text, /<b>المعنى:<\/b> غراب(\s|$)/u);
   assert.doesNotMatch(text, /الاستغراب/u);
+});
+
+test("an unknown word gets the dictionary-under-development message", async () => {
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: "ظظظظظظظ", chat: { id: 21 } } }), env);
+  const text = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
+  assert.match(text, /القاموس قيد التطوير/u);
+});
+
+test("several different words for one Arabic word are shown one after another, each once", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const counts = new Map();
+  for (const record of records) for (const part of String(record.meaning ?? "").split(/\s*[،,]\s*/u)) {
+    const word = part.trim();
+    if (word && !/\s/u.test(word)) counts.set(word, (counts.get(word) ?? 0) + 1);
+  }
+  const word = [...counts].filter(([, count]) => count >= 3 && count <= 8).map(([w]) => w).find((w) => /^[\u0621-\u064a]+$/u.test(w));
+  assert.ok(word, "no test word found");
+  const shown = [];
+  let calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: word, chat: { id: 22 } } }), kvEnv);
+  let sent = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
+  for (let tap = 0; tap < 80; tap += 1) {
+    shown.push(sent.text.split("\n").slice(0, 2).join("|"));
+    const data = sent.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data;
+    if (!data) break;
+    calls = [];
+    fakeTelegramApi(calls);
+    await worker.fetch(updateRequest({ callback_query: { id: `chain-${tap}`, data, message: { chat: { id: 22 }, message_id: tap + 1, date: 1728000000 } } }), kvEnv);
+    sent = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
+  }
+  assert.ok(shown.length >= 2);
+  assert.equal(new Set(shown).size, shown.length, `a meaning repeated: ${shown.join(" / ")}`);
+  assert.equal(sent.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data, undefined);
 });
 
 function fakeKv() {
