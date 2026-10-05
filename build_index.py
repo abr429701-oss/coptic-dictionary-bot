@@ -52,6 +52,14 @@ def arabic_pronunciation(value: str) -> str:
     return out or '—'
 
 
+def arabic_meaning(value: str, translations: list[str]) -> str:
+    text = value.strip()
+    for translation in translations:
+        if translation:
+            text = re.sub(rf'(?:^|[،,]\s*){re.escape(translation)}(?=\s*(?:[،,]|$))', '', text)
+    return '، '.join(part.strip() for part in re.split(r'\s*[،,]\s*', text) if part.strip())
+
+
 def main(src: str, dst: str):
     records = []
     with zipfile.ZipFile(src) as z:
@@ -81,7 +89,10 @@ def main(src: str, dst: str):
                 'arabic_pronunciation': arabic_pronunciation(values.get(4, '') or values.get(2, '')),
                 'kind': values.get(5, ''),
                 'gender': values.get(6, ''),
-                'meaning': values.get(64, ''),
+                'translation_en': values.get(25, ''),
+                'translation_fr': values.get(26, ''),
+                'translation_de': values.get(27, ''),
+                'meaning': arabic_meaning(values.get(64, ''), [values.get(25, ''), values.get(26, ''), values.get(27, '')]),
             }
             if any(record.values()):
                 records.append(record)
