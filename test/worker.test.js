@@ -214,6 +214,16 @@ test("one or two letters show 10 tappable suggestions per page", async () => {
   assert.ok(!calls.some((call) => call.url.endsWith("/sendVoice")));
 });
 
+test("a one-letter exact word still shows suggestions instead of opening directly", async () => {
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: "ⲁ", chat: { id: 150 } } }), env);
+  const message = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
+  assert.equal(message.text, "اختر من الاقتراحات التالية:");
+  assert.ok(message.reply_markup.inline_keyboard.some((row) => row[0].callback_data.startsWith("w|")));
+  assert.ok(!calls.some((call) => call.url.endsWith("/sendVoice")));
+});
+
 test("Arabic suggestions use Arabic labels instead of Coptic headwords", async () => {
   const calls = [];
   fakeTelegramApi(calls);
