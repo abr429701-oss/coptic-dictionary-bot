@@ -58,7 +58,7 @@ def main(src: str, dst: str):
         shared = load_shared_strings(z)
         root = ET.fromstring(z.read('xl/worksheets/sheet1.xml'))
         rows = root.findall('.//m:sheetData/m:row', NS)
-        # The workbook has useful labels in A:H and Arabic meaning in I when H is blank.
+        # The workbook has useful labels in A:H and the canonical Arabic meaning in BM.
         for row in rows[1:]:
             values = {}
             for cell in row.findall('m:c', NS):
@@ -81,7 +81,7 @@ def main(src: str, dst: str):
                 'arabic_pronunciation': arabic_pronunciation(values.get(4, '') or values.get(2, '')),
                 'kind': values.get(5, ''),
                 'gender': values.get(6, ''),
-                'meaning': values.get(7, '') or values.get(8, ''),
+                'meaning': values.get(64, ''),
             }
             if any(record.values()):
                 records.append(record)
