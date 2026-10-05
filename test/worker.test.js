@@ -196,8 +196,8 @@ test("tapping a suggestion from an Arabic search shows only the searched meaning
     await worker.fetch(updateRequest({ callback_query: { id: "c", data, message: { message_id: 1, chat: { id: 14 }, text: "x" } } }), env);
     return calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
   })();
-  assert.match(text, /<b>الكلمة:<\/b> ⲁⲃⲁⲑⲣⲁ\n/u);
-  assert.match(text, /<b>المعنى:<\/b> كوبري\n/u);
+  assert.match(text, /<b>الكلمة:<\/b> كوبري\n/u);
+  assert.match(text, /<b>المعنى:<\/b> ⲁⲃⲁⲑⲣⲁ\n/u);
   assert.doesNotMatch(text, /كلمات مرتبطة/u);
 });
 
@@ -299,8 +299,8 @@ test("Arabic search matches the word itself, never the inside of a longer word",
   fakeTelegramApi(calls);
   await worker.fetch(updateRequest({ message: { text: "غراب", chat: { id: 17 } } }), env);
   const text = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
-  assert.match(text, /<b>الكلمة:<\/b> ⲁⲃⲱⲕ\n/u);
-  assert.match(text, /<b>المعنى:<\/b> غراب(\s|$)/u);
+  assert.match(text, /<b>الكلمة:<\/b> غراب\n/u);
+  assert.match(text, /<b>المعنى:<\/b> ⲁⲃⲱⲕ(\s|$)/u);
   assert.doesNotMatch(text, /الاستغراب/u);
 });
 
@@ -336,7 +336,7 @@ test("several different Coptic words for one Arabic word are shown one after ano
     sent = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
   }
   assert.ok(shown.length >= 2);
-  assert.equal(new Set(shown.map((entry) => entry.split("|")[0])).size, shown.length, `a word repeated: ${shown.join(" / ")}`);
+  assert.equal(new Set(shown.map((entry) => entry.split("|")[1])).size, shown.length, `a meaning repeated: ${shown.join(" / ")}`);
   assert.equal(sent.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data, undefined);
 });
 
@@ -912,7 +912,7 @@ test("inline: a word returns articles with the entry as the message to send", as
   assert.equal(first.type, "article");
   assert.ok(first.title && first.id.length <= 64);
   assert.match(first.input_message_content.message_text, /<b>الكلمة:<\/b> /u);
-  assert.match(first.input_message_content.message_text, /<b>المعنى:<\/b> [^\n]*غراب/u);
+  assert.match(first.input_message_content.message_text, /<b>المعنى:<\/b> [^\n]*ⲁⲃⲱⲕ/u);
   assert.doesNotMatch(first.input_message_content.message_text, /الاستغراب/u);
   assert.equal(answer.is_personal, false);
   assert.ok(answer.cache_time >= 60);
