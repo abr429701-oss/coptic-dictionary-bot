@@ -190,15 +190,16 @@ function formatRecord(record, partIndex = -1, searchedWord = "") {
   // Arabic search => الكلمة = Arabic, المعنى = Coptic;
   // Coptic/other search => الكلمة = Coptic, المعنى = Arabic.
   const isArabicSearch = searchedWord !== "" && ARABIC_LETTER.test(searchedWord);
+  const displayedWord = searchedWord || (isArabicSearch ? arabicPart : record.coptic);
   const fields = isArabicSearch
     ? [
-        ["الكلمة", arabicPart],
+        ["الكلمة", displayedWord],
         ["المعنى", record.coptic],
         ["النوع", record.kind],
         ["الأصل", record.origin],
       ]
     : [
-        ["الكلمة", record.coptic],
+        ["الكلمة", displayedWord],
         ["المعنى", arabicPart],
         ["النوع", record.kind],
         ["الأصل", record.origin],
