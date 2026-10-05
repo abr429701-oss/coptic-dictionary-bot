@@ -277,6 +277,7 @@ test("the next-meaning button shows every meaning exactly once and then stops", 
   let longest = 0;
   for (const index of candidates) {
     const shown = [];
+    let finalText = "";
     let data = `s|${index}|0`;
     for (let tap = 0; tap < 40 && data; tap += 1) {
       const calls = [];
@@ -285,10 +286,13 @@ test("the next-meaning button shows every meaning exactly once and then stops", 
         id: `walk-${index}-${tap}`, data, message: { chat: { id: 90 }, message_id: tap + 1, date: 1728000000 },
       } }), kvEnv);
       const sent = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
+      finalText = sent.text;
       shown.push(meaningLine(sent.text));
-      data = sent.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data;
+    data = sent.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data;
+    if (data === "e") data = undefined;
     }
-    assert.equal(data, undefined, `row ${index}: the button never disappears`);
+    assert.equal(data, undefined, `row ${index}: the terminal button callback leaked`);
+    assert.match(finalText, /انتهت المعاني المتاحة/u);
     assert.equal(new Set(shown).size, shown.length, `row ${index}: a meaning was shown twice: ${shown.join(" | ")}`);
     longest = Math.max(longest, shown.length);
   }
@@ -346,7 +350,7 @@ test("several different Coptic words for one Arabic word are shown one after ano
   for (let tap = 0; tap < 80; tap += 1) {
     shown.push(sent.text.split("\n").slice(0, 2).join("|"));
     const data = sent.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data;
-    if (!data) break;
+    if (!data || data === "e") break;
     calls = [];
     fakeTelegramApi(calls);
     await worker.fetch(updateRequest({ callback_query: { id: `chain-${tap}`, data, message: { chat: { id: 22 }, message_id: tap + 1, date: 1728000000 } } }), kvEnv);
@@ -355,7 +359,7 @@ test("several different Coptic words for one Arabic word are shown one after ano
   assert.ok(shown.length >= 2);
   assert.equal(new Set(shown.map((entry) => entry.split("|")[0])).size, 1, `the searched word changed: ${shown.join(" / ")}`);
   assert.equal(new Set(shown.map((entry) => entry.split("|")[1])).size, shown.length, `a counterpart repeated: ${shown.join(" / ")}`);
-  assert.equal(sent.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data, undefined);
+  assert.equal(sent.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data, "e");
 });
 
 function fakeKv() {
