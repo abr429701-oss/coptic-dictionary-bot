@@ -196,7 +196,8 @@ test("tapping a suggestion from an Arabic search shows only the searched meaning
     await worker.fetch(updateRequest({ callback_query: { id: "c", data, message: { message_id: 1, chat: { id: 14 }, text: "x" } } }), env);
     return calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
   })();
-  assert.match(text, /<b>المعنى:<\/b> [^،\n]*كوبري[^،\n]*\n/u);
+  assert.match(text, /<b>الكلمة:<\/b> ⲁⲃⲁⲑⲣⲁ\n/u);
+  assert.match(text, /<b>المعنى:<\/b> كوبري\n/u);
   assert.doesNotMatch(text, /كلمات مرتبطة/u);
 });
 
@@ -298,6 +299,7 @@ test("Arabic search matches the word itself, never the inside of a longer word",
   fakeTelegramApi(calls);
   await worker.fetch(updateRequest({ message: { text: "غراب", chat: { id: 17 } } }), env);
   const text = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
+  assert.match(text, /<b>الكلمة:<\/b> ⲁⲃⲱⲕ\n/u);
   assert.match(text, /<b>المعنى:<\/b> غراب(\s|$)/u);
   assert.doesNotMatch(text, /الاستغراب/u);
 });
@@ -310,7 +312,7 @@ test("an unknown word gets the dictionary-under-development message", async () =
   assert.match(text, /القاموس قيد التطوير/u);
 });
 
-test("several different words for one Arabic word are shown one after another, each once", async () => {
+test("several different Coptic words for one Arabic word are shown one after another", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const counts = new Map();
   for (const record of records) for (const part of String(record.meaning ?? "").split(/\s*[،,]\s*/u)) {
@@ -334,7 +336,7 @@ test("several different words for one Arabic word are shown one after another, e
     sent = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
   }
   assert.ok(shown.length >= 2);
-  assert.equal(new Set(shown).size, shown.length, `a meaning repeated: ${shown.join(" / ")}`);
+  assert.equal(new Set(shown.map((entry) => entry.split("|")[0])).size, shown.length, `a word repeated: ${shown.join(" / ")}`);
   assert.equal(sent.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data, undefined);
 });
 
