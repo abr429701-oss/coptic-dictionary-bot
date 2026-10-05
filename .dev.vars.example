@@ -1,3 +1,8 @@
 # Copy to .dev.vars for local-only testing; do not commit the actual .dev.vars file.
 TELEGRAM_BOT_TOKEN=replace-with-a-test-bot-token
 WEBHOOK_SECRET=replace-with-a-random-long-value
+# Optional: enables multilingual voice search (Arabic, English, French, German).
+OPENAI_API_KEY=replace-with-an-openai-api-key
+# Optional; defaults to whisper-1. Leave blank to use OpenAI's default endpoint.
+OPENAI_TRANSCRIPTION_MODEL=whisper-1
+OPENAI_API_BASE=https://api.openai.com/v1

@@ -630,6 +630,44 @@ test("typing plain ⲉ finds headwords written with accented ὲ, and backticks 
   assert.doesNotMatch(message.text, /لم أجد نتائج/u);
 });
 
+test("voice search transcribes multilingual audio, searches it, and caches the file", async () => {
+  const kvEnv = { ...env, OPENAI_API_KEY: "test-openai-key", USERS: fakeKv() };
+  const calls = [];
+  let transcriptions = 0;
+  globalThis.fetch = async (url, options = {}) => {
+    const address = String(url);
+    calls.push({ url: address, options });
+    if (address.endsWith("/getFile")) return Response.json({ ok: true, result: { file_path: "voice/file.ogg" } });
+    if (address.includes("/file/bot")) return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+    if (address.endsWith("/audio/transcriptions")) {
+      transcriptions += 1;
+      assert.ok(options.body instanceof FormData);
+      assert.equal(options.body.get("model"), "whisper-1");
+      return Response.json({ text: "water" });
+    }
+    if (address.includes("translate_tts")) return new Response("blocked", { status: 403 });
+    return Response.json({ ok: true, result: { message_id: 900 } });
+  };
+  const voice = { file_id: "voice-1", file_unique_id: "stable-voice-1", duration: 3, mime_type: "audio/ogg" };
+  await worker.fetch(updateRequest({ message: { voice, chat: { id: 44 }, from: { id: 44 } } }), kvEnv);
+  await worker.fetch(updateRequest({ message: { voice, chat: { id: 44 }, from: { id: 44 } } }), kvEnv);
+  assert.equal(transcriptions, 1, "the same Telegram file must be transcribed once");
+  assert.ok(calls.some((call) => call.url.endsWith("/sendMessage") && call.options.body.includes("سمعت: water")));
+  assert.equal([...kvEnv.USERS.store.keys()].filter((key) => key.startsWith("usage:")).length, 0);
+});
+
+test("voice search rejects recordings over the safe duration limit before transcription", async () => {
+  const kvEnv = { ...env, OPENAI_API_KEY: "test-openai-key", USERS: fakeKv() };
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: {
+    voice: { file_id: "long-voice", file_unique_id: "long-voice", duration: 46 },
+    chat: { id: 45 }, from: { id: 45 },
+  } }), kvEnv);
+  assert.ok(calls.some((call) => call.payload?.text?.includes("45 ثانية")));
+  assert.ok(!calls.some((call) => call.url.endsWith("/getFile")));
+});
+
 const ADMIN = 813894692;
 
 async function asUser(kvEnv, id, message, extra = {}) {
