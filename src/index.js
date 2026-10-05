@@ -186,14 +186,23 @@ function escapeHtml(value) {
 function formatRecord(record, partIndex = -1, searchedWord = "") {
   const parts = splitMeaning(record.meaning);
   const arabicPart = partIndex >= 0 && parts[partIndex] ? parts[partIndex] : parts.join("، ");
-  // Always keep the dictionary's headword as "الكلمة" and the selected translation
-  // as "المعنى", regardless of which language the user searched in.
-  const fields = [
-    ["الكلمة", record.coptic],
-    ["المعنى", arabicPart],
-    ["النوع", record.kind],
-    ["الأصل", record.origin],
-  ];
+  // Show the user's searched word first, followed by its counterpart:
+  // Arabic search => الكلمة = Arabic, المعنى = Coptic;
+  // Coptic/other search => الكلمة = Coptic, المعنى = Arabic.
+  const isArabicSearch = searchedWord !== "" && ARABIC_LETTER.test(searchedWord);
+  const fields = isArabicSearch
+    ? [
+        ["الكلمة", arabicPart],
+        ["المعنى", record.coptic],
+        ["النوع", record.kind],
+        ["الأصل", record.origin],
+      ]
+    : [
+        ["الكلمة", record.coptic],
+        ["المعنى", arabicPart],
+        ["النوع", record.kind],
+        ["الأصل", record.origin],
+      ];
   const lines = [];
   for (const [label, raw] of fields) {
     const value = String(raw ?? "").trim();
@@ -1667,7 +1676,9 @@ async function handleUpdate(update, env, ctx) {
     if (chainPick) {
       const chain = exactChain(scriptKind(chainPick[2]), chainPick[2]);
       const step = Number(chainPick[1]);
-      if (chatForPick && chain[step]) await sendOption(env, chatForPick, chain, chain[0].index, step, undefined, chainCallback(chainPick[2]), chainPick[2]);
+      if (chatForPick && chain[step]) {
+        await inBackground(ctx, sendOption(env, chatForPick, chain, chain[0].index, step, undefined, chainCallback(chainPick[2]), chainPick[2]));
+      }
       return;
     }
     const wordPick = /^w\|(.+)$/su.exec(callback.data ?? "");
@@ -1684,14 +1695,16 @@ async function handleUpdate(update, env, ctx) {
             chain = exactChain(kind, key);
           }
         }
-        if (chain.length) await sendOption(env, chatForPick, chain, chain[0].index, 0, undefined, chainCallback(key), key);
+        if (chain.length) {
+          await inBackground(ctx, sendOption(env, chatForPick, chain, chain[0].index, 0, undefined, chainCallback(key), key));
+        }
       }
       return;
     }
     const nextMeaning = /^n\|(\d{1,6})\|(\d{1,3})\|(\d{1,3})$/u.exec(callback.data ?? "");
     if (nextMeaning) {
       if (callback.message?.chat?.id) {
-        await sendMeaningStep(env, callback.message.chat.id, Number(nextMeaning[1]), Number(nextMeaning[2]), Number(nextMeaning[3]));
+        await inBackground(ctx, sendMeaningStep(env, callback.message.chat.id, Number(nextMeaning[1]), Number(nextMeaning[2]), Number(nextMeaning[3])));
       }
       return;
     }
@@ -1699,20 +1712,20 @@ async function handleUpdate(update, env, ctx) {
     const meaningPick = /^m\|(\d{1,6})\|(\d{1,6})\|(\d{1,3})$/u.exec(callback.data ?? "");
     if (meaningPick) {
       if (callback.message?.chat?.id) {
-        await sendRecord(env, callback.message.chat.id, Number(meaningPick[2]), Number(meaningPick[3]), callback.message.date);
+        await inBackground(ctx, sendRecord(env, callback.message.chat.id, Number(meaningPick[2]), Number(meaningPick[3]), callback.message.date));
       }
       return;
     }
     const pick = /^s\|(\d{1,6})(?:\|(\d{1,3}))?$/u.exec(callback.data ?? "");
     if (pick) {
       if (callback.message?.chat?.id) {
-        await sendRecord(env, callback.message.chat.id, Number(pick[1]), pick[2] === undefined ? -1 : Number(pick[2]));
+        await inBackground(ctx, sendRecord(env, callback.message.chat.id, Number(pick[1]), pick[2] === undefined ? -1 : Number(pick[2])));
       }
       return;
     }
     const match = /^p\|(\d{1,6})\|(.+)$/su.exec(callback.data ?? "");
     if (!match || !callback.message?.chat?.id || !callback.message?.message_id) return;
-    await sendSearch(env, callback.message.chat.id, match[2], Number(match[1]), callback.message.message_id);
+    await inBackground(ctx, sendSearch(env, callback.message.chat.id, match[2], Number(match[1]), callback.message.message_id));
     return;
   }
 
