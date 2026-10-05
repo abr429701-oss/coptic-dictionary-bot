@@ -27,8 +27,12 @@ IDS_FILE = Path(os.environ.get("WORD_IDS_JSON", ROOT / "data" / "word_ids.json")
 MIN_RECORDS = int(os.environ.get("MIN_RECORDS", "8000"))
 
 # Columns: A coptic, B greek, C pronunciation, D english, E phonetic, F kind,
-# G gender, H origin, BM Arabic meanings. BM is the sheet's canonical Arabic
-# column and already contains the meanings separated by Arabic commas.
+# G gender, H origin, Z English translation, AA French translation,
+# AB German translation, BM Arabic meanings. BM is the sheet's canonical
+# Arabic column and already contains the meanings separated by Arabic commas.
+TRANSLATION_EN_COLUMN = 25  # Z
+TRANSLATION_FR_COLUMN = 26  # AA
+TRANSLATION_DE_COLUMN = 27  # AB
 MEANING_COLUMN = 64  # BM (A=0, B=1, ..., BM=64)
 
 
@@ -45,6 +49,21 @@ def clean_coptic(value: str) -> str:
     """
     text = _JINKIM_BEFORE_LETTER.sub(lambda match: match.group(1) + JINKIM, value)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def arabic_meaning(value: str, translations: list[str]) -> str:
+    """Keep BM Arabic meanings separate when the sheet formula also appends translations."""
+    text = value.strip()
+    for translation in translations:
+        if not translation:
+            continue
+        text = re.sub(
+            rf"(?:^|[،,]\s*){re.escape(translation)}(?=\s*(?:[،,]|$))",
+            "",
+            text,
+        )
+    parts = [part.strip() for part in re.split(r"\s*[،,]\s*", text) if part.strip()]
+    return "، ".join(parts)
 
 
 def word_key(coptic: str) -> str:
@@ -133,6 +152,7 @@ def main() -> None:
         def cell(index: int) -> str:
             return row[index].strip() if index < len(row) else ""
 
+        translations = [cell(TRANSLATION_EN_COLUMN), cell(TRANSLATION_FR_COLUMN), cell(TRANSLATION_DE_COLUMN)]
         record = {
             "coptic": clean_coptic(cell(0)),
             "greek": cell(1),
@@ -142,7 +162,10 @@ def main() -> None:
             "kind": cell(5),
             "gender": cell(6),
             "origin": cell(7),
-            "meaning": cell(MEANING_COLUMN),
+            "translation_en": cell(TRANSLATION_EN_COLUMN),
+            "translation_fr": cell(TRANSLATION_FR_COLUMN),
+            "translation_de": cell(TRANSLATION_DE_COLUMN),
+            "meaning": arabic_meaning(cell(MEANING_COLUMN), translations),
         }
         if not any(record.values()):
             continue
