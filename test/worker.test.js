@@ -263,6 +263,7 @@ test("multiple meanings are shown separately with a button for the next meaning"
   const second = secondCalls.find((call) => call.url.endsWith("/sendMessage")).payload;
   assert.match(second.text, /المعنى/u);
   assert.doesNotMatch(second.text, /،/u);
+  assert.ok(!secondCalls.some((call) => call.url.endsWith("/sendVoice")), "the same word voice must not be sent again");
 });
 
 test("the next-meaning button shows every meaning exactly once and then stops", async () => {
