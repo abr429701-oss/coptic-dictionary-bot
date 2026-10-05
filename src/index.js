@@ -452,8 +452,33 @@ async function fetchSpeech(spoken) {
   }
 }
 
+function speechSpelling(record) {
+  // The sheet's English column follows the supplied Coptic/Greek reading table
+  // (ouai, aijuptia, leshg, xulon, ...), so it is a better TTS input than the
+  // phonetic/IPA helper column. Fall back to phonetic, then convert common IPA.
+  const sheetSpelling = String(record?.english || record?.phonetic || "").trim();
+  const usesIpaFallback = !sheetSpelling;
+  let word = (sheetSpelling || String(record?.pronunciation || "")).trim();
+  word = word
+    .replaceAll("`", "")
+    .replaceAll("ü", "u")
+    .replaceAll("ï", "i")
+    .replaceAll("ō", "o")
+    .replaceAll("ā", "a")
+    .replaceAll("ē", "e")
+    .replace(/ɑʊ|iː|oː|eː|tʃ|ʃ|ʒ|kʰ|tʰ|pʰ|ŋ|ɣ|x|ɑ|ː/gu, (symbol) => {
+      if (!usesIpaFallback) return symbol;
+      return { "ɑʊ": "au", "iː": "ee", "oː": "o", "eː": "e", tʃ: "tsch", "ʃ": "sh", "ʒ": "j", "kʰ": "kh", "tʰ": "th", "pʰ": "ph", "ŋ": "ng", "ɣ": "gh", x: "kh", "ɑ": "a", "ː": "" }[symbol] ?? symbol;
+    })
+    .replace(/\s*\/\s*/gu, ", ")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, 120);
+  return word;
+}
+
 function spokenText(record) {
-  const word = String(record?.phonetic || record?.english || "").trim().slice(0, 120);
+  const word = speechSpelling(record);
   // Generated speech is deliberately slow and repeated for pronunciation practice.
   return word ? `${word}, ${word}, ${word}` : "";
 }
