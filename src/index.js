@@ -49,7 +49,7 @@ function lazy(build) {
 }
 
 // Search only the sheet's own text; never derived/generated fields.
-const SEARCH_FIELDS = ["coptic", "greek", "pronunciation", "english", "phonetic"];
+const SEARCH_FIELDS = ["coptic", "greek", "pronunciation", "english", "phonetic", "translation_en", "translation_fr", "translation_de"];
 
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
 const VOICE_PREFIX = "voiceid:";
@@ -83,6 +83,17 @@ function hasWholeWords(text, needle) {
 const SUGGESTION_PAGE_SIZE = 10;
 const SUGGESTION_TITLE = "اختر من الاقتراحات التالية:";
 const SHORT_QUERY_MAX = 2;
+const UI_TEXT = {
+  ar: { more: "هناك معنى آخر للكلمة التي بحثت بها", next: "اضغط هنا لعرضه", end: "انتهت المعاني المتاحة لهذه الكلمة" },
+  en: { more: "There is another meaning for the word you searched", next: "Click here to view it", end: "No more meanings are available for this word" },
+  fr: { more: "Il existe un autre sens pour le mot recherché", next: "Cliquez ici pour l’afficher", end: "Il n’y a plus de sens disponible pour ce mot" },
+  de: { more: "Es gibt eine weitere Bedeutung für das gesuchte Wort", next: "Hier klicken, um sie anzuzeigen", end: "Für dieses Wort sind keine weiteren Bedeutungen verfügbar" },
+};
+
+function uiLanguage(searchKey = "") {
+  const kind = searchKey ? scriptKind(normalize(searchKey)) : "ar";
+  return UI_TEXT[kind] ? kind : "ar";
+}
 
 function splitMeaning(value) {
   return String(value ?? "").split(/\s*[،,]\s*/u).map((part) => part.trim()).filter(Boolean);
@@ -136,7 +147,10 @@ function suggestionLabel(record, normalizedQuery) {
     return (meanings[part >= 0 ? part : 0] || meanings[0] || record.english || "—").trim().slice(0, 48);
   }
   if (COPTIC_LETTER.test(normalizedQuery)) return String(record.coptic ?? "").replaceAll("`", "").trim().slice(0, 48) || "—";
-  if (LATIN_LETTER.test(normalizedQuery)) return String(record.english ?? "").trim().slice(0, 48) || String(record.phonetic ?? "").trim().slice(0, 48) || "—";
+  const kind = scriptKind(normalizedQuery);
+  if (kind === "fr") return String(record.translation_fr ?? "").trim().slice(0, 48) || "—";
+  if (kind === "de") return String(record.translation_de ?? "").trim().slice(0, 48) || "—";
+  if (kind === "en") return String(record.translation_en ?? record.english ?? "").trim().slice(0, 48) || String(record.phonetic ?? "").trim().slice(0, 48) || "—";
   return String(record.greek ?? record.coptic ?? record.english ?? "—").replaceAll("`", "").trim().slice(0, 48);
 }
 
@@ -212,7 +226,7 @@ function formatRecord(record, partIndex = -1, searchedWord = "") {
   return lines.join("\n");
 }
 
-const SAME_WORD_FIELDS = ["coptic", "greek", "english", "phonetic"];
+const SAME_WORD_FIELDS = ["coptic", "greek", "english", "phonetic", "translation_en", "translation_fr", "translation_de"];
 
 // Rows sharing a normalized coptic/greek/english/phonetic value, built once (instead of scanning every row per lookup).
 const sameWordRows = lazy(() => {
@@ -264,19 +278,20 @@ function meaningOptions(index, normalizedQuery = "", preferredPart = -1) {
 
 // The button walks one fixed list of meanings: each meaning is shown once, and the last one has no button.
 // callback: n|<word row>|<first meaning part>|<step to show next>  (the list is rebuilt the same way every time).
-function moreMeaning(options, baseIndex, nextStep = 1, callbackFor = undefined, keepSize = false) {
+function moreMeaning(options, baseIndex, nextStep = 1, callbackFor = undefined, keepSize = false, language = "ar") {
+  const text = UI_TEXT[language] ?? UI_TEXT.ar;
   if (options.length <= nextStep) {
     if (!keepSize) return {};
     return {
-      notice: "\n\n<b>انتهت المعاني المتاحة لهذه الكلمة</b>",
-      reply_markup: { inline_keyboard: [[{ text: "انتهت المعاني", callback_data: "e" }]] },
+      notice: `\n\n<b>${text.end}</b>`,
+      reply_markup: { inline_keyboard: [[{ text: language === "ar" ? "انتهت المعاني" : text.end.slice(0, 48), callback_data: "e" }]] },
     };
   }
   const firstPart = Math.max(0, options[0].part);
   const data = callbackFor?.(nextStep) ?? `n|${baseIndex}|${firstPart}|${nextStep}`;
   return {
-    notice: "\n\n<b>هناك معنى آخر للكلمة التي بحثت بها</b>",
-    reply_markup: { inline_keyboard: [[{ text: "اضغط هنا لعرضه", callback_data: data }]] },
+    notice: `\n\n<b>${text.more}</b>`,
+    reply_markup: { inline_keyboard: [[{ text: text.next, callback_data: data }]] },
   };
 }
 
@@ -286,11 +301,23 @@ function moreMeaning(options, baseIndex, nextStep = 1, callbackFor = undefined, 
 function scriptKind(key) {
   if (ARABIC_LETTER.test(key)) return "ar";
   if (COPTIC_LETTER.test(key)) return "cop";
-  if (LATIN_LETTER.test(key)) return "lat";
+  if (LATIN_LETTER.test(key)) {
+    const normalized = normalize(key);
+    for (const kind of ["fr", "de", "en"]) {
+      if (wordIndex(kind).map.has(normalized) || prefixWords(kind, normalized, 1).length) return kind;
+    }
+    return "en";
+  }
   return "other";
 }
 
-const WORD_FIELDS = { cop: ["coptic"], lat: ["english", "phonetic"], other: ["greek", "pronunciation"] };
+const WORD_FIELDS = {
+  cop: ["coptic"],
+  en: ["english", "phonetic", "translation_en"],
+  fr: ["translation_fr"],
+  de: ["translation_de"],
+  other: ["greek", "pronunciation"],
+};
 const wordIndexes = {};
 
 // Built lazily per script, so an Arabic search never pays for the Coptic/Latin words.
@@ -355,13 +382,20 @@ function exactChain(kind, key) {
       // still collapsed.
       options.push({ key: uniqueKey, index: row, part: matchedPart });
     }
-  } else {
+  } else if (kind === "cop") {
     for (const row of entry.rows) {
       for (const option of meaningOptions(row, "", -1)) {
         if (seen.has(option.key)) continue;
         seen.add(option.key);
         options.push(option);
       }
+    }
+  } else {
+    for (const row of entry.rows) {
+      const key = normalize(records[row]?.coptic ?? row);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      options.push({ key, index: row, part: -1 });
     }
   }
   return options;
@@ -790,7 +824,7 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
   const record = records[selected.index];
   const media = messageId === undefined ? lookupMedia(env, record) : null;
   const voice = prepareWordVoice(env, record, media);
-  const more = moreMeaning(options, matches[0]);
+  const more = moreMeaning(options, matches[0], 1, undefined, false, uiLanguage(normalizedQuery));
   const text = `${formatRecord(record, selected.part, normalizedQuery)}${more.notice ?? ""}`.slice(0, MAX_MESSAGE_LENGTH);
   if (await sendCardEntry(env, chatId, record, text, media, more.reply_markup)) {
     await sendPreparedVoice(env, chatId, record, voice, selected.part);
@@ -818,7 +852,7 @@ async function sendOption(env, chatId, options, baseIndex, step, fallback = unde
   if (!record) return;
   const media = lookupMedia(env, record);
   const voice = prepareWordVoice(env, record, media);
-  const more = moreMeaning(options, baseIndex, step + 1, callbackFor, step > 0);
+  const more = moreMeaning(options, baseIndex, step + 1, callbackFor, step > 0, uiLanguage(searchKey));
   const text = `${formatRecord(record, selected.part, searchKey)}${more.notice ?? ""}`.slice(0, MAX_MESSAGE_LENGTH);
   if (!(await sendCardEntry(env, chatId, record, text, media, more.reply_markup))) {
     await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
@@ -1259,6 +1293,47 @@ function voicePrompt(item) {
   return lines.join("\n");
 }
 
+function renderVoiceWordSuggestions(query) {
+  const clean = String(query ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, 160);
+  const normalized = normalize(clean);
+  const candidates = [];
+  if (ARABIC_LETTER.test(normalized)) {
+    for (const index of findMatches(clean)) candidates.push(index);
+  } else {
+    const kind = scriptKind(normalized);
+    for (const item of prefixWords(kind, normalized, 20)) candidates.push(...item.rows);
+  }
+  const seen = new Set();
+  const keyboard = candidates.filter((index) => {
+    const id = records[index]?.id;
+    if (id == null || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  }).slice(0, 20).map((index) => [{
+    text: String(records[index]?.coptic ?? "—").replaceAll("`", "").trim().slice(0, 48),
+    callback_data: `vr|${records[index].id}`,
+  }]);
+  return {
+    text: keyboard.length ? "اختر الكلمة التي تريد تسجيلها:" : "لم أجد كلمة بهذا البحث. جرّب بحثًا آخر:",
+    reply_markup: keyboard.length ? { inline_keyboard: keyboard } : undefined,
+  };
+}
+
+async function beginVoiceChoice(env, chatId, userId, user) {
+  await saveUser(env, userId, { ...user, voicePick: true, voiceRec: undefined });
+  await telegram(env, "sendMessage", { chat_id: chatId, text: "🔎 أرسل الكلمة التي تريد تسجيلها، وسأعرض لك اقتراحات القاموس." });
+}
+
+async function selectVoiceWord(env, chatId, userId, user, id) {
+  const record = records[recordIndexById().get(Number(id))];
+  if (!record) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "لم أجد هذه الكلمة، أعد البحث من فضلك." });
+    return;
+  }
+  await saveUser(env, userId, { ...user, voicePick: false, voiceRec: { id: record.id, mode: "chosen" } });
+  await telegram(env, "sendMessage", { chat_id: chatId, text: voicePrompt({ ...record, recorded: 0, total: 1 }), parse_mode: "HTML" });
+}
+
 async function nextVoicePrompt(env, chatId, userId, user) {
   const item = await storeCall(env, { op: "voiceNext" });
   if (!item) {
@@ -1266,7 +1341,7 @@ async function nextVoicePrompt(env, chatId, userId, user) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: voicePrompt(null), parse_mode: "HTML" });
     return;
   }
-  await saveUser(env, userId, { ...user, voiceRec: { id: item.id } });
+  await saveUser(env, userId, { ...user, voicePick: false, voiceRec: { id: item.id, mode: "sequential" } });
   await telegram(env, "sendMessage", { chat_id: chatId, text: voicePrompt(item), parse_mode: "HTML" });
 }
 
@@ -1303,12 +1378,17 @@ async function captureVoiceRecording(env, message, userId, user, ctx) {
     text: `✅ تم حفظ تسجيل <b>${escapeHtml(record.coptic ?? "الكلمة")}</b>.`,
     parse_mode: "HTML",
   });
-  await nextVoicePrompt(env, message.chat.id, userId, user);
+  if (user.voiceRec?.mode === "chosen") {
+    await saveUser(env, userId, { ...user, voiceRec: undefined, voicePick: true });
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🔎 أرسل كلمة أخرى للبحث عنها وتسجيلها، أو أرسل /record_stop." });
+  } else {
+    await nextVoicePrompt(env, message.chat.id, userId, user);
+  }
   await inBackground(ctx, archive);
 }
 
 async function stopVoiceRecording(env, chatId, userId, user) {
-  await saveUser(env, userId, { ...user, voiceRec: undefined });
+  await saveUser(env, userId, { ...user, voiceRec: undefined, voicePick: undefined });
   await telegram(env, "sendMessage", { chat_id: chatId, text: "⏸️ تم إيقاف جلسة التسجيل. أرسل /record لاستكمالها من أول كلمة غير مسجلة." });
 }
 
@@ -1707,6 +1787,14 @@ async function handleUpdate(update, env, ctx) {
     // Acknowledge the tap in the background so the answer is not delayed by a round trip.
     await inBackground(ctx, telegram(env, "answerCallbackQuery", { callback_query_id: callback.id }));
     const chatForPick = callback.message?.chat?.id;
+    const voicePick = /^vr\|(\d+)$/u.exec(callback.data ?? "");
+    if (voicePick) {
+      if (chatForPick && isAdmin(env, callback.from?.id)) {
+        const admin = await getUser(env, callback.from.id);
+        await selectVoiceWord(env, chatForPick, callback.from.id, admin ?? {}, Number(voicePick[1]));
+      }
+      return;
+    }
     const chainPick = /^x\|(\d{1,3})\|(.+)$/su.exec(callback.data ?? "");
     if (chainPick) {
       const chainQuery = chainPick[2];
@@ -1817,12 +1905,21 @@ async function handleUpdate(update, env, ctx) {
       await beginVoiceRecording(env, message.chat.id, userId, admin ?? {});
       return;
     }
+    if (text === "/record_choose" || text === "/record_select") {
+      await beginVoiceChoice(env, message.chat.id, userId, admin ?? {});
+      return;
+    }
     if (text === "/record_stop") {
       await stopVoiceRecording(env, message.chat.id, userId, admin ?? {});
       return;
     }
     if (admin?.voiceRec && (message.voice || message.audio)) {
       await captureVoiceRecording(env, message, userId, admin, ctx);
+      return;
+    }
+    if (admin?.voicePick && text && !text.startsWith("/")) {
+      const view = renderVoiceWordSuggestions(text);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: view.text, ...(view.reply_markup ? { reply_markup: view.reply_markup } : {}) });
       return;
     }
     if (admin?.bc === "await" && !text.startsWith("/")) {
