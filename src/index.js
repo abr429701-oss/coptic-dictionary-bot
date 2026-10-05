@@ -10,11 +10,6 @@ const DEFAULT_ADMIN_IDS = "813894692"; // owner chat id from data/owner_chat_id.
 const BROADCAST_BATCH_SIZE = 25;
 const BROADCAST_BATCH_DELAY_MS = 1200;
 const BROADCAST_MAX_TRANSIENT_RETRIES = 5;
-const VOICE_SEARCH_MAX_SECONDS = 45;
-const VOICE_SEARCH_MAX_FILE_BYTES = 20 * 1024 * 1024;
-const VOICE_SEARCH_LIMIT = 5;
-const VOICE_SEARCH_WINDOW_MS = 10 * 60 * 1000;
-const VOICE_SEARCH_MODEL = "whisper-1";
 const FIRST_TIME_TEXT =
   "مرحبًا بك! يبدو أنك تستخدم البوت لأول مرة, الرجاء إدخال اسمك ثلاثي للبدء في استخدام القاموس القبطي الناطق";
 const NAME_RETRY_TEXT = "الرجاء إدخال اسمك ثلاثيًا (ثلاث كلمات على الأقل) بالحروف فقط، مثل: مينا جرجس بشرى.";
@@ -497,78 +492,6 @@ async function telegram(env, method, payload) {
     console.error(`Telegram ${method} failed`, result.description ?? response.status);
   }
   return result;
-}
-
-async function voiceSearchText(env, message) {
-  const media = message.voice ?? message.audio;
-  if (!media?.file_id) return { error: "أرسل تسجيلًا صوتيًا صالحًا." };
-  const duration = Number(media.duration ?? 0);
-  if (duration > VOICE_SEARCH_MAX_SECONDS) {
-    return { error: `التسجيل طويل. الحد الأقصى للبحث الصوتي ${VOICE_SEARCH_MAX_SECONDS} ثانية.` };
-  }
-  if (Number(media.file_size ?? 0) > VOICE_SEARCH_MAX_FILE_BYTES) {
-    return { error: "حجم التسجيل كبير جدًا للبحث الصوتي." };
-  }
-  if (!env.OPENAI_API_KEY) {
-    return { error: "البحث الصوتي غير مفعّل حاليًا. اكتب الكلمة نصيًا من فضلك." };
-  }
-
-  const uniqueId = media.file_unique_id || media.file_id;
-  const reservation = await storeCall(env, { op: "voiceSearchCache", key: uniqueId, userId: message.from?.id ?? message.chat.id });
-  if (reservation.cached?.text) return { text: reservation.cached.text, cached: true };
-  if (!reservation.allowed) {
-    return { error: `وصلت إلى حد البحث الصوتي المؤقت. حاول بعد ${Math.max(1, Math.ceil((reservation.retryAfter ?? 60) / 60))} دقيقة.` };
-  }
-
-  const fileInfo = await telegram(env, "getFile", { file_id: media.file_id });
-  const path = fileInfo?.ok ? fileInfo.result?.file_path : null;
-  if (!path) return { error: "تعذر تنزيل التسجيل من Telegram. أعد إرساله من فضلك." };
-  const download = await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${path}`, {
-    signal: AbortSignal.timeout(15000),
-  });
-  if (!download.ok) return { error: "تعذر تنزيل التسجيل من Telegram. أعد إرساله من فضلك." };
-  const audio = await download.arrayBuffer();
-  if (!audio.byteLength || audio.byteLength > VOICE_SEARCH_MAX_FILE_BYTES) {
-    return { error: "حجم التسجيل كبير جدًا للبحث الصوتي." };
-  }
-
-  const form = new FormData();
-  form.append("file", new Blob([audio], { type: media.mime_type || "audio/ogg" }), path.split("/").pop() || "voice.ogg");
-  form.append("model", env.OPENAI_TRANSCRIPTION_MODEL || VOICE_SEARCH_MODEL);
-  form.append("response_format", "json");
-  const base = String(env.OPENAI_API_BASE || "https://api.openai.com/v1").replace(/\/$/u, "");
-  const response = await fetch(`${base}/audio/transcriptions`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${env.OPENAI_API_KEY}` },
-    body: form,
-    signal: AbortSignal.timeout(30000),
-  });
-  if (!response.ok) {
-    console.error("Voice transcription failed", response.status);
-    return { error: "تعذر فهم التسجيل الصوتي الآن. اكتب الكلمة نصيًا أو أعد التسجيل بوضوح." };
-  }
-  const result = await response.json();
-  const text = String(result.text ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, 160);
-  if (!text) return { error: "لم أفهم كلمة واضحة من التسجيل. أعد التسجيل بوضوح من فضلك." };
-  await storeCall(env, { op: "voiceSearchSave", key: uniqueId, value: text });
-  return { text };
-}
-
-async function handleVoiceSearch(env, message, ctx) {
-  const chatId = message.chat.id;
-  await telegram(env, "sendMessage", { chat_id: chatId, text: "🎙 جارٍ فهم التسجيل والبحث بالعربية أو الإنجليزية أو الفرنسية أو الألمانية…" });
-  try {
-    const outcome = await voiceSearchText(env, message);
-    if (outcome.error) {
-      await telegram(env, "sendMessage", { chat_id: chatId, text: outcome.error });
-      return;
-    }
-    await telegram(env, "sendMessage", { chat_id: chatId, text: `سمعت: ${outcome.text}` });
-    await sendSearch(env, chatId, outcome.text, 0);
-  } catch (error) {
-    console.error("Voice search failed", error instanceof Error ? error.message : "unknown error");
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "تعذر معالجة التسجيل الصوتي الآن. اكتب الكلمة نصيًا أو أعد المحاولة." });
-  }
 }
 
 async function fetchSpeech(spoken) {
@@ -1144,28 +1067,6 @@ export class UserStore {
     }
     if (op === "delete") {
       await storage.delete(key);
-      return Response.json({ ok: true });
-    }
-    if (op === "voiceSearchCache") {
-      const cacheKey = `voice-search:${String(key ?? "").slice(0, 160)}`;
-      const cached = await storage.get(cacheKey);
-      if (cached) return Response.json({ cached });
-      const now = Date.now();
-      const quotaKey = `voice-quota:${String(userId)}`;
-      const quota = (await storage.get(quotaKey)) ?? { startedAt: now, count: 0 };
-      const current = now - Number(quota.startedAt) < VOICE_SEARCH_WINDOW_MS
-        ? quota
-        : { startedAt: now, count: 0 };
-      if (current.count >= VOICE_SEARCH_LIMIT) {
-        return Response.json({ allowed: false, retryAfter: Math.ceil((current.startedAt + VOICE_SEARCH_WINDOW_MS - now) / 1000) });
-      }
-      current.count += 1;
-      await storage.put(quotaKey, current);
-      return Response.json({ allowed: true });
-    }
-    if (op === "voiceSearchSave") {
-      const cacheKey = `voice-search:${String(key ?? "").slice(0, 160)}`;
-      await storage.put(cacheKey, { text: String(value ?? ""), savedAt: new Date().toISOString() });
       return Response.json({ ok: true });
     }
     if (op === "register") {
@@ -2240,7 +2141,10 @@ async function handleUpdate(update, env, ctx) {
     return;
   }
   if (message.voice || message.audio) {
-    await inBackground(ctx, handleVoiceSearch(env, message, ctx));
+    await telegram(env, "sendMessage", {
+      chat_id: message.chat.id,
+      text: "البحث الصوتي غير متاح في الاستضافة المجانية الحالية. اكتب الكلمة نصيًا للبحث.",
+    });
     return;
   }
   if (text.startsWith("/")) {
@@ -2283,9 +2187,9 @@ async function handleUpdate(update, env, ctx) {
 
 export default {
   async fetch(request, env, ctx) {
+    countRequest(env, ctx);
     const url = new URL(request.url);
     lastOrigin = url.origin;
-    if (!(request.method === "POST" && url.pathname === "/webhook")) countRequest(env, ctx);
     const speech = /^\/tts\/(\d{1,6})\.mp3$/u.exec(url.pathname);
     if (speech && (request.method === "GET" || request.method === "HEAD") && records[Number(speech[1])]) {
       return serveSpeech(request, ctx, Number(speech[1]));
@@ -2317,10 +2221,6 @@ export default {
 
     try {
       const update = await request.json();
-      // Voice searches have their own per-user quota and are intentionally excluded
-      // from the dictionary request counter; Cloudflare's platform request accounting
-      // still applies independently.
-      if (!update.message?.voice && !update.message?.audio) countRequest(env, ctx);
       await handleUpdate(update, env, ctx);
       return new Response("ok", { status: 200 });
     } catch (error) {
