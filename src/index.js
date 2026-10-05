@@ -774,10 +774,9 @@ async function sendRecord(env, chatId, index, partIndex = -1) {
 async function sendMeaningStep(env, chatId, baseIndex, firstPart, step) {
   const options = meaningOptions(baseIndex, "", firstPart);
   if (!options[step]) return;
-  await sendOption(env, chatId, options, baseIndex, step);
+  await sendOption(env, chatId, options, baseIndex, step, undefined, undefined, "", false);
 }
-
-async function sendOption(env, chatId, options, baseIndex, step, fallback = undefined, callbackFor = undefined, searchKey = "") {
+async function sendOption(env, chatId, options, baseIndex, step, fallback = undefined, callbackFor = undefined, searchKey = "", sendVoice = true) {
   const selected = options[step] ?? fallback;
   const record = records[selected?.index];
   if (!record) return;
@@ -788,7 +787,7 @@ async function sendOption(env, chatId, options, baseIndex, step, fallback = unde
   if (!(await sendCardEntry(env, chatId, record, text, media, more.reply_markup))) {
     await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
   }
-  await sendPreparedVoice(env, chatId, record, voice, selected.part);
+  if (sendVoice) await sendPreparedVoice(env, chatId, record, voice, selected.part);
 }
 
 // Registered users live in one SQLite-backed Durable Object (no extra Cloudflare token permission needed).
@@ -1677,7 +1676,7 @@ async function handleUpdate(update, env, ctx) {
       const chain = exactChain(scriptKind(chainPick[2]), chainPick[2]);
       const step = Number(chainPick[1]);
       if (chatForPick && chain[step]) {
-        await inBackground(ctx, sendOption(env, chatForPick, chain, chain[0].index, step, undefined, chainCallback(chainPick[2]), chainPick[2]));
+        await inBackground(ctx, sendOption(env, chatForPick, chain, chain[0].index, step, undefined, chainCallback(chainPick[2]), chainPick[2], false));
       }
       return;
     }
