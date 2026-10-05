@@ -434,7 +434,7 @@ async function telegram(env, method, payload) {
 
 async function fetchSpeech(spoken) {
   try {
-    const ttsUrl = "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en&q=" + encodeURIComponent(spoken);
+    const ttsUrl = "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en&ttsspeed=0.5&q=" + encodeURIComponent(spoken);
     const ttsResponse = await fetch(ttsUrl, {
       headers: { "user-agent": "Mozilla/5.0 (compatible; CopticDictionaryBot/1.0)" },
       signal: AbortSignal.timeout(6000),
@@ -453,7 +453,9 @@ async function fetchSpeech(spoken) {
 }
 
 function spokenText(record) {
-  return String(record?.phonetic || record?.english || "").trim().slice(0, 200);
+  const word = String(record?.phonetic || record?.english || "").trim().slice(0, 120);
+  // Generated speech is deliberately slow and repeated for pronunciation practice.
+  return word ? `${word}, ${word}, ${word}` : "";
 }
 
 // Caption under the voice sent to the user: "<meaning>. <Coptic word>. <origin>. <gender>."
