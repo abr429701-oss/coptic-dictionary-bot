@@ -179,8 +179,8 @@ test("a single result shows only word, meaning, kind and origin with no heading"
   fakeTelegramApi(calls);
   await worker.fetch(updateRequest({ message: { text: "abagini", chat: { id: 13 } } }), env);
   const text = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
-  assert.ok(text.startsWith("<b>الكلمة:</b> "));
-  assert.match(text, /<b>المعنى:<\/b> /u);
+  assert.ok(text.startsWith("<b>Word:</b> "));
+  assert.match(text, /<b>Meaning:<\/b> /u);
   assert.doesNotMatch(text, /القاموس القبطي|نتائج|الصفحة|اليونانية|النطق|التهجئة|الجنس|الإنجليزية|كلمات مرتبطة/u);
 });
 
@@ -555,8 +555,8 @@ test("without a keyboard session a typed letter is a normal search, and a real w
   assert.equal(sent(calls)[0].text, "اختر من الاقتراحات التالية:");
   await kbSay(kvEnv, "/keyboard");
   calls = await kbSay(kvEnv, "abagini");
-  assert.match(sent(calls)[0].text, /<b>الكلمة:<\/b> abagini/u);
-  assert.match(sent(calls)[0].text, /<b>المعنى:<\/b> ⲁⲃⲁϫⲓⲛⲓ/u);
+  assert.match(sent(calls)[0].text, /<b>Word:<\/b> abagini/u);
+  assert.match(sent(calls)[0].text, /<b>Meaning:<\/b> ⲁⲃⲁϫⲓⲛⲓ/u);
 });
 
 test("English, French and German translations search to the Coptic counterpart", async () => {
@@ -568,9 +568,35 @@ test("English, French and German translations search to the Coptic counterpart",
     await worker.fetch(updateRequest({ message: { text: record[field], chat: { id: 151 } } }), env);
     const message = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload;
     assert.ok(message);
-    assert.ok(message.text.includes(`<b>الكلمة:</b> ${record[field]}`));
-    assert.ok(message.text.includes(`<b>المعنى:</b> ${record.coptic}`));
+    const labels = field === "translation_en" ? ["Word", "Meaning"] : field === "translation_fr" ? ["Mot", "Sens"] : ["Wort", "Bedeutung"];
+    assert.ok(message.text.includes(`<b>${labels[0]}:</b> ${record[field]}`));
+    assert.ok(message.text.includes(`<b>${labels[1]}:</b> ${record.coptic}`));
   }
+});
+
+test("a translation query does not match inside a longer phrase", async () => {
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: "moon", chat: { id: 152 } } }), env);
+  const message = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload;
+  assert.ok(message);
+  assert.match(message.text, /dictionary is still under development/u);
+  assert.doesNotMatch(message.text, /new moons/u);
+});
+
+test("the next meaning button keeps English labels and caption", async () => {
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: "glass", chat: { id: 153 } } }), env);
+  const first = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload;
+  assert.match(first.text, /<b>Word:<\/b>/u);
+  const next = first.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data;
+  assert.match(next, /^x\|/u);
+  calls.length = 0;
+  await worker.fetch(updateRequest({ callback_query: { id: "english-next", data: next, message: { chat: { id: 153 }, message_id: 1 } } }), env);
+  const second = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload;
+  assert.match(second.text, /<b>Word:<\/b>/u);
+  assert.match(second.text, /<b>Meaning:<\/b> ⲁⲃⲁϫⲓⲛⲓ/u);
 });
 
 test("Admin can search for a specific word and record it without changing user state", async () => {
@@ -1267,18 +1293,18 @@ test("voice caption shows the meaning the user searched for, then the word, orig
   const kvEnv = { ...env, USERS: fakeKv() };
   const calls = pickWorld(kvEnv);
   await pick(kvEnv, `s|${sonIndex}|1`);
-  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption, "شقيق. ⲥⲟⲛ. قبطية. مذكرة.");
+  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption, "المعنى: شقيق. الكلمة: ⲥⲟⲛ. الأصل: قبطية. النوع: اسم.");
 
   calls.length = 0;
   await pick(kvEnv, `s|${sonIndex}|0`);
-  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption, "أخ. ⲥⲟⲛ. قبطية. مذكرة.");
+  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption, "المعنى: أخ. الكلمة: ⲥⲟⲛ. الأصل: قبطية. النوع: اسم.");
 });
 
 test("a Coptic search starts with one meaning in the voice caption", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const calls = pickWorld(kvEnv);
   await pick(kvEnv, `s|${sonIndex}`);
-  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption, "أخ. ⲥⲟⲛ. قبطية. مذكرة.");
+  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption, "المعنى: أخ. الكلمة: ⲥⲟⲛ. الأصل: قبطية. النوع: اسم.");
 });
 
 test("the recorded voice from the admin uses the same caption", async () => {
@@ -1288,7 +1314,7 @@ test("the recorded voice from the admin uses the same caption", async () => {
   await pick(kvEnv, `s|${sonIndex}|1`);
   const voice = calls.find((call) => call.url.endsWith("/sendVoice")).payload;
   assert.equal(voice.voice, "ADMIN-VOICE");
-  assert.equal(voice.caption, "شقيق. ⲥⲟⲛ. قبطية. مذكرة.");
+  assert.equal(voice.caption, "المعنى: شقيق. الكلمة: ⲥⲟⲛ. الأصل: قبطية. النوع: اسم.");
 });
 
 test("empty fields are skipped and doubled full stops are not added", async () => {
