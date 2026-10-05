@@ -186,12 +186,12 @@ function escapeHtml(value) {
 function formatRecord(record, partIndex = -1, searchedWord = "") {
   const parts = splitMeaning(record.meaning);
   const arabicPart = partIndex >= 0 && parts[partIndex] ? parts[partIndex] : parts.join("، ");
-  // Show the user's searched word first, followed by its counterpart:
-  // Arabic search => الكلمة = Arabic, المعنى = Coptic;
-  // Coptic/other search => الكلمة = Coptic, المعنى = Arabic.
-  const isArabicSearch = searchedWord !== "" && ARABIC_LETTER.test(searchedWord);
-  const displayedWord = searchedWord || (isArabicSearch ? arabicPart : record.coptic);
-  const fields = isArabicSearch
+  // Show the user's searched word first. Any non-Coptic search (Arabic,
+  // English, Greek, etc.) must show the Coptic headword as its counterpart;
+  // only a Coptic search shows the Arabic meaning parts.
+  const isCopticSearch = searchedWord === "" || scriptKind(normalize(searchedWord)) === "cop";
+  const displayedWord = searchedWord || record.coptic;
+  const fields = !isCopticSearch
     ? [
         ["الكلمة", displayedWord],
         ["المعنى", record.coptic],
