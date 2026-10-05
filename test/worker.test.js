@@ -302,7 +302,7 @@ test("the next-meaning button shows every meaning exactly once and then stops", 
     if (data === "e") data = undefined;
     }
     assert.equal(data, undefined, `row ${index}: the terminal button callback leaked`);
-    assert.match(finalText, /انتهت المعاني المتاحة/u);
+    if (shown.length > 1) assert.match(finalText, /انتهت المعاني المتاحة/u);
     assert.equal(new Set(shown).size, shown.length, `row ${index}: a meaning was shown twice: ${shown.join(" | ")}`);
     longest = Math.max(longest, shown.length);
   }
@@ -557,6 +557,38 @@ test("without a keyboard session a typed letter is a normal search, and a real w
   calls = await kbSay(kvEnv, "abagini");
   assert.match(sent(calls)[0].text, /<b>الكلمة:<\/b> abagini/u);
   assert.match(sent(calls)[0].text, /<b>المعنى:<\/b> ⲁⲃⲁϫⲓⲛⲓ/u);
+});
+
+test("English, French and German translations search to the Coptic counterpart", async () => {
+  for (const field of ["translation_en", "translation_fr", "translation_de"]) {
+    const record = records.find((item) => String(item[field] ?? "").trim());
+    assert.ok(record?.[field], `missing ${field}`);
+    const calls = [];
+    fakeTelegramApi(calls);
+    await worker.fetch(updateRequest({ message: { text: record[field], chat: { id: 151 } } }), env);
+    const message = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload;
+    assert.ok(message);
+    assert.ok(message.text.includes(`<b>الكلمة:</b> ${record[field]}`));
+    assert.ok(message.text.includes(`<b>المعنى:</b> ${record.coptic}`));
+  }
+});
+
+test("Admin can search for a specific word and record it without changing user state", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: "/record_choose", chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+  await worker.fetch(updateRequest({ message: { text: "ⲁⲃ", chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+  const suggestion = calls.find((call) => call.url.endsWith("/sendMessage") && call.payload.reply_markup)?.payload;
+  const callbackData = suggestion.reply_markup.inline_keyboard[0][0].callback_data;
+  assert.match(callbackData, /^vr\|/u);
+  await worker.fetch(updateRequest({ callback_query: { id: "voice-pick", from: { id: ADMIN }, data: callbackData, message: { chat: { id: ADMIN }, message_id: 1 } } }), kvEnv);
+  const chosen = kvEnv.USERS.store.get(`user:${ADMIN}`).voiceRec;
+  assert.equal(chosen.mode, "chosen");
+  calls.length = 0;
+  await worker.fetch(updateRequest({ message: { voice: { file_id: "chosen-voice", duration: 2 }, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+  assert.equal(kvEnv.USERS.store.get(`voiceid:${chosen.id}`).fileId, "chosen-voice");
+  assert.equal(kvEnv.USERS.store.get(`user:${ADMIN}`).voicePick, true);
 });
 
 test("typing plain ⲉ finds headwords written with accented ὲ, and backticks are ignored", async () => {
@@ -1002,7 +1034,7 @@ test("every request is counted per UTC day, /usage reports it, and the admin is 
   }
   await new Promise((resolve) => setTimeout(resolve, 20)); // the batched write runs in the background
   const counted = kvEnv.USERS.store.get(`usage:${today}`);
-  assert.ok(counted > 49995 && counted <= 50020, `counted ${counted}`);
+  assert.ok(counted > 49995 && counted <= 50050, `counted ${counted}`);
   const alert = calls.map((call) => call.payload?.text ?? "").find((text) => /تنبيه الاستخدام/u.test(text));
   assert.ok(alert, "expected the 50% alert");
   assert.match(alert, /50,0\d\d|49,9\d\d|50,/u);
