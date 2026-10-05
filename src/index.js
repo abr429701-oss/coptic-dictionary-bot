@@ -734,7 +734,7 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
     const kind = scriptKind(normalizedQuery);
     if (messageId === undefined) {
       const chain = exactChain(kind, normalizedQuery);
-      if (chain.length) return sendOption(env, chatId, chain, chain[0].index, 0, undefined, chainCallback(normalizedQuery), normalizedQuery);
+      if (chain.length) return sendOption(env, chatId, chain, chain[0].index, 0, undefined, chainCallback(cleanQuery), cleanQuery);
     }
     const words = prefixWords(kind, normalizedQuery);
     if (words.length) {
@@ -1674,10 +1674,12 @@ async function handleUpdate(update, env, ctx) {
     const chatForPick = callback.message?.chat?.id;
     const chainPick = /^x\|(\d{1,3})\|(.+)$/su.exec(callback.data ?? "");
     if (chainPick) {
-      const chain = exactChain(scriptKind(chainPick[2]), chainPick[2]);
+      const chainQuery = chainPick[2];
+      const normalizedChainQuery = normalize(chainQuery);
+      const chain = exactChain(scriptKind(normalizedChainQuery), normalizedChainQuery);
       const step = Number(chainPick[1]);
       if (chatForPick && chain[step]) {
-        await inBackground(ctx, sendOption(env, chatForPick, chain, chain[0].index, step, undefined, chainCallback(chainPick[2]), chainPick[2], false));
+        await inBackground(ctx, sendOption(env, chatForPick, chain, chain[0].index, step, undefined, chainCallback(chainQuery), chainQuery, false));
       }
       return;
     }
