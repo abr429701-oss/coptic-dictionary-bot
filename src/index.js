@@ -183,15 +183,25 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;");
 }
 
-function formatRecord(record, partIndex = -1) {
+function formatRecord(record, partIndex = -1, searchedWord = "") {
   const parts = splitMeaning(record.meaning);
-  const meaning = partIndex >= 0 && parts[partIndex] ? parts[partIndex] : parts.join("، ");
-  const fields = [
-    ["الكلمة", record.coptic],
-    ["المعنى", meaning],
-    ["النوع", record.kind],
-    ["الأصل", record.origin],
-  ];
+  const arabicPart = partIndex >= 0 && parts[partIndex] ? parts[partIndex] : parts.join("، ");
+  // When the user searched by an Arabic word: show the Arabic as "الكلمة" and Coptic as "المعنى".
+  // For Coptic / Latin / other searches: keep the default order (الكلمة = Coptic, المعنى = Arabic).
+  const isArabicSearch = searchedWord !== "" && ARABIC_LETTER.test(searchedWord);
+  const fields = isArabicSearch
+    ? [
+        ["الكلمة", arabicPart],
+        ["المعنى", record.coptic],
+        ["النوع", record.kind],
+        ["الأصل", record.origin],
+      ]
+    : [
+        ["الكلمة", record.coptic],
+        ["المعنى", arabicPart],
+        ["النوع", record.kind],
+        ["الأصل", record.origin],
+      ];
   const lines = [];
   for (const [label, raw] of fields) {
     const value = String(raw ?? "").trim();
@@ -320,11 +330,26 @@ function exactChain(kind, key) {
   if (!entry) return [];
   const options = [];
   const seen = new Set();
-  for (const row of entry.rows) {
-    for (const option of meaningOptions(row, kind === "ar" ? key : "", -1)) {
-      if (seen.has(option.key)) continue;
-      seen.add(option.key);
-      options.push(option);
+  if (kind === "ar") {
+    // Arabic search: one entry per row, showing ONLY the matched meaning part.
+    // "More meanings" = the same Arabic word appearing in a DIFFERENT row (different Coptic word).
+    // This prevents showing sibling comma-separated meanings (e.g. "قوة، شدة") as separate buttons.
+    for (const row of entry.rows) {
+      const matchedPart = matchedPartIndex(records[row], key);
+      if (matchedPart < 0) continue;
+      const uniqueKey = `${row}:${matchedPart}`;
+      if (seen.has(uniqueKey)) continue;
+      seen.add(uniqueKey);
+      const partText = splitMeaning(records[row]?.meaning)[matchedPart] ?? "";
+      options.push({ key: normalize(partText) || uniqueKey, index: row, part: matchedPart });
+    }
+  } else {
+    for (const row of entry.rows) {
+      for (const option of meaningOptions(row, "", -1)) {
+        if (seen.has(option.key)) continue;
+        seen.add(option.key);
+        options.push(option);
+      }
     }
   }
   return options;
@@ -703,7 +728,7 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
     const kind = scriptKind(normalizedQuery);
     if (messageId === undefined) {
       const chain = exactChain(kind, normalizedQuery);
-      if (chain.length) return sendOption(env, chatId, chain, chain[0].index, 0, undefined, chainCallback(normalizedQuery));
+      if (chain.length) return sendOption(env, chatId, chain, chain[0].index, 0, undefined, chainCallback(normalizedQuery), normalizedQuery);
     }
     const words = prefixWords(kind, normalizedQuery);
     if (words.length) {
@@ -724,8 +749,8 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
   const record = records[selected.index];
   const media = messageId === undefined ? lookupMedia(env, record) : null;
   const voice = prepareWordVoice(env, record, media);
-const more = moreMeaning(options, matches[0]);
-  const text = `${formatRecord(record, selected.part)}${more.notice ?? ""}`.slice(0, MAX_MESSAGE_LENGTH);
+  const more = moreMeaning(options, matches[0]);
+  const text = `${formatRecord(record, selected.part, normalizedQuery)}${more.notice ?? ""}`.slice(0, MAX_MESSAGE_LENGTH);
   if (await sendCardEntry(env, chatId, record, text, media, more.reply_markup)) {
     await sendPreparedVoice(env, chatId, record, voice, selected.part);
     return undefined;
@@ -747,14 +772,14 @@ async function sendMeaningStep(env, chatId, baseIndex, firstPart, step) {
   await sendOption(env, chatId, options, baseIndex, step);
 }
 
-async function sendOption(env, chatId, options, baseIndex, step, fallback = undefined, callbackFor = undefined) {
+async function sendOption(env, chatId, options, baseIndex, step, fallback = undefined, callbackFor = undefined, searchKey = "") {
   const selected = options[step] ?? fallback;
   const record = records[selected?.index];
   if (!record) return;
   const media = lookupMedia(env, record);
   const voice = prepareWordVoice(env, record, media);
   const more = moreMeaning(options, baseIndex, step + 1, callbackFor);
-  const text = `${formatRecord(record, selected.part)}${more.notice ?? ""}`.slice(0, MAX_MESSAGE_LENGTH);
+  const text = `${formatRecord(record, selected.part, searchKey)}${more.notice ?? ""}`.slice(0, MAX_MESSAGE_LENGTH);
   if (!(await sendCardEntry(env, chatId, record, text, media, more.reply_markup))) {
     await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
   }
@@ -1506,7 +1531,7 @@ function inlineArticle(index, normalizedQuery, fileId, audioUrl = "") {
   const meaning = part >= 0 && parts[part] ? parts[part] : parts.join("، ");
   const word = String(record.coptic ?? "").trim() || String(record.english ?? "").trim() || "—";
   const id = part >= 0 ? `${index}.${part}` : String(index);
-  const text = formatRecord(record, part).slice(0, MAX_MESSAGE_LENGTH);
+  const text = formatRecord(record, part, normalizedQuery).slice(0, MAX_MESSAGE_LENGTH);
   if (fileId && text.length <= 1000) {
     // A recorded word is sent as the voice itself, with the entry as its caption (one tap = entry + voice).
     return {
@@ -1646,7 +1671,7 @@ async function handleUpdate(update, env, ctx) {
     if (chainPick) {
       const chain = exactChain(scriptKind(chainPick[2]), chainPick[2]);
       const step = Number(chainPick[1]);
-      if (chatForPick && chain[step]) await sendOption(env, chatForPick, chain, chain[0].index, step, undefined, chainCallback(chainPick[2]));
+      if (chatForPick && chain[step]) await sendOption(env, chatForPick, chain, chain[0].index, step, undefined, chainCallback(chainPick[2]), chainPick[2]);
       return;
     }
     const wordPick = /^w\|(.+)$/su.exec(callback.data ?? "");
@@ -1663,7 +1688,7 @@ async function handleUpdate(update, env, ctx) {
             chain = exactChain(kind, key);
           }
         }
-        if (chain.length) await sendOption(env, chatForPick, chain, chain[0].index, 0, undefined, chainCallback(key));
+        if (chain.length) await sendOption(env, chatForPick, chain, chain[0].index, 0, undefined, chainCallback(key), key);
       }
       return;
     }
