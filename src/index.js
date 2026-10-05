@@ -9,6 +9,7 @@ const CALLBACK_DATA_MAX_BYTES = 64;
 const DEFAULT_ADMIN_IDS = "813894692"; // owner chat id from data/owner_chat_id.txt; override with ADMIN_CHAT_ID
 const BROADCAST_BATCH_SIZE = 25;
 const BROADCAST_BATCH_DELAY_MS = 1200;
+const BROADCAST_MAX_TRANSIENT_RETRIES = 5;
 const FIRST_TIME_TEXT =
   "مرحبًا بك! يبدو أنك تستخدم البوت لأول مرة, الرجاء إدخال اسمك ثلاثي للبدء في استخدام القاموس القبطي الناطق";
 const NAME_RETRY_TEXT = "الرجاء إدخال اسمك ثلاثيًا (ثلاث كلمات على الأقل) بالحروف فقط، مثل: مينا جرجس بشرى.";
@@ -956,23 +957,81 @@ export class UserStore {
     let delay = BROADCAST_BATCH_DELAY_MS;
     for (let i = 0; i < batch.length; i += 1) {
       const id = batch[i];
-      const result = await telegram(this.env, "copyMessage", {
-        chat_id: id,
-        from_chat_id: job.fromChat,
-        message_id: job.messageId,
-      });
+      const recordFailure = (reason) => {
+        job.failureReasons ??= {};
+        const key = String(reason).replace(/\s+/gu, " ").slice(0, 180) || "Unknown Telegram error";
+        if (Object.hasOwn(job.failureReasons, key) || Object.keys(job.failureReasons).length < 10) {
+          job.failureReasons[key] = (job.failureReasons[key] ?? 0) + 1;
+        } else {
+          job.failureReasons["Other Telegram errors"] = (job.failureReasons["Other Telegram errors"] ?? 0) + 1;
+        }
+      };
+      const retryTransient = (reason) => {
+        const attempt = job.retryForId === id ? (job.retryCount ?? 0) + 1 : 1;
+        if (attempt >= BROADCAST_MAX_TRANSIENT_RETRIES) {
+          job.failed += 1;
+          recordFailure(reason);
+          job.retryForId = null;
+          job.retryCount = 0;
+          job.queue.unshift(...batch.slice(i + 1));
+          return false;
+        }
+        job.retryForId = id;
+        job.retryCount = attempt;
+        job.lastError = String(reason).slice(0, 180);
+        job.queue.unshift(...batch.slice(i));
+        delay = Math.min(60000, 1000 * (2 ** attempt));
+        return true;
+      };
+      let result;
+      try {
+        result = await telegram(this.env, "copyMessage", {
+          chat_id: id,
+          from_chat_id: job.fromChat,
+          message_id: job.messageId,
+        });
+        // copyMessage handles almost every Telegram message type. Re-create a native poll
+        // only when Telegram rejects the copy (for example, a quiz poll whose answer key
+        // cannot be copied). The poll is fresh for each recipient; previous votes cannot
+        // be transferred by the Bot API.
+        if (!result?.ok && result?.error_code !== 429 && result?.error_code === 400 && job.poll) {
+          result = await telegram(this.env, "sendPoll", { chat_id: id, ...job.poll });
+        }
+      } catch (error) {
+        // Persist the successful prefix and retry transient network errors with backoff.
+        const reason = error instanceof Error ? error.message : "Temporary network error";
+        if (retryTransient(reason)) break;
+        continue;
+      }
       if (result?.ok) {
         job.sent += 1;
+        if (job.retryForId === id) {
+          job.retryForId = null;
+          job.retryCount = 0;
+        }
       } else if (result?.error_code === 429) {
         // Telegram asked us to slow down: put the rest back and wait.
         job.queue.unshift(...batch.slice(i));
         delay = ((result.parameters?.retry_after ?? 5) + 1) * 1000;
         break;
+      } else if (Number(result?.error_code) >= 500) {
+        const reason = String(result?.description ?? `Telegram error ${result.error_code}`);
+        if (retryTransient(reason)) break;
+        continue;
       } else {
         job.failed += 1;
-        if (result?.error_code === 403 || result?.error_code === 400) {
+        if (job.retryForId === id) {
+          job.retryForId = null;
+          job.retryCount = 0;
+        }
+        const reason = String(result?.description ?? `Telegram error ${result?.error_code ?? "unknown"}`).replace(/\s+/gu, " ").slice(0, 180);
+        recordFailure(reason);
+        // A 400 often means that this particular content cannot be copied. It does not
+        // mean that the recipient blocked the bot, so never permanently exclude them for it.
+        if (result?.error_code === 403) {
           const record = (await storage.get(`user:${id}`)) ?? {};
           await storage.put(`user:${id}`, { ...record, blocked: true });
+          job.blocked = (job.blocked ?? 0) + 1;
         }
       }
     }
@@ -982,15 +1041,24 @@ export class UserStore {
       return;
     }
     await storage.delete("broadcast");
+    const failureLines = Object.entries(job.failureReasons ?? {}).slice(0, 3)
+      .map(([reason, count]) => `• ${count}× ${reason}`);
     await telegram(this.env, "sendMessage", {
       chat_id: job.adminChat,
-      text: `✅ اكتمل الإرسال الجماعي.\nوصلت إلى: ${job.sent}\nلم تصل (حظروا البوت أو حذفوه): ${job.failed}\nالإجمالي: ${job.total}`,
+      text: [
+        "✅ اكتمل الإرسال الجماعي.",
+        `وصلت إلى: ${job.sent}`,
+        `تعذّر الإرسال: ${job.failed}`,
+        `استُبعدت بسبب منع البوت (403): ${job.blocked ?? 0}`,
+        `الإجمالي: ${job.total}`,
+        ...(failureLines.length ? ["أمثلة لأسباب الفشل:", ...failureLines] : []),
+      ].join("\n").slice(0, 3500),
     });
   }
 
   async fetch(request) {
     const body = await request.json();
-    const { op, key, value, userId, input, kb, exclude, fromChat, messageId, id, fileId, drive, limit, profile, cursor, language } = body;
+    const { op, key, value, userId, input, kb, exclude, fromChat, messageId, poll, id, fileId, drive, limit, profile, cursor, language } = body;
     const storage = this.state.storage;
     if (op === "get") return Response.json({ value: (await storage.get(key)) ?? null });
     if (op === "put") {
@@ -1110,7 +1178,7 @@ export class UserStore {
       const queue = await this.recipients(exclude);
       if (!queue.length) return Response.json({ started: false, total: 0 });
       await storage.put("broadcast", {
-        queue, total: queue.length, sent: 0, failed: 0, fromChat, messageId, adminChat: fromChat,
+        queue, total: queue.length, sent: 0, failed: 0, blocked: 0, fromChat, messageId, poll, adminChat: fromChat,
       });
       await storage.setAlarm(Date.now() + 100);
       return Response.json({ started: true, total: queue.length });
@@ -1575,8 +1643,53 @@ async function beginBroadcast(env, chatId, userId, user) {
   await saveUser(env, userId, { ...user, bc: "await" });
   await telegram(env, "sendMessage", {
     chat_id: chatId,
-    text: "📢 أرسل الآن الرسالة التي تريد إرسالها لجميع المستخدمين (نص أو صورة أو ملف…).\nلإلغاء العملية أرسل /cancel",
+    text: "📢 أرسل الآن الرسالة التي تريد إرسالها للمستخدمين: نص، صورة، فيديو، Voice، ملف، استبيان، أو أي رسالة يدعم Telegram نسخها.\nلإلغاء العملية أرسل /cancel",
   });
+}
+
+function broadcastPollPayload(poll) {
+  if (!poll || typeof poll.question !== "string" || !Array.isArray(poll.options)) return null;
+  const options = poll.options
+    .filter((option) => typeof option?.text === "string")
+    .map((option) => ({
+      text: option.text,
+      ...(Array.isArray(option.text_entities) && option.text_entities.length ? { text_entities: option.text_entities } : {}),
+    }));
+  if (options.length < 2 || options.length > 12) return null;
+
+  const type = poll.type === "quiz" ? "quiz" : "regular";
+  const correctOptionIds = Array.isArray(poll.correct_option_ids) ? poll.correct_option_ids : null;
+  // Telegram requires the answer key to recreate a quiz. If unavailable, retain the
+  // ordinary copyMessage attempt but do not silently turn the quiz into a regular poll.
+  if (type === "quiz" && !correctOptionIds?.length) return null;
+
+  const payload = {
+    question: poll.question,
+    options,
+    is_anonymous: Boolean(poll.is_anonymous),
+    type,
+    allows_multiple_answers: Boolean(poll.allows_multiple_answers),
+    ...(poll.allows_revoting !== undefined ? { allows_revoting: Boolean(poll.allows_revoting) } : {}),
+    ...(poll.shuffle_options !== undefined ? { shuffle_options: Boolean(poll.shuffle_options) } : {}),
+    ...(poll.allow_adding_options !== undefined ? { allow_adding_options: Boolean(poll.allow_adding_options) } : {}),
+    ...(poll.hide_results_until_closes !== undefined ? { hide_results_until_closes: Boolean(poll.hide_results_until_closes) } : {}),
+    ...(poll.question_entities?.length ? { question_entities: poll.question_entities } : {}),
+    ...(type === "quiz" ? { correct_option_ids: correctOptionIds } : {}),
+    ...(poll.explanation ? { explanation: poll.explanation } : {}),
+    ...(poll.explanation_entities?.length ? { explanation_entities: poll.explanation_entities } : {}),
+    ...(poll.description ? { description: poll.description } : {}),
+    ...(poll.description_entities?.length ? { description_entities: poll.description_entities } : {}),
+    ...(poll.is_closed ? { is_closed: true } : {}),
+  };
+
+  if (!poll.is_closed && Number.isInteger(poll.open_period) && poll.open_period >= 5 && poll.open_period <= 2628000) {
+    payload.open_period = poll.open_period;
+  } else if (!poll.is_closed && Number.isInteger(poll.close_date)) {
+    const secondsLeft = poll.close_date - Math.floor(Date.now() / 1000);
+    if (secondsLeft >= 5 && secondsLeft <= 2628000) payload.open_period = secondsLeft;
+    else if (secondsLeft < 5) payload.is_closed = true;
+  }
+  return payload;
 }
 
 async function captureBroadcast(env, message, userId, user) {
@@ -1586,7 +1699,10 @@ async function captureBroadcast(env, message, userId, user) {
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "لا يوجد مستخدمون مسجّلون لإرسال الرسالة إليهم بعد." });
     return;
   }
-  await saveUser(env, userId, { ...user, bc: { messageId: message.message_id } });
+  await saveUser(env, userId, {
+    ...user,
+    bc: { messageId: message.message_id, ...(message.poll ? { poll: broadcastPollPayload(message.poll) } : {}) },
+  });
   await telegram(env, "sendMessage", {
     chat_id: message.chat.id,
     reply_to_message_id: message.message_id,
@@ -1617,6 +1733,7 @@ async function handleBroadcastCallback(env, callback) {
     exclude: adminIds(env),
     fromChat: chatId,
     messageId: user.bc.messageId,
+    poll: user.bc.poll ?? null,
   });
   await saveUser(env, userId, { ...user, bc: undefined });
   await answer();
