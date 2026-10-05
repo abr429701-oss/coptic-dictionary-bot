@@ -337,7 +337,8 @@ test("several different Coptic words for one Arabic word are shown one after ano
     sent = calls.find((call) => call.url.endsWith("/sendMessage")).payload;
   }
   assert.ok(shown.length >= 2);
-  assert.equal(new Set(shown.map((entry) => entry.split("|")[1])).size, shown.length, `a meaning repeated: ${shown.join(" / ")}`);
+  assert.equal(new Set(shown.map((entry) => entry.split("|")[0])).size, 1, `the searched word changed: ${shown.join(" / ")}`);
+  assert.equal(new Set(shown.map((entry) => entry.split("|")[1])).size, shown.length, `a counterpart repeated: ${shown.join(" / ")}`);
   assert.equal(sent.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data, undefined);
 });
 
@@ -495,7 +496,7 @@ test("without a keyboard session a typed letter is a normal search, and a real w
   assert.equal(sent(calls)[0].text, "اختر من الاقتراحات التالية:");
   await kbSay(kvEnv, "/keyboard");
   calls = await kbSay(kvEnv, "abagini");
-  assert.match(sent(calls)[0].text, /ⲁⲃⲁϫⲓⲛⲓ/u);
+  assert.match(sent(calls)[0].text, /<b>الكلمة:<\/b> abagini/u);
 });
 
 test("typing plain ⲉ finds headwords written with accented ὲ, and backticks are ignored", async () => {
