@@ -305,6 +305,22 @@ test("Arabic search matches the word itself, never the inside of a longer word",
   assert.doesNotMatch(text, /الاستغراب/u);
 });
 
+test("Arabic search preserves the exact word typed, including ة, across meanings", async () => {
+  const firstCalls = [];
+  fakeTelegramApi(firstCalls);
+  await worker.fetch(updateRequest({ message: { text: "قوة", chat: { id: 170 } } }), env);
+  const first = firstCalls.find((call) => call.url.endsWith("/sendMessage")).payload;
+  assert.match(first.text, /<b>الكلمة:<\/b> قوة\n/u);
+  const next = first.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data;
+  assert.ok(next);
+
+  const secondCalls = [];
+  fakeTelegramApi(secondCalls);
+  await worker.fetch(updateRequest({ callback_query: { id: "strength-next", data: next, message: { chat: { id: 170 }, message_id: 1 } } }), env);
+  const second = secondCalls.find((call) => call.url.endsWith("/sendMessage")).payload;
+  assert.match(second.text, /<b>الكلمة:<\/b> قوة\n/u);
+});
+
 test("an unknown word gets the dictionary-under-development message", async () => {
   const calls = [];
   fakeTelegramApi(calls);
