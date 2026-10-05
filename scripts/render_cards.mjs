@@ -14,7 +14,7 @@ const BAN_TAB = process.env.BAN_TAB || "Ban";
 const BOT_USERNAME = process.env.BOT_USERNAME || "Uploade33_bot";
 const SCOPE = process.env.CARD_SCOPE || "recorded";
 const MAX_PER_RUN = Number(process.env.MAX_CARDS || 500);
-const CARD_VERSION = 3; // single supplied layout, centered circles, and the supplied Coptic font
+const CARD_VERSION = 4; // professional multilingual card with the Ⲭⲏⲙⲓ brand mark
 const DICTIONARY = process.env.DICTIONARY_JSON || path.join(ROOT, "data", "dictionary.json");
 const MANIFEST = process.env.CARDS_MANIFEST || path.join(ROOT, "data", "cards.json");
 const CARDS_DIR = process.env.CARDS_DIR || path.join(ROOT, "cards");
@@ -72,18 +72,41 @@ function linksFromCsv(text) {
 
 const splitMeaning = (value) => String(value ?? "").split(/\s*[،,]\s*/u).map((part) => part.trim()).filter(Boolean);
 
-// One card per word id: merges rows that share a spelling.
-export function cardData(group, voiceLink) {
+const KIND_TRANSLATIONS = {
+  en: { "اسم": "noun", "فعل": "verb", "صفة": "adjective", "حرف": "letter", "ظرف": "adverb" },
+  fr: { "اسم": "nom", "فعل": "verbe", "صفة": "adjectif", "حرف": "lettre", "ظرف": "adverbe" },
+  de: { "اسم": "Substantiv", "فعل": "Verb", "صفة": "Adjektiv", "حرف": "Buchstabe", "ظرف": "Adverb" },
+};
+const ORIGIN_TRANSLATIONS = {
+  en: { "قبطية": "Coptic", "يونانية": "Greek", "عبرية": "Hebrew", "لاتينية": "Latin", "آرامية": "Aramaic", "سريانية": "Syriac" },
+  fr: { "قبطية": "copte", "يونانية": "grec", "عبرية": "hébreu", "لاتينية": "latin", "آرامية": "araméen", "سريانية": "syriaque" },
+  de: { "قبطية": "Koptisch", "يونانية": "Griechisch", "عبرية": "Hebräisch", "لاتينية": "Lateinisch", "آرامية": "Aramäisch", "سريانية": "Syrisch" },
+};
+
+// One card per word id and language: merges rows that share a spelling.
+export function cardData(group, voiceLink, language = "ar") {
   const first = group[0];
   const meanings = [...new Set(group.flatMap((record) => splitMeaning(record.meaning)))];
   const pick = (key) => group.map((record) => String(record[key] ?? "").trim()).find(Boolean) ?? "";
+  const kind = pick("gender") || pick("kind");
+  const localizedKind = KIND_TRANSLATIONS[language]?.[kind] ?? kind;
+  const word = language === "en" ? (pick("english") || String(first.coptic ?? "").trim())
+    : language === "fr" ? (pick("translation_fr") || String(first.coptic ?? "").trim())
+      : language === "de" ? (pick("translation_de") || String(first.coptic ?? "").trim())
+        : String(first.coptic ?? "").trim();
+  const meaning = language === "en" ? (String(first.coptic ?? "").trim() || pick("translation_en"))
+    : language === "fr" ? (String(first.coptic ?? "").trim() || pick("translation_fr"))
+      : language === "de" ? (String(first.coptic ?? "").trim() || pick("translation_de"))
+        : meanings.join("، ");
   return {
-    word: String(first.coptic ?? "").trim(),
-    meaning: meanings.join("، "),
-    typeLabel: pick("gender") || pick("kind"),
-    origin: pick("origin"),
+    word,
+    meaning,
+    typeLabel: language === "ar" ? kind : localizedKind,
+    origin: ORIGIN_TRANSLATIONS[language]?.[pick("origin")] ?? pick("origin"),
     qrText: voiceLink || `https://t.me/${BOT_USERNAME}`,
     dateText: formatCardDate(new Date()),
+    language,
+    logo: "Ⲭⲏⲙⲓ",
   };
 }
 
@@ -120,18 +143,21 @@ export async function main() {
   for (const [id, group] of groups) {
     const voiceLink = links.get(id) ?? "";
     if (SCOPE !== "all" && !voiceLink) continue;
-    const data = cardData(group, voiceLink);
-    if (!data.word || !data.meaning) continue;
-    const hash = hashOf(data);
-    const file = path.join(CARDS_DIR, `${id}.png`);
-    if (manifest[id] === hash && existsSync(file)) { next[id] = hash; continue; }
+    const variants = ["ar", "en", "fr", "de"].map((language) => ({ language, data: cardData(group, voiceLink, language) }));
+    if (!variants[0].data.word || !variants[0].data.meaning) continue;
+    const hash = hashOf(variants.map(({ data }) => data));
+    const filesReady = variants.every(({ language }) => existsSync(path.join(CARDS_DIR, language === "ar" ? `${id}.png` : `${id}-${language}.png`)));
+    if (manifest[id] === hash && filesReady) { next[id] = hash; continue; }
     if (rendered >= MAX_PER_RUN) { deferred += 1; if (manifest[id]) next[id] = manifest[id]; continue; }
-    writeFileSync(file, renderCard(data));
+    for (const { language, data } of variants) {
+      const file = path.join(CARDS_DIR, language === "ar" ? `${id}.png` : `${id}-${language}.png`);
+      writeFileSync(file, renderCard(data));
+    }
     next[id] = hash;
     rendered += 1;
   }
   for (const file of readdirSync(CARDS_DIR)) {
-    const match = /^(\d+)(-1|-2)?\.png$/u.exec(file);
+    const match = /^(\d+)(-(?:en|fr|de))?\.png$/u.exec(file);
     if (match && (match[2] || !(match[1] in next))) rmSync(path.join(CARDS_DIR, file));
   }
   const sorted = Object.fromEntries(Object.entries(next).sort(([a], [b]) => Number(a) - Number(b)));

@@ -1082,7 +1082,7 @@ test("only the admin can read /usage", async () => {
   assert.ok(!calls.some((call) => /طلبات البوت اليوم/u.test(call.payload?.text ?? "")));
 });
 
-test("inline: a recorded word is offered as its voice with the entry as the caption", async () => {
+test("inline: a recorded word is offered as its voice without a caption", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const calls = [];
   fakeTelegramApi(calls);
@@ -1092,7 +1092,7 @@ test("inline: a recorded word is offered as its voice with the entry as the capt
   const answer = calls.find((call) => call.url.endsWith("/answerInlineQuery")).payload;
   const voice = answer.results.find((item) => item.type === "voice");
   assert.equal(voice.voice_file_id, "VOICE-FILE-1");
-  assert.match(voice.caption, /<b>الكلمة:<\/b> ⲁⲃⲱⲕ/u);
+  assert.equal(voice.caption, undefined);
   assert.equal(voice.parse_mode, "HTML");
   assert.ok(voice.title.startsWith("🔊"));
   assert.ok(answer.results.some((item) => item.type === "article") || answer.results.length === 1);
@@ -1134,7 +1134,7 @@ test("inline: words without a recording become audio results when Google speech 
   const audio = answer.results.find((item) => item.type === "audio");
   assert.ok(audio, "expected an audio result");
   assert.match(audio.audio_url, /^https:\/\/bot\.test\/tts\/\d+\.mp3$/u);
-  assert.match(audio.caption, /<b>الكلمة:<\/b> /u);
+  assert.equal(audio.caption, undefined);
 });
 
 test("the /tts endpoint serves generated speech and only for dictionary entries", async () => {
@@ -1208,7 +1208,7 @@ function photoWorld({ photoOk = true } = {}) {
   return calls;
 }
 
-test("a word with a card is sent as text, one card photo, then voice, and the file id is cached", async () => {
+test("a word with a card is sent as text and voice without a card photo", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const record = records.find((item) => item.coptic === "ⲁⲃⲱⲕ");
   cardManifest[String(record.id)] = "hash0001";
@@ -1218,20 +1218,16 @@ test("a word with a card is sent as text, one card photo, then voice, and the fi
     const textIndex = calls.findIndex((call) => call.url.endsWith("/sendMessage") && /<b>الكلمة/u.test(call.payload?.text ?? ""));
     const photos = calls.filter((call) => call.url.endsWith("/sendPhoto"));
     assert.ok(textIndex >= 0);
-    assert.equal(photos.length, 1);
-    assert.equal(photos[0].payload.photo, `https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/main/cards/${record.id}.png?v=hash0001`);
-    assert.ok(calls.indexOf(photos[0]) > textIndex);
-    assert.deepEqual(kvEnv.USERS.store.get(`card:${record.id}`), { hash: "hash0001", fileId: "PHOTO-FILE-1" });
+    assert.equal(photos.length, 0);
 
     const again = photoWorld();
     await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲱⲕ", chat: { id: 70 } } }), kvEnv);
-    assert.equal(again.filter((call) => call.url.endsWith("/sendPhoto")).length, 1);
-    assert.equal(again.find((call) => call.url.endsWith("/sendPhoto")).payload.photo, "PHOTO-FILE-1");
+    assert.equal(again.filter((call) => call.url.endsWith("/sendPhoto")).length, 0);
 
     cardManifest[String(record.id)] = "hash0002"; // the card was redrawn: the old file id must not be used
     const redrawn = photoWorld();
     await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲱⲕ", chat: { id: 70 } } }), kvEnv);
-    assert.match(redrawn.find((call) => call.url.endsWith("/sendPhoto")).payload.photo, /\?v=hash0002$/u);
+    assert.equal(redrawn.filter((call) => call.url.endsWith("/sendPhoto")).length, 0);
   } finally {
     delete cardManifest[String(record.id)];
   }
@@ -1268,7 +1264,7 @@ test("admin can hide a card until showing it or recording a new voice", async ()
     const shown = photoWorld();
     await worker.fetch(updateRequest({ message: { text: `/card_show ${record.coptic}`, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
     assert.equal(kvEnv.USERS.store.get(`card-disabled:${record.id}`), undefined);
-    assert.equal(shown.filter((call) => call.url.endsWith("/sendPhoto")).length, 1);
+    assert.equal(shown.filter((call) => call.url.endsWith("/sendPhoto")).length, 0);
 
     await worker.fetch(updateRequest({ message: { text: `/card_hide ${record.coptic}`, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
     kvEnv.USERS.store.set(`user:${ADMIN}`, { voiceRec: { id: record.id, mode: "chosen" } });
@@ -1282,8 +1278,8 @@ test("admin can hide a card until showing it or recording a new voice", async ()
 
 test("the card renderer produces the single supplied card layout", async () => {
   const { cardSvg, renderCard } = await import("../scripts/card.mjs");
-  assert.match(cardSvg({ word: "ⲁ", meaning: "صورة", typeLabel: "", origin: "", qrText: "" }), /font-size="42"/u);
-  assert.match(cardSvg({ word: "ⲁ", meaning: "صورة، معنى طويل", typeLabel: "", origin: "", qrText: "" }), /font-size="42"/u);
+  assert.match(cardSvg({ word: "ⲁ", meaning: "صورة", typeLabel: "", origin: "", qrText: "" }), /Ⲭⲏⲙⲓ/u);
+  assert.match(cardSvg({ word: "ⲁ", meaning: "صورة، معنى طويل", typeLabel: "", origin: "", qrText: "", language: "en" }), /MEANING/u);
   const png = renderCard({ word: "ⲙⲟⲣⲫⲏ", meaning: "صورة", typeLabel: "مؤنثة", origin: "يونانية", qrText: "https://t.me/Uploade33_bot", dateText: "4/10/2026 — 25 توت 1743" });
   assert.equal(Buffer.from(png).subarray(1, 4).toString(), "PNG");
   assert.equal(Buffer.from(png).readUInt32BE(16), 907);
@@ -1318,46 +1314,42 @@ const pick = (kvEnv, data, chatId = 951) => worker.fetch(updateRequest({
   callback_query: { id: "p1", data, from: { id: chatId }, message: { message_id: 5, chat: { id: chatId }, text: "x" } },
 }), kvEnv);
 
-test("voice caption shows the meaning the user searched for, then the word, origin and gender", async () => {
+test("voice messages have no caption", async () => {
   assert.ok(sonIndex >= 0);
   const kvEnv = { ...env, USERS: fakeKv() };
   const calls = pickWorld(kvEnv);
   await pick(kvEnv, `s|${sonIndex}|1`);
-  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption, "المعنى: شقيق. الكلمة: ⲥⲟⲛ. الأصل: قبطية. النوع: اسم.");
+  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption, undefined);
 
   calls.length = 0;
   await pick(kvEnv, `s|${sonIndex}|0`);
-  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption, "المعنى: أخ. الكلمة: ⲥⲟⲛ. الأصل: قبطية. النوع: اسم.");
+  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption, undefined);
 });
 
-test("a Coptic search starts with one meaning in the voice caption", async () => {
+test("a Coptic search sends a Voice without a caption", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const calls = pickWorld(kvEnv);
   await pick(kvEnv, `s|${sonIndex}`);
-  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption, "المعنى: أخ. الكلمة: ⲥⲟⲛ. الأصل: قبطية. النوع: اسم.");
+  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption, undefined);
 });
 
-test("the recorded voice from the admin uses the same caption", async () => {
+test("the recorded voice from the admin also has no caption", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   kvEnv.USERS.store.set(`voiceid:${records[sonIndex].id}`, { fileId: "ADMIN-VOICE" });
   const calls = pickWorld(kvEnv);
   await pick(kvEnv, `s|${sonIndex}|1`);
   const voice = calls.find((call) => call.url.endsWith("/sendVoice")).payload;
   assert.equal(voice.voice, "ADMIN-VOICE");
-  assert.equal(voice.caption, "المعنى: شقيق. الكلمة: ⲥⲟⲛ. الأصل: قبطية. النوع: اسم.");
+  assert.equal(voice.caption, undefined);
 });
 
-test("empty fields are skipped and doubled full stops are not added", async () => {
+test("voice payload stays free of captions", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const index = records.findIndex((record) => record.coptic && record.meaning && !record.gender && record.origin);
   assert.ok(index >= 0);
   const calls = pickWorld(kvEnv);
   await pick(kvEnv, `s|${index}`);
-  const caption = calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption;
-  assert.ok(caption.endsWith("."));
-  assert.ok(!caption.includes(". ."));
-  assert.ok(!caption.includes(".."));
-  assert.ok(caption.includes(records[index].coptic.trim()));
+  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.caption, undefined);
 });
 
 test("the entry text has no Gregorian or Coptic date lines", async () => {
