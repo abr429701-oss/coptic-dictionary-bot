@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 from rapidfuzz import fuzz, process
-from gtts import gTTS
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -35,6 +34,10 @@ DATA_FILE = BASE / "data" / "dictionary.json"
 PAGE_SIZE = 1
 MAX_MESSAGE = 3900
 BOT_TITLE = "📖 القاموس القبطي البحيري"
+AUDIO_BASE_URL = os.environ.get(
+    "AUDIO_BASE_URL",
+    "https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/audio-human",
+).rstrip("/")
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 log = logging.getLogger(__name__)
 
@@ -283,21 +286,36 @@ async def send_page_card(chat_id: int, indices: list[int], page: int, context: C
             log.exception("Word card generation failed for record %s", index)
 
 
+async def download_prebuilt_audio(record: dict[str, str]) -> bytes:
+    """Download Matthew/IPA Reader audio from the public audio-human branch."""
+    word_id = record.get("id")
+    if word_id in (None, ""):
+        raise ValueError("record has no permanent audio id")
+    url = f"{AUDIO_BASE_URL}/{word_id}.ogg"
+    response = await asyncio.to_thread(httpx.get, url, timeout=45.0, follow_redirects=True)
+    response.raise_for_status()
+    return response.content
+
+
 async def send_page_audio(chat_id: int, indices: list[int], page: int, context: ContextTypes.DEFAULT_TYPE):
-    """Send audio automatically for the six records shown on this page."""
+    """Send the prebuilt Matthew voice for the records shown on this page."""
     for index in indices[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]:
         record = RECORDS[index]
-        spoken = (record.get("phonetic") or record.get("english") or "").strip()
-        if not spoken:
+        if not (record.get("pronunciation") or "").strip():
             continue
         try:
-            with tempfile.NamedTemporaryFile(suffix=".mp3") as audio:
-                await asyncio.to_thread(gTTS(text=spoken, lang="en", tld="com", slow=False).save, audio.name)
+            audio_bytes = await download_prebuilt_audio(record)
+            with tempfile.NamedTemporaryFile(suffix=".ogg") as audio:
+                audio.write(audio_bytes)
+                audio.flush()
                 audio.seek(0)
-                await context.bot.send_voice(chat_id=chat_id, voice=audio,
-                                             caption=f"🔊 {record.get('coptic', '')} — {spoken}")
+                await context.bot.send_voice(
+                    chat_id=chat_id,
+                    voice=audio,
+                    caption=f"🔊 {record.get('coptic', '')} — Matthew / IPA",
+                )
         except Exception:
-            log.exception("Automatic TTS generation failed for record %s", index)
+            log.exception("Prebuilt audio download failed for record %s", index)
 
 
 async def audio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -309,20 +327,19 @@ async def audio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except (ValueError, IndexError):
         await query.message.reply_text("تعذر تحديد الكلمة.")
         return
-    # The workbook's phonetic English column is the best input for Google's
-    # English voice; Coptic itself is not a supported Google TTS language.
-    spoken = (record.get("phonetic") or record.get("english") or "").strip()
-    if not spoken:
+    if not (record.get("pronunciation") or "").strip():
         await query.message.reply_text("لا يوجد نطق مسجل لهذه الكلمة.")
         return
     try:
-        with tempfile.NamedTemporaryFile(suffix=".mp3") as audio:
-            gTTS(text=spoken, lang="en", tld="com", slow=False).save(audio.name)
+        audio_bytes = await download_prebuilt_audio(record)
+        with tempfile.NamedTemporaryFile(suffix=".ogg") as audio:
+            audio.write(audio_bytes)
+            audio.flush()
             audio.seek(0)
-            await query.message.reply_voice(voice=audio, caption=f"النطق التقريبي: {spoken}")
+            await query.message.reply_voice(voice=audio, caption="النطق: Matthew / IPA — بطيء × 3")
     except Exception:
-        log.exception("TTS generation failed")
-        await query.message.reply_text("تعذر إنشاء الصوت الآن. جرّب مرة أخرى بعد قليل.")
+        log.exception("Prebuilt audio download failed")
+        await query.message.reply_text("الصوت لم يُولَّد لهذه الكلمة بعد. شغّل Workflow الصوت ثم جرّب مرة أخرى.")
 
 
 def main():
