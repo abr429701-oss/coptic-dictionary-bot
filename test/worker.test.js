@@ -1470,3 +1470,42 @@ test("the entry text has no Gregorian or Coptic date lines", async () => {
   assert.ok(texts.some((text) => text.includes("<b>الكلمة:</b>")));
   for (const text of texts) assert.doesNotMatch(text, /التاريخ الميلادي|التاريخ القبطي/u);
 });
+
+test("admin can delete a recorded voice and the word returns to the generated voice", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const record = records.find((item) => item.coptic === "ⲁⲃⲱⲕ");
+  const calls = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    if (String(url).includes("api.telegram.org")) {
+      let payload = {};
+      try { payload = JSON.parse(options?.body ?? "{}"); } catch { /* form data */ }
+      calls.push({ url: String(url), payload });
+      return Response.json({ ok: true, result: {} });
+    }
+    return new Response("", { status: 404 });
+  };
+  try {
+    // Nothing saved yet: the admin is told the word already uses the generated voice.
+    await worker.fetch(updateRequest({ message: { text: `/voice_delete ${record.coptic}`, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+    assert.match(calls.at(-1).payload.text, /لا يوجد تسجيل/u);
+
+    kvEnv.USERS.store.set(`voiceid:${record.id}`, { fileId: "my-recording" });
+    await worker.fetch(updateRequest({ message: { text: `/voice_delete ${record.coptic}`, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+    const ask = calls.at(-1).payload;
+    assert.equal(ask.reply_markup.inline_keyboard[0][0].callback_data, `vd|${record.id}`);
+    assert.ok(kvEnv.USERS.store.has(`voiceid:${record.id}`), "nothing is deleted before confirming");
+
+    // A non-admin tapping the button changes nothing.
+    await worker.fetch(updateRequest({ callback_query: { id: "c0", data: `vd|${record.id}`, from: { id: 555 }, message: { chat: { id: 555 }, message_id: 1 } } }), kvEnv);
+    assert.ok(kvEnv.USERS.store.has(`voiceid:${record.id}`));
+
+    // Cancel keeps it, confirm removes it.
+    await worker.fetch(updateRequest({ callback_query: { id: "c1", data: "vd|x", from: { id: ADMIN }, message: { chat: { id: ADMIN }, message_id: 2 } } }), kvEnv);
+    assert.ok(kvEnv.USERS.store.has(`voiceid:${record.id}`));
+    await worker.fetch(updateRequest({ callback_query: { id: "c2", data: `vd|${record.id}`, from: { id: ADMIN }, message: { chat: { id: ADMIN }, message_id: 3 } } }), kvEnv);
+    assert.equal(kvEnv.USERS.store.has(`voiceid:${record.id}`), false);
+  } finally {
+    globalThis.fetch = original;
+  }
+});

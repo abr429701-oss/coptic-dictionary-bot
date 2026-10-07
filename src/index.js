@@ -1546,6 +1546,51 @@ async function captureVoiceRecording(env, message, userId, user, ctx) {
   await inBackground(ctx, archive);
 }
 
+// Admin: delete the saved recording of a word so it is read by the generated voice again.
+async function askDeleteVoice(env, chatId, query) {
+  const clean = String(query ?? "").trim();
+  if (!clean) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "🗑️ لحذف تسجيلك لكلمة وإرجاعها للصوت الآلي أرسل:\n/voice_delete الكلمة" });
+    return;
+  }
+  const record = cardRecord(clean);
+  if (record?.id == null) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "لم أجد هذه الكلمة. أرسلها كما هي في القاموس." });
+    return;
+  }
+  const saved = env.USERS ? (await storeCall(env, { op: "get", key: voiceKey(record.id) })).value : null;
+  if (!saved?.fileId) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `لا يوجد تسجيل محفوظ لكلمة «${record.coptic}»، فهي تُقرأ بالصوت الآلي بالفعل.` });
+    return;
+  }
+  await telegram(env, "sendMessage", {
+    chat_id: chatId,
+    text: `🗑️ حذف تسجيلك لكلمة «${record.coptic}»؟\nستعود الكلمة للصوت الآلي. (نسخة درايف، إن وُجدت، تبقى كما هي.)`,
+    reply_markup: { inline_keyboard: [[
+      { text: "✅ احذف", callback_data: `vd|${record.id}` },
+      { text: "↩️ إلغاء", callback_data: "vd|x" },
+    ]] },
+  });
+}
+
+async function finishDeleteVoice(env, callback, choice) {
+  const chatId = callback.message?.chat?.id;
+  const messageId = callback.message?.message_id;
+  if (!chatId || !isAdmin(env, callback.from?.id)) return;
+  const edit = (text) => telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text });
+  if (choice === "x") {
+    await edit("تم الإلغاء، التسجيل كما هو.");
+    return;
+  }
+  const record = records.find((item) => String(item.id) === choice);
+  if (!record || !env.USERS) {
+    await edit("تعذّر الحذف: لم أجد الكلمة.");
+    return;
+  }
+  await storeCall(env, { op: "delete", key: voiceKey(record.id) });
+  await edit(`✅ حُذف تسجيل «${record.coptic}». ستُقرأ الآن بالصوت الآلي.`);
+}
+
 async function stopVoiceRecording(env, chatId, userId, user) {
   await saveUser(env, userId, { ...user, voiceRec: undefined, voicePick: undefined });
   await telegram(env, "sendMessage", { chat_id: chatId, text: "⏸️ تم إيقاف جلسة التسجيل. أرسل /record لاستكمالها من أول كلمة غير مسجلة." });
@@ -1993,6 +2038,11 @@ async function handleUpdate(update, env, ctx) {
     // Acknowledge the tap in the background so the answer is not delayed by a round trip.
     await inBackground(ctx, telegram(env, "answerCallbackQuery", { callback_query_id: callback.id }));
     const chatForPick = callback.message?.chat?.id;
+    const voiceDelete = /^vd\|(\d+|x)$/u.exec(callback.data ?? "");
+    if (voiceDelete) {
+      await finishDeleteVoice(env, callback, voiceDelete[1]);
+      return;
+    }
     const voicePick = /^vr\|(\d+)$/u.exec(callback.data ?? "");
     if (voicePick) {
       if (chatForPick && isAdmin(env, callback.from?.id)) {
@@ -2121,6 +2171,10 @@ async function handleUpdate(update, env, ctx) {
     }
     if (text === "/record_choose" || text === "/record_select") {
       await beginVoiceChoice(env, message.chat.id, userId, admin ?? {});
+      return;
+    }
+    if (text === "/voice_delete" || text.startsWith("/voice_delete ")) {
+      await askDeleteVoice(env, message.chat.id, text.slice("/voice_delete".length));
       return;
     }
     if (text === "/record_stop") {
