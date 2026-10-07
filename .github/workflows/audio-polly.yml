@@ -1,4 +1,4 @@
-name: Build human voice (Fish Audio)
+name: Build human voice (Polly Matthew)
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: audio-fish
+  group: audio-polly
   cancel-in-progress: false
 
 jobs:
@@ -19,14 +19,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 330
     env:
-      FISH_API_KEY: ${{ secrets.FISH_API_KEY }}
-      FISH_VOICE_ID: ${{ secrets.FISH_VOICE_ID }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: ${{ secrets.AWS_REGION }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      - name: Install the Polly SDK (not saved in the repo)
+        run: npm install --no-save --no-package-lock @aws-sdk/client-polly
 
       - name: Get the existing audio-human branch (incremental builds)
         env:
@@ -38,8 +42,8 @@ jobs:
             mkdir audio-out
           fi
 
-      - name: Generate words with Fish Audio
-        run: node scripts/gen_audio_fish.mjs audio-out "${{ inputs.limit }}"
+      - name: Generate words with Amazon Polly (Matthew)
+        run: node scripts/gen_audio_polly.mjs audio-out "${{ inputs.limit }}"
 
       - name: Publish to the audio-human branch
         env:
