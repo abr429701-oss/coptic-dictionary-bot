@@ -53,7 +53,7 @@ function lazy(build) {
 const SEARCH_FIELDS = ["coptic", "greek", "pronunciation", "english", "phonetic", "translation_en", "translation_fr", "translation_de"];
 
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
-import { fetchNeuralSpeech, NEURAL_VOICE_VERSION } from "./neural-voice.js";
+import { fetchPrebuiltSpeech, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 
 const VOICE_PREFIX = "voiceid:";
 const neuralKey = (id) => `ttsid:${NEURAL_VOICE_VERSION}:${id}`;
@@ -579,11 +579,11 @@ function prepareWordVoice(env, record, media = null) {
         console.error("Recorded voice lookup failed", error instanceof Error ? error.message : "unknown error");
       }
     }
-    if (env.AZURE_SPEECH_KEY && record?.id != null) {
+    if (record?.id != null) {
       try {
         const cached = env.USERS ? (await storeCall(env, { op: "get", key: neuralKey(record.id) })).value : null;
         if (cached?.fileId) return { fileId: cached.fileId, neural: true };
-        const neural = await fetchNeuralSpeech(env, record);
+        const neural = await fetchPrebuiltSpeech(env, record);
         if (neural) return { audio: neural, neural: true, wordId: record.id };
       } catch (error) {
         console.error("Neural voice failed", error instanceof Error ? error.message : "unknown error");

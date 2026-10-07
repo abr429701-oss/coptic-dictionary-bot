@@ -1,12 +1,10 @@
-// Accurate male pronunciation: the sheet's IPA column (C) is sent to a neural TTS
-// as SSML <phoneme alphabet="ipa">, so the engine pronounces the sounds instead of
-// guessing from English spelling. Needs AZURE_SPEECH_KEY + AZURE_SPEECH_REGION;
-// without them the bot keeps using the old generated voice.
+// Male pronunciation generated from the sheet's IPA column (C) with espeak-ng.
+// Audio is built ahead of time by GitHub Actions (scripts/gen_audio.mjs) into the
+// "audio" branch as <word id>.ogg; the Worker only downloads it, so it needs no
+// API key and almost no CPU. Words without a file keep the old generated voice.
 
 // Bump when the mapping/voice changes so cached Telegram file_ids are regenerated.
-export const NEURAL_VOICE_VERSION = "v2";
-export const DEFAULT_VOICE = "el-GR-NestorasNeural"; // male Greek: native x, ɣ, θ, ð, v, f
-const DEFAULT_RATE = "-40%";
+export const NEURAL_VOICE_VERSION = "v3";
 
 const ACCENTED = { "è": "e", "ì": "i", "ò": "o", "à": "a", "ὼ": "o", "ό": "o", "ο": "o", "ɔ": "ɔ", "ᴐ": "ɔ", "ↄ": "ɔ", "ͻ": "ɔ" };
 const GREEK = { "α": "a", "ε": "e", "η": "i", "ι": "i", "ο": "o", "ω": "o", "υ": "i", "β": "v", "γ": "ɣ", "θ": "θ", "κ": "k", "λ": "l", "μ": "m", "ν": "n", "π": "p", "ρ": "r", "σ": "s", "ς": "s", "τ": "t", "χ": "x", "ϩ": "h", "ϧ": "x", "ϫ": "dʒ", "ϣ": "ʃ" };
@@ -27,47 +25,33 @@ export function ipaForSpeech(record, { liturgical = true } = {}) {
   return text.replace(/[^a-zɔɣθðxʃʒʰː\s]/gu, "").replace(/\s+/gu, " ").trim().slice(0, 100);
 }
 
-const escapeXml = (value) => value.replace(/[<>&"']/gu, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;", "'": "&apos;" }[c]));
+const ESPEAK = { "ɔ": "O", "ɣ": "Q", "θ": "T", "ð": "D", "ʃ": "S", "ʒ": "Z", "ŋ": "N", "ː": ":", "ʰ": "" };
+const VOWELS = /[aeiouO]/u;
 
-export function buildSsml(record, { voice = DEFAULT_VOICE, rate = DEFAULT_RATE, liturgical = true } = {}) {
-  const ipa = ipaForSpeech(record, { liturgical });
-  if (!ipa) return "";
-  const lang = voice.split("-").slice(0, 2).join("-");
-  const display = escapeXml(String(record?.english || record?.phonetic || "x").slice(0, 60));
-  const words = ipa.split(" ").map((part) => `<phoneme alphabet="ipa" ph="${escapeXml(part)}">${display}</phoneme>`);
-  return `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="${lang}">` +
-    `<voice name="${voice}"><prosody rate="${rate}">${words.join(" <break time=\"250ms\"/> ")}</prosody></voice></speak>`;
+// IPA (as cleaned by ipaForSpeech) -> espeak-ng phoneme mnemonics, e.g. "tʃoːl" -> "tS'o:l".
+export function ipaToEspeak(ipa) {
+  return String(ipa).split(" ").filter(Boolean).map((part) => {
+    const converted = part.replace(/dʒ/gu, "dZ").replace(/tʃ/gu, "tS").replace(/[ɔɣθðʃʒŋːʰ]/gu, (c) => ESPEAK[c]);
+    const at = [...converted].findIndex((c) => VOWELS.test(c)); // stress the first vowel
+    return at < 0 ? converted : `${converted.slice(0, at)}'${converted.slice(at)}`;
+  }).join(" ");
 }
 
-// Returns an OGG/Opus ArrayBuffer (what Telegram sendVoice wants) or null.
-export async function fetchNeuralSpeech(env, record) {
-  if (!env?.AZURE_SPEECH_KEY || !env?.AZURE_SPEECH_REGION) return null;
-  const ssml = buildSsml(record, {
-    voice: env.AZURE_TTS_VOICE || DEFAULT_VOICE,
-    rate: env.AZURE_TTS_RATE || DEFAULT_RATE,
-    liturgical: env.TTS_PROFILE !== "reconstructed",
-  });
-  if (!ssml) return null;
+export const audioUrl = (env, id) =>
+  `${(env?.AUDIO_BASE_URL || "https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/audio").replace(/\/+$/u, "")}/${id}.ogg`;
+
+// Returns the prebuilt OGG/Opus ArrayBuffer for a word, or null if none exists.
+export async function fetchPrebuiltSpeech(env, record) {
+  if (record?.id == null) return null;
   try {
-    const response = await fetch(`https://${env.AZURE_SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/v1`, {
-      method: "POST",
-      headers: {
-        "Ocp-Apim-Subscription-Key": env.AZURE_SPEECH_KEY,
-        "Content-Type": "application/ssml+xml",
-        "X-Microsoft-OutputFormat": "ogg-24khz-16bit-mono-opus",
-        "User-Agent": "CopticDictionaryBot",
-      },
-      body: ssml,
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!response.ok) {
-      console.error("Neural TTS failed", response.status);
-      return null;
-    }
+    const headers = env?.GITHUB_AUDIO_TOKEN ? { authorization: `Bearer ${env.GITHUB_AUDIO_TOKEN}` } : {};
+    const response = await fetch(audioUrl(env, record.id), { headers, signal: AbortSignal.timeout(6000) });
+    if (!response.ok) return null;
     const audio = await response.arrayBuffer();
-    return audio.byteLength ? audio : null;
+    const magic = new TextDecoder().decode(new Uint8Array(audio, 0, Math.min(4, audio.byteLength)));
+    return magic === "OggS" ? audio : null; // only accept a real OGG file
   } catch (error) {
-    console.error("Neural TTS error", error instanceof Error ? error.message : "unknown error");
+    console.error("Prebuilt voice error", error instanceof Error ? error.message : "unknown error");
     return null;
   }
 }

@@ -77,8 +77,6 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
-      AZURE_SPEECH_KEY: ${{ secrets.AZURE_SPEECH_KEY }}
-      AZURE_SPEECH_REGION: ${{ vars.AZURE_SPEECH_REGION }}
       SETUP_WEBHOOK: ${{ github.event_name == 'workflow_dispatch' && inputs.setup_webhook != 'false' }}
     steps:
       - name: Check out repository (latest main)
@@ -141,12 +139,6 @@ jobs:
         if: ${{ env.APPS_SCRIPT_URL != '' }}
         run: |
           printf '%s' "$APPS_SCRIPT_URL" | npx wrangler secret put APPS_SCRIPT_URL --name coptic-dictionary-bot
-
-      - name: Store the neural voice key on the Worker
-        if: ${{ env.AZURE_SPEECH_KEY != '' && env.AZURE_SPEECH_REGION != '' }}
-        run: |
-          printf '%s' "$AZURE_SPEECH_KEY" | npx wrangler secret put AZURE_SPEECH_KEY --name coptic-dictionary-bot
-          printf '%s' "$AZURE_SPEECH_REGION" | npx wrangler secret put AZURE_SPEECH_REGION --name coptic-dictionary-bot
 
       - name: Register Telegram webhook
         if: ${{ env.SETUP_WEBHOOK == 'true' }}
