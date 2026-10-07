@@ -570,6 +570,7 @@ function voiceCaption(record, partIndex = -1, searchedWord = "") {
 }
 
 // Starts the lookup (admin recording) or speech generation right away, so it is ready when the text is sent.
+// Generated Matthew audio from the audio-human branch is the default voice.
 function prepareWordVoice(env, record, media = null) {
   return (async () => {
     if (env.USERS && record?.id != null) {
@@ -580,7 +581,7 @@ function prepareWordVoice(env, record, media = null) {
         console.error("Recorded voice lookup failed", error instanceof Error ? error.message : "unknown error");
       }
     }
-    if (record?.id != null && env.HUMAN_AUDIO === "on") {
+    if (record?.id != null) {
       try {
         const cachedHuman = env.USERS ? (await storeCall(env, { op: "get", key: humanKey(record.id) })).value : null;
         if (cachedHuman?.fileId) return { fileId: cachedHuman.fileId, neural: true };
