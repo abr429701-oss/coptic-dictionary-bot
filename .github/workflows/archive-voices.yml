@@ -1,0 +1,75 @@
+name: Archive recordings
+
+# Collects the recordings that the bot posts in the private archive group and stores them with rclone
+# (Google Drive, Dropbox, Backblaze B2, R2 ...). Telegram keeps updates for 24 hours, so keep the schedule.
+on:
+  schedule:
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: archive-voices
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ARCHIVE_BOT_TOKEN: ${{ secrets.ARCHIVE_BOT_TOKEN }}
+      ARCHIVE_CHAT_ID: ${{ secrets.ARCHIVE_CHAT_ID }}
+      RCLONE_CONFIG_B64: ${{ secrets.RCLONE_CONFIG_B64 }}
+      RCLONE_DEST: ${{ secrets.RCLONE_DEST }}
+    steps:
+      - name: Check the settings
+        id: cfg
+        run: |
+          if [ -z "$ARCHIVE_BOT_TOKEN" ] || [ -z "$ARCHIVE_CHAT_ID" ]; then
+            echo "ARCHIVE_BOT_TOKEN / ARCHIVE_CHAT_ID are not set yet; nothing to do."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.cfg.outputs.ok == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.cfg.outputs.ok == 'true'
+        with:
+          node-version: 22
+
+      - name: Download new recordings
+        if: steps.cfg.outputs.ok == 'true'
+        run: node scripts/archive_voices.mjs fetch archive-out
+
+      - name: Upload with rclone
+        id: upload
+        if: steps.cfg.outputs.ok == 'true'
+        run: |
+          if ! ls archive-out/*.ogg >/dev/null 2>&1; then echo "No new recordings."; echo "stored=none" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ -z "$RCLONE_CONFIG_B64" ] || [ -z "$RCLONE_DEST" ]; then
+            echo "RCLONE_CONFIG_B64 / RCLONE_DEST not set: keeping the files as a workflow artifact instead."
+            echo "stored=artifact" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          printf '%s' "$RCLONE_CONFIG_B64" | base64 -d > rclone.conf
+          rclone copy archive-out "$RCLONE_DEST" --config rclone.conf --include "*.ogg"
+          rm -f rclone.conf
+          echo "stored=rclone" >> "$GITHUB_OUTPUT"
+
+      - name: Keep the files as an artifact (when rclone is not configured)
+        if: steps.upload.outputs.stored == 'artifact'
+        uses: actions/upload-artifact@v4
+        with:
+          name: recordings
+          path: archive-out/*.ogg
+          retention-days: 90
+
+      - name: Confirm to Telegram
+        if: steps.cfg.outputs.ok == 'true'
+        run: node scripts/archive_voices.mjs ack archive-out

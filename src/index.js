@@ -655,6 +655,7 @@ function arrayBufferToBase64(buffer) {
 // ---- Drive archive (Google Apps Script web app) ----
 // Config comes from the APPS_SCRIPT_URL secret, or from /setdrive <url> (stored in the user store).
 const DRIVE_CONFIG_KEY = "drive-config";
+const ARCHIVE_CHAT_KEY = "archive-chat";
 const SYNC_DRIVE_BATCH = 5;
 
 async function driveConfig(env) {
@@ -1545,6 +1546,61 @@ async function captureVoiceRecording(env, message, userId, user, ctx) {
     await nextVoicePrompt(env, message.chat.id, userId, user);
   }
   await inBackground(ctx, archive);
+  await inBackground(ctx, postToArchiveGroup(env, record, message.voice.file_id, message.voice.duration));
+}
+
+// Optional archive group: every new recording is also posted there, where a second bot
+// (bot-to-bot mode) reads it and the scheduled "Archive recordings" workflow stores the file.
+async function archiveChatId(env) {
+  try {
+    const saved = env.USERS ? (await storeCall(env, { op: "get", key: ARCHIVE_CHAT_KEY })).value : null;
+    return saved?.chatId ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function postToArchiveGroup(env, record, fileId, duration) {
+  const chatId = await archiveChatId(env);
+  if (!chatId || !fileId) return;
+  try {
+    await telegram(env, "sendVoice", {
+      chat_id: chatId,
+      voice: fileId,
+      ...(duration ? { duration } : {}),
+      caption: `#${record.id} ${record.coptic ?? ""}`.trim(),
+    });
+  } catch (error) {
+    console.error("Archive group post failed", error instanceof Error ? error.message : "unknown error");
+  }
+}
+
+async function setArchiveChat(env, message, argument) {
+  const input = argument.trim();
+  const reply = (text) => telegram(env, "sendMessage", { chat_id: message.chat.id, text });
+  if (input.toLowerCase() === "off") {
+    await storeCall(env, { op: "put", key: ARCHIVE_CHAT_KEY, value: null });
+    await reply("تم إيقاف إرسال التسجيلات لمجموعة الأرشيف.");
+    return;
+  }
+  if (!input) {
+    const current = await archiveChatId(env);
+    await reply(current
+      ? `مجموعة الأرشيف الحالية: ${current}\nلإيقافها: /setarchive off`
+      : "لربط مجموعة الأرشيف أرسل: /setarchive رقم_المجموعة\n(المجموعة يجب أن يكون البوت عضوًا فيها)");
+    return;
+  }
+  if (!/^-?\d{5,20}$/u.test(input)) {
+    await reply("رقم المجموعة غير صحيح. أرسل: /setarchive -100xxxxxxxxxx");
+    return;
+  }
+  const test = await telegram(env, "sendMessage", { chat_id: Number(input), text: "✅ تم ربط هذه المجموعة بأرشيف التسجيلات." }).catch(() => null);
+  if (!test?.ok) {
+    await reply("تعذّر الإرسال لهذه المجموعة. تأكد أن البوت عضو فيها وأن الرقم صحيح.");
+    return;
+  }
+  await storeCall(env, { op: "put", key: ARCHIVE_CHAT_KEY, value: { chatId: Number(input) } });
+  await reply("✅ تم الربط. كل تسجيل جديد سيُرسل أيضًا لهذه المجموعة.");
 }
 
 // Admin: delete the saved recording of a word so it is read by the generated voice again.
@@ -2172,6 +2228,10 @@ async function handleUpdate(update, env, ctx) {
     }
     if (text === "/record_choose" || text === "/record_select") {
       await beginVoiceChoice(env, message.chat.id, userId, admin ?? {});
+      return;
+    }
+    if (text === "/setarchive" || text.startsWith("/setarchive ")) {
+      await setArchiveChat(env, message, text.slice("/setarchive".length));
       return;
     }
     if (text === "/voice_delete" || text.startsWith("/voice_delete ")) {

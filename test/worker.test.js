@@ -1509,3 +1509,29 @@ test("admin can delete a recorded voice and the word returns to the generated vo
     globalThis.fetch = original;
   }
 });
+
+test("admin links an archive group and new recordings are posted there", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: "/setarchive abc", chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+  assert.equal(kvEnv.USERS.store.get("archive-chat"), undefined);
+
+  await worker.fetch(updateRequest({ message: { text: "/setarchive -1001234567890", chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+  assert.equal(kvEnv.USERS.store.get("archive-chat").chatId, -1001234567890);
+  assert.ok(calls.some((call) => call.url.endsWith("/sendMessage") && call.payload.chat_id === -1001234567890));
+
+  await worker.fetch(updateRequest({ message: { text: "/record", chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+  const id = kvEnv.USERS.store.get(`user:${ADMIN}`).voiceRec.id;
+  calls.length = 0;
+  await worker.fetch(updateRequest({ message: { voice: { file_id: "archived-voice", duration: 3 }, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+  const posted = calls.find((call) => call.url.endsWith("/sendVoice") && call.payload.chat_id === -1001234567890);
+  assert.ok(posted, "the recording is posted to the archive group");
+  assert.equal(posted.payload.voice, "archived-voice");
+  assert.match(posted.payload.caption, new RegExp(`^#${id}\\b`, "u"));
+
+  await worker.fetch(updateRequest({ message: { text: "/setarchive off", chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+  calls.length = 0;
+  await worker.fetch(updateRequest({ message: { voice: { file_id: "second", duration: 1 }, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+  assert.ok(!calls.some((call) => call.url.endsWith("/sendVoice") && call.payload.chat_id === -1001234567890));
+});
