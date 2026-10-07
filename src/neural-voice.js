@@ -4,7 +4,7 @@
 // API key and almost no CPU. Words without a file keep the old generated voice.
 
 // Bump when the mapping/voice changes so cached Telegram file_ids are regenerated.
-export const NEURAL_VOICE_VERSION = "v3";
+export const NEURAL_VOICE_VERSION = "v4";
 
 const ACCENTED = { "è": "e", "ì": "i", "ò": "o", "à": "a", "ὼ": "o", "ό": "o", "ο": "o", "ɔ": "ɔ", "ᴐ": "ɔ", "ↄ": "ɔ", "ͻ": "ɔ" };
 const GREEK = { "α": "a", "ε": "e", "η": "i", "ι": "i", "ο": "o", "ω": "o", "υ": "i", "β": "v", "γ": "ɣ", "θ": "θ", "κ": "k", "λ": "l", "μ": "m", "ν": "n", "π": "p", "ρ": "r", "σ": "s", "ς": "s", "τ": "t", "χ": "x", "ϩ": "h", "ϧ": "x", "ϫ": "dʒ", "ϣ": "ʃ" };

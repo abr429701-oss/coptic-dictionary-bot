@@ -14,8 +14,8 @@ import { ipaForSpeech, ipaToEspeak, NEURAL_VOICE_VERSION } from "../src/neural-v
 const run = promisify(execFile);
 const outDir = path.resolve(process.argv[2] ?? "audio-out");
 const limit = Number(process.argv[3] ?? 0) || Infinity;
-const VOICE = "el+m3"; // Greek phonology, male variant
-const SETTINGS = `${NEURAL_VOICE_VERSION}|${VOICE}|-s90 -p35 -g30 16k`;
+const VOICE = "el+f3"; // Greek phonology, female variant
+const SETTINGS = `${NEURAL_VOICE_VERSION}|${VOICE}|-s80 -p60 -g35 16k`;
 
 await mkdir(outDir, { recursive: true });
 const manifestPath = path.join(outDir, "manifest.json");
@@ -38,7 +38,7 @@ async function build({ id, phonemes, hash }) {
   const text = phonemes.split(" ").map((part) => `[[${part}]]`).join(" , ");
   try {
     // The word is spoken twice, slowly, with a short pause.
-    await run("espeak-ng", ["-v", VOICE, "-s", "90", "-p", "35", "-g", "30", "-w", wav, `${text} , ${text}`]);
+    await run("espeak-ng", ["-v", VOICE, "-s", "80", "-p", "60", "-g", "35", "-w", wav, `${text} , ${text}`]);
     await run("ffmpeg", ["-loglevel", "error", "-y", "-i", wav, "-ac", "1", "-c:a", "libopus", "-b:a", "16k", "-application", "voip", path.join(outDir, `${id}.ogg`)]);
     manifest[id] = hash;
   } catch (error) {
