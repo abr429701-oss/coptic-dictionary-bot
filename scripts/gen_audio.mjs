@@ -1,6 +1,6 @@
 // scripts/gen_audio.mjs
 //
-// Builds pre-recorded Coptic dictionary audio from the IPA column.
+// Generate Coptic dictionary audio from the IPA column.
 //
 // Usage:
 //   node scripts/gen_audio.mjs <outDir> [limit]
@@ -13,22 +13,16 @@
 //   - espeak-ng
 //   - ffmpeg
 //
-// Output:
-//   <id>.ogg
+// Each word is pronounced THREE times with a natural pause.
 //
-// Each word:
-//   - is spoken 3 times
-//   - has a short pause between repetitions
-//   - uses the dictionary IPA
-//   - uses a male Greek voice when available
+// Default voice:
+//   el
 //
-// IMPORTANT:
-// Verify the exact male Greek voice available in your GitHub Actions runner.
-// You can override it with:
-//   ESPEAK_VOICE=el+m3
+// "el" is the standard Modern Greek eSpeak-ng voice and is classified
+// as male in the eSpeak-ng voice data.
 //
-// The default below is configurable because eSpeak-ng installations can
-// contain different Greek voice variants.
+// The Coptic pronunciation itself comes from the dictionary IPA;
+// eSpeak is used for synthesis.
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -68,61 +62,85 @@ const outDir = path.resolve(
 const limit =
   Number(process.argv[3] ?? 0) || Infinity;
 
-// Male Greek voice.
+// -----------------------------------------------------------------------------
+// Voice
+// -----------------------------------------------------------------------------
 //
 // IMPORTANT:
-// If your installed eSpeak-ng build does not contain "el+m3",
-// set ESPEAK_VOICE to an available male Greek voice.
 //
-// Example:
-//   ESPEAK_VOICE=el+m1 node scripts/gen_audio.mjs audio-out
+// Do NOT use the old:
+//   el+f3
 //
+// That was a female variant.
+//
+// We use the standard Greek voice:
+//   el
+//
+// You can override it without changing the source code:
+//
+//   ESPEAK_VOICE=el node scripts/gen_audio.mjs audio-out
+//
+// -----------------------------------------------------------------------------
+
 const VOICE =
-  process.env.ESPEAK_VOICE ?? "el+m3";
+  process.env.ESPEAK_VOICE ?? "el";
 
-// Natural dictionary pronunciation.
+// -----------------------------------------------------------------------------
+// Voice tuning
+// -----------------------------------------------------------------------------
+
+// Dictionary-friendly speed.
+// 80 was too slow/artificial for the previous version.
 const SPEED =
-  Number(process.env.ESPEAK_SPEED ?? 125);
+  Number(
+    process.env.ESPEAK_SPEED ?? 125
+  );
 
+// Medium-low male pitch.
 const PITCH =
-  Number(process.env.ESPEAK_PITCH ?? 48);
+  Number(
+    process.env.ESPEAK_PITCH ?? 48
+  );
 
-// eSpeak gap parameter.
-// Lower = less artificial spacing inside speech.
+// Small internal word gap.
 const GAP =
-  Number(process.env.ESPEAK_GAP ?? 8);
+  Number(
+    process.env.ESPEAK_GAP ?? 8
+  );
 
-// Three repetitions.
+// Exactly three repetitions.
 const REPETITIONS = 3;
 
-// Pause between repetitions.
-//
-// This is deliberately longer than the eSpeak "gap" setting.
-// It gives the listener a clear separation without sounding like
-// three completely unrelated recordings.
-const PAUSE_MS =
-  Number(process.env.COPTIC_PAUSE_MS ?? 420);
-
-// Output bitrate.
+// Opus quality.
 const BITRATE =
   process.env.OPUS_BITRATE ?? "24k";
 
-// Versioned settings.
-// Any change here automatically invalidates the corresponding cached audio.
+// Number of simultaneous generators.
+const WORKERS =
+  Math.max(
+    1,
+    Number(
+      process.env.AUDIO_WORKERS ?? 4
+    )
+  );
+
+// -----------------------------------------------------------------------------
+// Versioned settings
+// -----------------------------------------------------------------------------
+
 const SETTINGS = [
   NEURAL_VOICE_VERSION,
-  VOICE,
+  `voice=${VOICE}`,
   `speed=${SPEED}`,
   `pitch=${PITCH}`,
   `gap=${GAP}`,
   `repetitions=${REPETITIONS}`,
-  `pause=${PAUSE_MS}`,
   `opus=${BITRATE}`,
   "mode=greco-bohairic",
 ].join("|");
 
 // -----------------------------------------------------------------------------
-// Prepare output
+// Output directory
 // -----------------------------------------------------------------------------
 
 await mkdir(outDir, {
@@ -130,88 +148,100 @@ await mkdir(outDir, {
 });
 
 const manifestPath =
-  path.join(outDir, "manifest.json");
-
-const manifest = existsSync(manifestPath)
-  ? JSON.parse(
-      await readFile(manifestPath, "utf8")
-    )
-  : {};
-
-// -----------------------------------------------------------------------------
-// Helpers
-// -----------------------------------------------------------------------------
-
-function sleep(ms) {
-  return new Promise((resolve) =>
-    setTimeout(resolve, ms)
+  path.join(
+    outDir,
+    "manifest.json"
   );
-}
 
-function escapeForLog(value) {
-  return String(value)
-    .replace(/\r?\n/gu, " ")
-    .slice(0, 160);
-}
+const manifest =
+  existsSync(manifestPath)
+    ? JSON.parse(
+        await readFile(
+          manifestPath,
+          "utf8"
+        )
+      )
+    : {};
 
-function buildRepeatedSpeech(phonemes) {
-  // Treat the entire IPA word as ONE pronunciation unit.
-  //
-  // The old code did:
-  //
-  //   phonemes.split(" ").map(...)
-  //
-  // That can create unintended pauses if spaces occur inside an IPA
-  // representation.
-  //
-  // Instead, the entire phoneme string is spoken as one word.
-  const word = `[[${phonemes}]]`;
+// -----------------------------------------------------------------------------
+// Build three repetitions
+// -----------------------------------------------------------------------------
 
-  return Array.from(
-    { length: REPETITIONS },
-    () => word
-  ).join(" , ");
+function buildRepeatedSpeech(
+  phonemes
+) {
+  // Treat the whole IPA word as one pronunciation unit.
+  //
+  // IMPORTANT:
+  // We do NOT split the phoneme string and insert pauses between
+  // individual phonemes.
+  //
+  // The word itself is repeated three times.
+  const word =
+    `[[${phonemes}]]`;
+
+  return [
+    word,
+    word,
+    word,
+  ].join(" , ");
 }
 
 // -----------------------------------------------------------------------------
-// Build list of jobs
+// Prepare jobs
 // -----------------------------------------------------------------------------
 
 const jobs = [];
 
 for (const record of records) {
-  if (record?.id == null) continue;
+  if (record?.id == null) {
+    continue;
+  }
 
-  const ipa = ipaForSpeech(record, {
-    liturgical: true,
-    preserveJinkim: true,
-  });
+  const ipa =
+    ipaForSpeech(
+      record,
+      {
+        liturgical: true,
+        preserveJinkim: true,
+      }
+    );
 
-  if (!ipa) continue;
+  if (!ipa) {
+    continue;
+  }
 
-  const phonemes = ipaToEspeak(ipa, {
-    // DO NOT force first-vowel stress.
-    addStress: false,
-  });
+  const phonemes =
+    ipaToEspeak(
+      ipa,
+      {
+        // Do not automatically force stress.
+        addStress: false,
+      }
+    );
 
-  if (!phonemes) continue;
+  if (!phonemes) {
+    continue;
+  }
 
-  const hash = createHash("sha1")
-    .update(
-      `${SETTINGS}|${ipa}|${phonemes}`
-    )
-    .digest("hex")
-    .slice(0, 12);
+  const hash =
+    createHash("sha1")
+      .update(
+        `${SETTINGS}|${ipa}|${phonemes}`
+      )
+      .digest("hex")
+      .slice(0, 12);
 
-  const outputPath = path.join(
-    outDir,
-    `${record.id}.ogg`
-  );
+  const output =
+    path.join(
+      outDir,
+      `${record.id}.ogg`
+    );
 
-  // Incremental generation.
+  // Skip files that are already current.
   if (
     manifest[record.id] === hash &&
-    existsSync(outputPath)
+    existsSync(output)
   ) {
     continue;
   }
@@ -224,20 +254,38 @@ for (const record of records) {
   });
 }
 
-const todo = jobs.slice(0, limit);
+const todo =
+  jobs.slice(0, limit);
 
 console.log(
   `${todo.length} to generate ` +
-  `(${jobs.length} pending, ${records.length} words)`
+  `(${jobs.length} pending, ` +
+  `${records.length} words)`
 );
 
-console.log(`Voice: ${VOICE}`);
-console.log(`Speed: ${SPEED}`);
-console.log(`Pitch: ${PITCH}`);
-console.log(`Gap: ${GAP}`);
-console.log(`Repetitions: ${REPETITIONS}`);
-console.log(`Pause: ${PAUSE_MS}ms`);
-console.log(`Opus bitrate: ${BITRATE}`);
+console.log(
+  `Voice: ${VOICE}`
+);
+
+console.log(
+  `Speed: ${SPEED}`
+);
+
+console.log(
+  `Pitch: ${PITCH}`
+);
+
+console.log(
+  `Gap: ${GAP}`
+);
+
+console.log(
+  `Repetitions: ${REPETITIONS}`
+);
+
+console.log(
+  `Opus bitrate: ${BITRATE}`
+);
 
 // -----------------------------------------------------------------------------
 // Generate one word
@@ -262,24 +310,18 @@ async function build({
     );
 
   const text =
-    buildRepeatedSpeech(phonemes);
+    buildRepeatedSpeech(
+      phonemes
+    );
 
   try {
     console.log(
       `Generating ${id}: ` +
-      `${escapeForLog(ipa)} → ` +
-      `${escapeForLog(phonemes)}`
+      `${ipa} -> ${phonemes}`
     );
 
     // -----------------------------------------------------------------------
     // eSpeak-ng
-    //
-    // -s = speed
-    // -p = pitch
-    // -g = word gap
-    // -w = WAV output
-    //
-    // The actual word is repeated three times by buildRepeatedSpeech().
     // -----------------------------------------------------------------------
 
     await run(
@@ -303,18 +345,18 @@ async function build({
         text,
       ],
       {
-        maxBuffer: 1024 * 1024,
+        maxBuffer:
+          1024 * 1024,
       }
     );
 
     // -----------------------------------------------------------------------
     // FFmpeg
-    //
-    // 24 kbps Opus is a better compromise than the old 16 kbps setting
-    // for a dictionary voice.
-    //
-    // application=audio is preferable for ordinary speech/audio files.
     // -----------------------------------------------------------------------
+    //
+    // 24 kbps Opus is used instead of the previous 16 kbps.
+    // application=audio is appropriate for dictionary speech.
+    //
 
     await run(
       "ffmpeg",
@@ -344,7 +386,8 @@ async function build({
         output,
       ],
       {
-        maxBuffer: 1024 * 1024,
+        maxBuffer:
+          1024 * 1024,
       }
     );
 
@@ -353,13 +396,17 @@ async function build({
     console.error(
       `word ${id} failed:`,
       error instanceof Error
-        ? error.message.split("\n")[0]
+        ? error.message
+            .split("\n")[0]
         : String(error)
     );
   } finally {
-    await rm(wav, {
-      force: true,
-    });
+    await rm(
+      wav,
+      {
+        force: true,
+      }
+    );
   }
 }
 
@@ -369,30 +416,24 @@ async function build({
 
 let next = 0;
 
-const WORKERS =
-  Math.max(
-    1,
-    Number(
-      process.env.AUDIO_WORKERS ?? 4
-    )
-  );
-
 await Promise.all(
   Array.from(
-    { length: WORKERS },
+    {
+      length: WORKERS,
+    },
     async () => {
       while (true) {
         const index = next++;
 
-        if (index >= todo.length) {
+        if (
+          index >= todo.length
+        ) {
           break;
         }
 
-        await build(todo[index]);
-
-        // Small delay prevents hammering the runner when generating
-        // thousands of files.
-        await sleep(20);
+        await build(
+          todo[index]
+        );
       }
     }
   )
@@ -412,4 +453,6 @@ await writeFile(
   "utf8"
 );
 
-console.log("done");
+console.log(
+  "done"
+);
