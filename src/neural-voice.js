@@ -4,9 +4,9 @@
 // without them the bot keeps using the old generated voice.
 
 // Bump when the mapping/voice changes so cached Telegram file_ids are regenerated.
-export const NEURAL_VOICE_VERSION = "v1";
+export const NEURAL_VOICE_VERSION = "v2";
 export const DEFAULT_VOICE = "el-GR-NestorasNeural"; // male Greek: native x, ɣ, θ, ð, v, f
-const DEFAULT_RATE = "-20%";
+const DEFAULT_RATE = "-40%";
 
 const ACCENTED = { "è": "e", "ì": "i", "ò": "o", "à": "a", "ὼ": "o", "ό": "o", "ο": "o", "ɔ": "ɔ", "ᴐ": "ɔ", "ↄ": "ɔ", "ͻ": "ɔ" };
 const GREEK = { "α": "a", "ε": "e", "η": "i", "ι": "i", "ο": "o", "ω": "o", "υ": "i", "β": "v", "γ": "ɣ", "θ": "θ", "κ": "k", "λ": "l", "μ": "m", "ν": "n", "π": "p", "ρ": "r", "σ": "s", "ς": "s", "τ": "t", "χ": "x", "ϩ": "h", "ϧ": "x", "ϫ": "dʒ", "ϣ": "ʃ" };
@@ -36,7 +36,7 @@ export function buildSsml(record, { voice = DEFAULT_VOICE, rate = DEFAULT_RATE, 
   const display = escapeXml(String(record?.english || record?.phonetic || "x").slice(0, 60));
   const words = ipa.split(" ").map((part) => `<phoneme alphabet="ipa" ph="${escapeXml(part)}">${display}</phoneme>`);
   return `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="${lang}">` +
-    `<voice name="${voice}"><prosody rate="${rate}">${words.join(" <break time=\"120ms\"/> ")}</prosody></voice></speak>`;
+    `<voice name="${voice}"><prosody rate="${rate}">${words.join(" <break time=\"250ms\"/> ")}</prosody></voice></speak>`;
 }
 
 // Returns an OGG/Opus ArrayBuffer (what Telegram sendVoice wants) or null.
