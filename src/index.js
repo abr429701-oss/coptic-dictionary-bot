@@ -53,10 +53,11 @@ function lazy(build) {
 const SEARCH_FIELDS = ["coptic", "greek", "pronunciation", "english", "phonetic", "translation_en", "translation_fr", "translation_de"];
 
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
-import { fetchPrebuiltSpeech, NEURAL_VOICE_VERSION } from "./neural-voice.js";
+import { fetchHumanSpeech, fetchPrebuiltSpeech, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 
 const VOICE_PREFIX = "voiceid:";
 const neuralKey = (id) => `ttsid:${NEURAL_VOICE_VERSION}:${id}`;
+const humanKey = (id) => `ttsid:human:${NEURAL_VOICE_VERSION}:${id}`;
 const voiceKey = (id) => `${VOICE_PREFIX}${id}`;
 const CARD_DISABLED_PREFIX = "card-disabled:";
 const cardDisabledKey = (id) => `${CARD_DISABLED_PREFIX}${id}`;
@@ -579,6 +580,16 @@ function prepareWordVoice(env, record, media = null) {
         console.error("Recorded voice lookup failed", error instanceof Error ? error.message : "unknown error");
       }
     }
+    if (record?.id != null && env.HUMAN_AUDIO === "on") {
+      try {
+        const cachedHuman = env.USERS ? (await storeCall(env, { op: "get", key: humanKey(record.id) })).value : null;
+        if (cachedHuman?.fileId) return { fileId: cachedHuman.fileId, neural: true };
+        const human = await fetchHumanSpeech(env, record);
+        if (human) return { audio: human, neural: true, human: true, wordId: record.id };
+      } catch (error) {
+        console.error("Human voice failed", error instanceof Error ? error.message : "unknown error");
+      }
+    }
     if (record?.id != null) {
       try {
         const cached = env.USERS ? (await storeCall(env, { op: "get", key: neuralKey(record.id) })).value : null;
@@ -619,7 +630,7 @@ async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1, 
       // Remember Telegram's file_id so this word is synthesized only once.
       const sent = await response.json().catch(() => null);
       const fileId = sent?.result?.voice?.file_id;
-      if (fileId) await storeCall(env, { op: "put", key: neuralKey(voice.wordId), value: { fileId } }).catch(() => {});
+      if (fileId) await storeCall(env, { op: "put", key: voice.human ? humanKey(voice.wordId) : neuralKey(voice.wordId), value: { fileId } }).catch(() => {});
     }
   } catch (error) {
     console.error("Voice failed", error instanceof Error ? error.message : "unknown error");

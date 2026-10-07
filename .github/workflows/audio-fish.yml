@@ -1,0 +1,56 @@
+name: Build human voice (Fish Audio)
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "How many words to generate in this run (start small, e.g. 30)"
+        default: "30"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: audio-fish
+  cancel-in-progress: false
+
+jobs:
+  audio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      FISH_API_KEY: ${{ secrets.FISH_API_KEY }}
+      FISH_VOICE_ID: ${{ secrets.FISH_VOICE_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Get the existing audio-human branch (incremental builds)
+        env:
+          REMOTE: https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git
+        run: |
+          if git ls-remote --exit-code --heads "$REMOTE" audio-human >/dev/null 2>&1; then
+            git clone -q --depth 1 --branch audio-human "$REMOTE" audio-out
+          else
+            mkdir audio-out
+          fi
+
+      - name: Generate words with Fish Audio
+        run: node scripts/gen_audio_fish.mjs audio-out "${{ inputs.limit }}"
+
+      - name: Publish to the audio-human branch
+        env:
+          REMOTE: https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git
+        run: |
+          cd audio-out
+          rm -rf .git
+          git init -q
+          git checkout -q -b audio-human
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Rebuild human word audio"
+          git push -q -f "$REMOTE" audio-human
