@@ -1577,6 +1577,15 @@ async function postToArchiveGroup(env, record, fileId, duration) {
 async function setArchiveChat(env, message, argument) {
   const input = argument.trim();
   const reply = (text) => telegram(env, "sendMessage", { chat_id: message.chat.id, text });
+  if (input.toLowerCase() === "here") {
+    if (!["group", "supergroup"].includes(message.chat.type)) {
+      await reply("نفّذ /setarchive here داخل المجموعة نفسها.");
+      return;
+    }
+    await storeCall(env, { op: "put", key: ARCHIVE_CHAT_KEY, value: { chatId: message.chat.id } });
+    await reply(`✅ تم ربط هذه المجموعة (${message.chat.id}) لتحويل التسجيلات إلى @Abram444_bot.`);
+    return;
+  }
   if (input.toLowerCase() === "off") {
     await storeCall(env, { op: "put", key: ARCHIVE_CHAT_KEY, value: null });
     await reply("تم إيقاف إرسال التسجيلات لمجموعة الأرشيف.");
@@ -1600,6 +1609,22 @@ async function setArchiveChat(env, message, argument) {
   }
   await storeCall(env, { op: "put", key: ARCHIVE_CHAT_KEY, value: { chatId: Number(input) } });
   await reply("✅ تم الربط. كل تسجيل جديد سيُرسل أيضًا لهذه المجموعة.");
+}
+
+async function forwardIncomingVoice(env, message) {
+  const targetChatId = await archiveChatId(env);
+  const source = message.voice ?? message.audio;
+  if (!targetChatId || !source || Number(message.chat.id) === Number(targetChatId)) return;
+  const duration = source.duration ?? null;
+  const kind = message.voice ? "Voice" : "Audio";
+  const caption = `@Abram444_bot\n${kind} من المستخدم ${message.from?.first_name ?? ""}`.trim();
+  const result = await telegram(env, "sendVoice", {
+    chat_id: targetChatId,
+    voice: source.file_id,
+    ...(duration ? { duration } : {}),
+    caption,
+  });
+  if (!result?.ok) console.error("Forward voice to second bot failed", result?.description ?? "unknown error");
 }
 
 // Admin: delete the saved recording of a word so it is read by the generated voice again.
@@ -2286,9 +2311,10 @@ async function handleUpdate(update, env, ctx) {
     return;
   }
   if (message.voice || message.audio) {
+    await inBackground(ctx, forwardIncomingVoice(env, message));
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
-      text: "البحث الصوتي غير متاح في الاستضافة المجانية الحالية. اكتب الكلمة نصيًا للبحث.",
+      text: "تم إرسال الـVoice إلى مجموعة البوت الثاني.",
     });
     return;
   }
