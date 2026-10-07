@@ -38,7 +38,7 @@ function makeHash(record, ipa) {
     .slice(0, 12);
 }
 
-const jobs = [];
+const jobsById = new Map();
 for (const record of records) {
   if (record?.id == null) continue;
   // `pronunciation` is the IPA column imported from the sheet. Do not use the
@@ -48,9 +48,14 @@ for (const record of records) {
   const hash = makeHash(record, ipa);
   const output = path.join(outDir, `${record.id}.ogg`);
   if (manifest[record.id] === hash && existsSync(output)) continue;
-  jobs.push({ id: record.id, ipa, hash });
+  // Several dictionary rows can share one permanent word id because they
+  // represent different meanings. Generate one audio file per word id.
+  if (!jobsById.has(String(record.id))) {
+    jobsById.set(String(record.id), { id: record.id, ipa, hash });
+  }
 }
 
+const jobs = [...jobsById.values()];
 const todo = jobs.slice(0, limit);
 console.log(`${todo.length} pending (of ${jobs.length}); site=${SITE}; voice=${VOICE}; slow=${RATE}; repeats=${REPEATS}; pause=${BREAK_MS}ms`);
 
