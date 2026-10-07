@@ -10,7 +10,10 @@
 //
 // Audio is prebuilt by scripts/gen_audio.mjs.
 
-export const NEURAL_VOICE_VERSION = "v7";
+export const NEURAL_VOICE_VERSION = "v8";
+// Bump this whenever the external human-audio files are regenerated. This
+// prevents Telegram file_ids from an older voice build being reused forever.
+export const HUMAN_AUDIO_VERSION = "ipa-reader-matthew-v1";
 
 // -----------------------------------------------------------------------------
 // IPA normalization
@@ -327,7 +330,7 @@ export const humanAudioUrl = (env, id) =>
   `${(
     env?.AUDIO_HUMAN_BASE_URL ||
     "https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/audio-human"
-  ).replace(/\/+$/u, "")}/${encodeURIComponent(id)}.ogg`;
+  ).replace(/\/+$/u, "")}/${encodeURIComponent(id)}.ogg?v=${encodeURIComponent(HUMAN_AUDIO_VERSION)}`;
 
 export async function fetchHumanSpeech(env, record) {
   if (!humanAudioEnabled(env) || record?.id == null) return null;

@@ -29,12 +29,12 @@ test("prebuilt audio is fetched by word id", async () => {
 });
 
 test("human audio is opt-in and read from the audio-human branch", async () => {
-  assert.match(humanAudioUrl({}, 7), /\/audio-human\/7\.ogg$/u);
+  assert.match(humanAudioUrl({}, 7), /\/audio-human\/7\.ogg\?v=/u);
   const original = globalThis.fetch;
   let calls = 0;
   globalThis.fetch = async (url) => {
     calls++;
-    return String(url).endsWith("/5.ogg")
+    return String(url).split("?", 1)[0].endsWith("/5.ogg")
       ? new Response(new Uint8Array([79, 103, 103, 83, 1, 2]))
       : new Response("", { status: 404 });
   };

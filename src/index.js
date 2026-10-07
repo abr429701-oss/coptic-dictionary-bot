@@ -53,11 +53,10 @@ function lazy(build) {
 const SEARCH_FIELDS = ["coptic", "greek", "pronunciation", "english", "phonetic", "translation_en", "translation_fr", "translation_de"];
 
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
-import { fetchHumanSpeech, fetchPrebuiltSpeech, NEURAL_VOICE_VERSION } from "./neural-voice.js";
-
+import { fetchHumanSpeech, fetchPrebuiltSpeech, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 const VOICE_PREFIX = "voiceid:";
 const neuralKey = (id) => `ttsid:${NEURAL_VOICE_VERSION}:${id}`;
-const humanKey = (id) => `ttsid:human:${NEURAL_VOICE_VERSION}:${id}`;
+const humanKey = (id) => `ttsid:human:${HUMAN_AUDIO_VERSION}:${id}`;
 const voiceKey = (id) => `${VOICE_PREFIX}${id}`;
 const CARD_DISABLED_PREFIX = "card-disabled:";
 const cardDisabledKey = (id) => `${CARD_DISABLED_PREFIX}${id}`;
