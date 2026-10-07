@@ -53,7 +53,10 @@ function lazy(build) {
 const SEARCH_FIELDS = ["coptic", "greek", "pronunciation", "english", "phonetic", "translation_en", "translation_fr", "translation_de"];
 
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
+import { fetchNeuralSpeech, NEURAL_VOICE_VERSION } from "./neural-voice.js";
+
 const VOICE_PREFIX = "voiceid:";
+const neuralKey = (id) => `ttsid:${NEURAL_VOICE_VERSION}:${id}`;
 const voiceKey = (id) => `${VOICE_PREFIX}${id}`;
 const CARD_DISABLED_PREFIX = "card-disabled:";
 const cardDisabledKey = (id) => `${CARD_DISABLED_PREFIX}${id}`;
@@ -576,6 +579,16 @@ function prepareWordVoice(env, record, media = null) {
         console.error("Recorded voice lookup failed", error instanceof Error ? error.message : "unknown error");
       }
     }
+    if (env.AZURE_SPEECH_KEY && record?.id != null) {
+      try {
+        const cached = env.USERS ? (await storeCall(env, { op: "get", key: neuralKey(record.id) })).value : null;
+        if (cached?.fileId) return { fileId: cached.fileId, neural: true };
+        const neural = await fetchNeuralSpeech(env, record);
+        if (neural) return { audio: neural, neural: true, wordId: record.id };
+      } catch (error) {
+        console.error("Neural voice failed", error instanceof Error ? error.message : "unknown error");
+      }
+    }
     const spoken = spokenText(record);
     if (!spoken) return null;
     const audio = await fetchSpeech(spoken);
@@ -598,9 +611,16 @@ async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1, 
   try {
     const form = new FormData();
     form.append("chat_id", String(chatId));
-    form.append("voice", new Blob([voice.audio], { type: "audio/mpeg" }), "word.mp3");
+    if (voice.neural) form.append("voice", new Blob([voice.audio], { type: "audio/ogg" }), "word.ogg");
+    else form.append("voice", new Blob([voice.audio], { type: "audio/mpeg" }), "word.mp3");
     const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVoice`, { method: "POST", body: form });
     if (!response.ok) console.error("Telegram sendVoice failed", response.status);
+    else if (voice.neural && voice.wordId != null && env.USERS) {
+      // Remember Telegram's file_id so this word is synthesized only once.
+      const sent = await response.json().catch(() => null);
+      const fileId = sent?.result?.voice?.file_id;
+      if (fileId) await storeCall(env, { op: "put", key: neuralKey(voice.wordId), value: { fileId } }).catch(() => {});
+    }
   } catch (error) {
     console.error("Voice failed", error instanceof Error ? error.message : "unknown error");
   }
