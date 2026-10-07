@@ -1614,7 +1614,8 @@ async function setArchiveChat(env, message, argument) {
 async function forwardIncomingVoice(env, message) {
   const targetChatId = await archiveChatId(env);
   const source = message.voice ?? message.audio;
-  if (!targetChatId || !source || Number(message.chat.id) === Number(targetChatId)) return;
+  if (!targetChatId) return { ok: false, reason: "not_configured" };
+  if (!source || Number(message.chat.id) === Number(targetChatId)) return { ok: false, reason: "same_chat" };
   const duration = source.duration ?? null;
   const kind = message.voice ? "Voice" : "Audio";
   const caption = `@Abram444_bot\n${kind} من المستخدم ${message.from?.first_name ?? ""}`.trim();
@@ -1624,7 +1625,11 @@ async function forwardIncomingVoice(env, message) {
     ...(duration ? { duration } : {}),
     caption,
   });
-  if (!result?.ok) console.error("Forward voice to second bot failed", result?.description ?? "unknown error");
+  if (!result?.ok) {
+    console.error("Forward voice to second bot failed", result?.description ?? "unknown error");
+    return { ok: false, reason: result?.description ?? "telegram_error" };
+  }
+  return { ok: true };
 }
 
 // Admin: delete the saved recording of a word so it is read by the generated voice again.
@@ -2198,6 +2203,11 @@ async function handleUpdate(update, env, ctx) {
   const userId = message.from?.id ?? message.chat.id;
   const isPrivate = (message.chat.type ?? "private") === "private";
   const known = await registerOnFirstContact(env, message, userId, ctx);
+  if (isAdmin(env, userId) && ["group", "supergroup"].includes(message.chat.type)
+      && /^\/setarchive(?:@[^\s]+)?\s+here$/u.test(text)) {
+    await setArchiveChat(env, message, "here");
+    return;
+  }
   if (isAdmin(env, userId) && isPrivate) {
     const admin = await getUser(env, userId);
     if (text === "/cancel" && admin?.bc) {
@@ -2311,10 +2321,15 @@ async function handleUpdate(update, env, ctx) {
     return;
   }
   if (message.voice || message.audio) {
-    await inBackground(ctx, forwardIncomingVoice(env, message));
+    const forwarded = await forwardIncomingVoice(env, message);
+    const text = forwarded.ok
+      ? "✅ تم إرسال الـVoice إلى مجموعة البوت الثاني."
+      : forwarded.reason === "not_configured"
+        ? "⚠️ لم تُربط مجموعة البوت الثاني بعد. أرسل /setarchive here داخل المجموعة أولًا."
+        : `❌ تعذّر إرسال الـVoice إلى المجموعة: ${forwarded.reason}`;
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
-      text: "تم إرسال الـVoice إلى مجموعة البوت الثاني.",
+      text,
     });
     return;
   }
