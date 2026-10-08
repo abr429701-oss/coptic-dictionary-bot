@@ -1,11 +1,11 @@
-name: Test second bot (temporary)
+name: Second bot stand-in (temporary)
 
 on:
   workflow_dispatch:
     inputs:
       minutes:
         description: "How many minutes to listen"
-        default: "6"
+        default: "240"
 
 permissions:
   contents: read
@@ -13,7 +13,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 300
     env:
       TEST_BOT_TOKEN: ${{ secrets.TEST_BOT_TOKEN }}
       TEST_MINUTES: ${{ inputs.minutes }}

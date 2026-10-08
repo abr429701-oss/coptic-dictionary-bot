@@ -1,4 +1,4 @@
-// TEMPORARY diagnostic: shows what the second bot receives in the group and reacts to every voice message.
+// TEMPORARY stand-in for the second bot: logs what it receives in the group and answers every voice message with a short reply.
 // It never deletes a webhook and never confirms updates, so a real server can still receive them later.
 const TOKEN = process.env.TEST_BOT_TOKEN ?? "";
 const MINUTES = Number(process.env.TEST_MINUTES ?? 6);
@@ -24,13 +24,14 @@ if (hook.result?.url) {
   process.exit(0);
 }
 
+const startedAt = Math.floor(Date.now() / 1000);
 const seen = new Set();
 const statusOf = new Map();
 const end = Date.now() + MINUTES * 60 * 1000;
 console.log(`Listening for ${MINUTES} minutes: send the voice from the first bot in the group now...`);
 while (Date.now() < end) {
   const res = await api("getUpdates", { limit: 100, timeout: 0, allowed_updates: ["message", "channel_post", "edited_message"] });
-  if (!res.ok) { console.log("getUpdates error:", res.description); break; }
+  if (!res.ok) { console.log("getUpdates error (a webhook was probably set again):", res.description); break; }
   for (const update of res.result) {
     if (seen.has(update.update_id)) continue;
     seen.add(update.update_id);
@@ -42,14 +43,13 @@ while (Date.now() < end) {
       statusOf.set(m.chat.id, member.ok ? member.result.status : `error: ${member.description}`);
     }
     console.log(`update ${update.update_id}: chat ${m.chat.id} (${m.chat.type}) bot-status=${statusOf.get(m.chat.id) ?? "-"} | from ${m.from?.username ?? m.from?.id} is_bot=${m.from?.is_bot === true} | ${kind}${m.caption ? " | caption: " + m.caption.slice(0, 40).replace(/\n/g, " ") : ""}`);
-    if (m.voice || m.audio) {
-      const reaction = await api("setMessageReaction", { chat_id: m.chat.id, message_id: m.message_id, reaction: [{ type: "emoji", emoji: "👀" }] });
-      if (reaction.ok) console.log("  -> reacted 👀");
-      else {
-        console.log("  -> reaction failed:", reaction.description, "(sending a reply instead)");
-        const reply = await api("sendMessage", { chat_id: m.chat.id, text: "👀 البوت الثاني استلم الـ Voice", reply_parameters: { message_id: m.message_id } });
-        console.log(reply.ok ? "  -> replied" : `  -> reply failed: ${reply.description}`);
-      }
+    if ((m.voice || m.audio) && m.date >= startedAt - 5) {
+      const reply = await api("sendMessage", {
+        chat_id: m.chat.id,
+        text: "✅ تم استلام الرسالة",
+        reply_parameters: { message_id: m.message_id },
+      });
+      console.log(reply.ok ? "  -> replied: تم استلام الرسالة" : `  -> reply failed: ${reply.description}`);
     }
   }
   await sleep(3000);
