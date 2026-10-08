@@ -1563,8 +1563,7 @@ async function postToArchiveGroup(env, record, fileId, duration) {
   const chatId = await archiveChatId(env);
   if (!chatId || !fileId) return;
   try {
-    await telegram(env, "sendVoice", {
-      chat_id: chatId,
+    await sendVoiceToArchive(env, chatId, {
       voice: fileId,
       ...(duration ? { duration } : {}),
       caption: `#${record.id} ${record.coptic ?? ""}`.trim(),
@@ -1611,6 +1610,18 @@ async function setArchiveChat(env, message, argument) {
   await reply("✅ تم الربط. كل تسجيل جديد سيُرسل أيضًا لهذه المجموعة.");
 }
 
+// Telegram turns a group into a supergroup (new -100... id) when, for example, an admin is added.
+// The failed call then reports the new id: store it and retry once so the link keeps working.
+async function sendVoiceToArchive(env, chatId, payload) {
+  let result = await telegram(env, "sendVoice", { ...payload, chat_id: chatId });
+  const migratedTo = result?.parameters?.migrate_to_chat_id;
+  if (!result?.ok && migratedTo) {
+    await storeCall(env, { op: "put", key: ARCHIVE_CHAT_KEY, value: { chatId: migratedTo } });
+    result = await telegram(env, "sendVoice", { ...payload, chat_id: migratedTo });
+  }
+  return result;
+}
+
 async function forwardIncomingVoice(env, message) {
   const targetChatId = await archiveChatId(env);
   const source = message.voice ?? message.audio;
@@ -1619,8 +1630,7 @@ async function forwardIncomingVoice(env, message) {
   const duration = source.duration ?? null;
   const kind = message.voice ? "Voice" : "Audio";
   const caption = `@Abram444_bot\n${kind} من المستخدم ${message.from?.first_name ?? ""}`.trim();
-  const result = await telegram(env, "sendVoice", {
-    chat_id: targetChatId,
+  const result = await sendVoiceToArchive(env, targetChatId, {
     voice: source.file_id,
     ...(duration ? { duration } : {}),
     caption,

@@ -1535,3 +1535,33 @@ test("admin links an archive group and new recordings are posted there", async (
   await worker.fetch(updateRequest({ message: { voice: { file_id: "second", duration: 1 }, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
   assert.ok(!calls.some((call) => call.url.endsWith("/sendVoice") && call.payload.chat_id === -1001234567890));
 });
+
+test("archive group that Telegram upgraded to a supergroup is re-linked automatically", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  kvEnv.USERS.store.set("archive-chat", { chatId: -4000 });
+  const sent = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    if (!String(url).includes("api.telegram.org")) return new Response("", { status: 404 });
+    const payload = JSON.parse(options?.body ?? "{}");
+    sent.push({ method: String(url).split("/").pop(), payload });
+    if (String(url).endsWith("/sendVoice") && payload.chat_id === -4000) {
+      return Response.json({
+        ok: false,
+        error_code: 400,
+        description: "Bad Request: group chat was upgraded to a supergroup chat",
+        parameters: { migrate_to_chat_id: -1004000000001 },
+      }, { status: 400 });
+    }
+    return Response.json({ ok: true, result: {} });
+  };
+  try {
+    await worker.fetch(updateRequest({ message: { voice: { file_id: "v1", duration: 2 }, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+    const voices = sent.filter((call) => call.method === "sendVoice");
+    assert.deepEqual(voices.map((call) => call.payload.chat_id), [-4000, -1004000000001]);
+    assert.equal(kvEnv.USERS.store.get("archive-chat").chatId, -1004000000001);
+    assert.match(sent.filter((call) => call.method === "sendMessage").at(-1).payload.text, /تم إرسال الـVoice/u);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
