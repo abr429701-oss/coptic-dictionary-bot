@@ -3,27 +3,23 @@
  *
  * The bot sends every admin recording here. This script:
  *   1. saves the audio file in a Drive folder (named "<word id>.ogg"),
- *   2. writes ONE row per word in the "Ban" tab: id, word, Drive link
- *      (https://drive.google.com/file/d/<FILE_ID>/view?usp=drivesdk), file ids, duration,
- *      the recorder's full name, Telegram id and username.
+ *   2. writes ONE row per word in the "upload" tab: id, word, Drive link
+ *      (https://drive.google.com/file/d/<FILE_ID>/view?usp=drivesdk), file id, duration.
  *
  * Setup: see apps-script/README.md.  Deploy as: Execute as "Me", Who has access "Anyone".
  */
 const CONFIG = {
-  // Optional: the Drive folder id (the part after /folders/ in its URL). If empty, a folder named
-  // FOLDER_NAME is found or created in My Drive.
-  FOLDER_ID: "",
-  FOLDER_NAME: "Coptic Dictionary Voices",
+  // Optional: the Drive folder id (the part after /folders/ in its URL).
+  FOLDER_ID: "1Lm0gDumRXJuXwJZ8RCOVePjyJliKyGWv",
+  FOLDER_NAME: "dic_final",
   // The dictionary spreadsheet (same one the bot reads).
   SHEET_ID: "14pUNXtrHoMSU9lBWhKQZyspe-DDTMDudSiuL2sJQRUI",
   // Tab that receives one row per recorded word.
-  BAN_TAB: "Ban",
-  // Telegram users (name, username, id). Empty USERS_SHEET_ID = the same spreadsheet as SHEET_ID.
-  // WARNING: if that spreadsheet is shared with "anyone with the link", this tab is public too.
-  USERS_TAB: "User",
-  USERS_SHEET_ID: "",
+  BAN_TAB: "upload",
   // Anyone with the link can listen. Keep false to stay private to your Google account.
   SHARE_WITH_LINK: false,
+  // Only this Telegram id may upload recordings. Leave empty to disable the check.
+  ADMIN_ID: "813894692",
 };
 
 const BAN_HEADER = [
@@ -33,9 +29,6 @@ const BAN_HEADER = [
   "drive_file_id",
   "telegram_file_id",
   "duration_s",
-  "full_name",
-  "user_id",
-  "username",
 ];
 
 // Run this once from the editor (Run ▶ testSetup) to grant Drive/Sheets permissions and see the folder.
@@ -55,7 +48,15 @@ function doPost(e) {
   try {
     const body = JSON.parse((e && e.postData && e.postData.contents) || "{}");
     if (body.action === "ping") return json_(ping_());
-    if (body.action === "users") return json_(upsertUsers_(body.users));
+
+    // 🔒 Only the configured admin may upload recordings.
+    if (CONFIG.ADMIN_ID) {
+      const senderId = body.by && body.by.id != null ? String(body.by.id) : "";
+      if (senderId !== String(CONFIG.ADMIN_ID)) {
+        return json_({ ok: false, error: "unauthorized" });
+      }
+    }
+
     return json_(upload_(body));
   } catch (error) {
     return json_({
@@ -122,7 +123,7 @@ function openSpreadsheet_() {
 }
 
 /**
- * Returns the "Ban" sheet, creating it (with header) if needed.
+ * Returns the "upload" sheet, creating it (with header) if needed.
  * Recreates the header if row 1 is empty in the first column.
  */
 function banSheet_(spreadsheet) {
@@ -164,10 +165,16 @@ function findRowById_(sheet, id) {
 function ping_() {
   const folder = getFolder_();
   const spreadsheet = openSpreadsheet_();
+  const sheet = spreadsheet.getSheetByName(CONFIG.BAN_TAB);
   return {
     ok: true,
     folder: { name: folder.getName(), url: folder.getUrl() },
-    sheet: { name: spreadsheet.getName(), tab: CONFIG.BAN_TAB },
+    sheet: {
+      name: spreadsheet.getName(),
+      tab: CONFIG.BAN_TAB,
+      exists: !!sheet,
+    },
+    admin_id: CONFIG.ADMIN_ID || null,
   };
 }
 
@@ -233,7 +240,6 @@ function upload_(body) {
 
 function recordInBan_(spreadsheet, info) {
   const sheet = banSheet_(spreadsheet);
-  const by = info.body.by || {};
 
   const row = [
     info.id,
@@ -242,9 +248,6 @@ function recordInBan_(spreadsheet, info) {
     info.fileId,
     info.body.file_id || "",
     info.body.duration == null ? "" : Number(info.body.duration) || "",
-    by.name || "",
-    by.id == null ? "" : String(by.id),
-    by.username ? "@" + String(by.username).replace(/^@/, "") : "",
   ];
 
   const target = findRowById_(sheet, info.id);
@@ -262,51 +265,5 @@ function recordInBan_(spreadsheet, info) {
     sheet.getRange(target, 1, 1, row.length).setValues([row]);
   } else {
     sheet.appendRow(row);
-  }
-}
-
-// Upserts Telegram users into the "User" tab, keyed by the Telegram id (column C).
-function upsertUsers_(users) {
-  if (!Array.isArray(users) || !users.length) return { ok: false, error: "users is missing" };
-  const lock = LockService.getScriptLock();
-  lock.waitLock(30000);
-  try {
-    const spreadsheet = CONFIG.USERS_SHEET_ID ? SpreadsheetApp.openById(CONFIG.USERS_SHEET_ID) : openSpreadsheet_();
-    let sheet = spreadsheet.getSheetByName(CONFIG.USERS_TAB);
-    if (!sheet) {
-      sheet = spreadsheet.insertSheet(CONFIG.USERS_TAB, spreadsheet.getNumSheets());
-      sheet.appendRow(["name", "username", "id", "joined_at", "registered_at", "updated_at"]);
-    }
-    const last = sheet.getLastRow();
-    const rowOf = {};
-    if (last > 1) {
-      sheet.getRange(2, 3, last - 1, 1).getValues().forEach(function (row, i) {
-        rowOf[String(row[0])] = i + 2;
-      });
-    }
-    const now = new Date();
-    let added = 0;
-    let updated = 0;
-    users.slice(0, 200).forEach(function (user) {
-      const id = String(user.id == null ? "" : user.id);
-      if (!/^\d+$/.test(id)) return;
-      const username = user.username ? "@" + String(user.username).replace(/^@/, "") : "";
-      const target = rowOf[id];
-      if (target) {
-        // Keep what is already known when the new data is empty.
-        const old = sheet.getRange(target, 1, 1, 6).getValues()[0];
-        sheet.getRange(target, 1, 1, 6).setValues([[
-          user.name || old[0], username || old[1], id, old[3] || user.joined_at || "", user.registered_at || old[4], now,
-        ]]);
-        updated += 1;
-      } else {
-        sheet.appendRow([user.name || "", username, id, user.joined_at || "", user.registered_at || "", now]);
-        rowOf[id] = sheet.getLastRow();
-        added += 1;
-      }
-    });
-    return { ok: true, added: added, updated: updated };
-  } finally {
-    lock.releaseLock();
   }
 }
