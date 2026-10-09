@@ -1,4 +1,5 @@
 import records from "../data/dictionary.json" with { type: "json" };
+import { VALUE_TRANSLATIONS } from "./field-translations.js";
 import cardManifest from "../data/cards.json" with { type: "json" };
 import welcomeImageBase64 from "./welcome-image.js";
 
@@ -70,6 +71,7 @@ const recordIndexById = lazy(() => {
 
 const ARABIC_LETTER = /[\u0600-\u06ff]/u;
 const COPTIC_LETTER = /[\u2c80-\u2cff\u03e2-\u03ef]/u;
+const GREEK_LETTER = /[\u0370-\u03ff\u1f00-\u1fff]/u;
 const LATIN_LETTER = /[a-z]/iu;
 
 // Lowercase/strip marks, then keep only letters/digits separated by single spaces.
@@ -96,14 +98,10 @@ const UI_TEXT = {
   de: { word: "Wort", meaning: "Bedeutung", kind: "Wortart", origin: "Herkunft", more: "Es gibt eine weitere Bedeutung für das gesuchte Wort", next: "Hier klicken, um sie anzuzeigen", end: "Für dieses Wort sind keine weiteren Bedeutungen verfügbar", choose: "Wählen Sie aus den folgenden Vorschlägen:", previous: "Zurück", pageNext: "Weiter", noResult: "Das Wörterbuch wird noch entwickelt; dieses Wort wird später hinzugefügt" },
 };
 
-const VALUE_TRANSLATIONS = {
-  en: { "اسم": "noun", "اسم مذكر": "masculine noun", "اسم مؤنث": "feminine noun", "اسم جمع": "plural noun", "اسم مذكر ومؤنث": "masculine and feminine noun", "فعل": "verb", "فعل مذكر": "masculine verb", "فعل مؤنث": "feminine verb", "صفة": "adjective", "ظرف": "adverb", "حرف جر": "preposition", "أداة ربط": "conjunction", "رقم": "numeral", "ضمير": "pronoun", "حرف": "letter", "أداة": "particle", "أداة نفي": "negative particle", "جملة": "sentence", "بادئة": "prefix", "زائدة": "suffix", "أداة استفهام": "interrogative particle", "أداة تعريف": "definite article", "أداة تنكير": "indefinite article", "صيغة تفضيل": "comparative form", "حال": "adverbial", "اسم موصول": "relative noun", "قبطية": "Coptic", "قبطي": "Coptic", "يونانية": "Greek", "يوناتي": "Greek", "عبرية": "Hebrew", "عبري": "Hebrew", "لاتينية": "Latin", "لاتيني": "Latin", "آرامية": "Aramaic", "آرامي": "Aramaic", "سريانية": "Syriac", "سرياني": "Syriac" },
-  fr: { "اسم": "nom", "اسم مذكر": "nom masculin", "اسم مؤنث": "nom féminin", "اسم جمع": "nom pluriel", "اسم مذكر ومؤنث": "nom masculin et féminin", "فعل": "verbe", "فعل مذكر": "verbe masculin", "فعل مؤنث": "verbe féminin", "صفة": "adjectif", "ظرف": "adverbe", "حرف جر": "préposition", "أداة ربط": "conjonction", "رقم": "numéral", "ضمير": "pronom", "حرف": "lettre", "أداة": "particule", "أداة نفي": "particule négative", "جملة": "phrase", "بادئة": "préfixe", "زائدة": "suffixe", "أداة استفهام": "particule interrogative", "أداة تعريف": "article défini", "أداة تنكير": "article indéfini", "صيغة تفضيل": "comparatif", "حال": "adverbial", "اسم موصول": "nom relatif", "قبطية": "copte", "قبطي": "copte", "يونانية": "grec", "يوناتي": "grec", "عبرية": "hébreu", "عبري": "hébreu", "لاتينية": "latin", "لاتيني": "latin", "آرامية": "araméen", "آرامي": "araméen", "سريانية": "syriaque", "سرياني": "syriaque" },
-  de: { "اسم": "Substantiv", "اسم مذكر": "maskulines Substantiv", "اسم مؤنث": "feminines Substantiv", "اسم جمع": "Plural", "اسم مذكر ومؤنث": "maskulines und feminines Substantiv", "فعل": "Verb", "فعل مذكر": "maskulines Verb", "فعل مؤنث": "feminines Verb", "صفة": "Adjektiv", "ظرف": "Adverb", "حرف جر": "Präposition", "أداة ربط": "Konjunktion", "رقم": "Zahlwort", "ضمير": "Pronomen", "حرف": "Buchstabe", "أداة": "Partikel", "أداة نفي": "Verneinungspartikel", "جملة": "Satz", "بادئة": "Präfix", "زائدة": "Suffix", "أداة استفهام": "Fragepartikel", "أداة تعريف": "bestimmter Artikel", "أداة تنكير": "unbestimmter Artikel", "صيغة تفضيل": "Komparativ", "حال": "adverbial", "اسم موصول": "Relativnomen", "قبطية": "Koptisch", "قبطي": "Koptisch", "يونانية": "Griechisch", "يوناتي": "Griechisch", "عبرية": "Hebräisch", "عبري": "Hebräisch", "لاتينية": "Lateinisch", "لاتيني": "Lateinisch", "آرامية": "Aramäisch", "آرامي": "Aramäisch", "سريانية": "Syrisch", "سرياني": "Syrisch" },
-};
 
 function uiLanguage(searchKey = "") {
   const kind = searchKey ? scriptKind(normalize(searchKey)) : "ar";
+  if (kind === "el") return "en";
   return UI_TEXT[kind] ? kind : "ar";
 }
 
@@ -160,6 +158,12 @@ function matchedPartIndex(record, normalizedQuery) {
   return parts.findIndex((part) => normalize(part).startsWith(normalizedQuery) || hasWholeWords(tokens(part), needle));
 }
 
+function voiceRecordForSearch(record, searchKey) {
+  if (scriptKind(normalize(searchKey)) !== "el" || record?.id == null) return record;
+  const copticIndex = recordIndexById().get(record.id);
+  return copticIndex == null ? record : records[copticIndex];
+}
+
 // Suggestions use the same language the user searched in; full meanings appear after tapping.
 function suggestionLabel(record, normalizedQuery) {
   if (ARABIC_LETTER.test(normalizedQuery)) {
@@ -169,6 +173,7 @@ function suggestionLabel(record, normalizedQuery) {
   }
   if (COPTIC_LETTER.test(normalizedQuery)) return String(record.coptic ?? "").replaceAll("`", "").trim().slice(0, 48) || "—";
   const kind = scriptKind(normalizedQuery);
+  if (kind === "el") return String(record.greek ?? "").replaceAll("`", "").trim().slice(0, 48) || "—";
   if (kind === "fr") return String(record.translation_fr ?? "").trim().slice(0, 48) || "—";
   if (kind === "de") return String(record.translation_de ?? "").trim().slice(0, 48) || "—";
   if (kind === "en") return String(record.translation_en ?? record.english ?? "").trim().slice(0, 48) || String(record.phonetic ?? "").trim().slice(0, 48) || "—";
@@ -326,6 +331,7 @@ function moreMeaning(options, baseIndex, nextStep = 1, callbackFor = undefined, 
 function scriptKind(key) {
   if (ARABIC_LETTER.test(key)) return "ar";
   if (COPTIC_LETTER.test(key)) return "cop";
+  if (GREEK_LETTER.test(key)) return "el";
   if (LATIN_LETTER.test(key)) {
     const normalized = normalize(key);
     for (const kind of ["fr", "de", "en"]) {
@@ -338,10 +344,11 @@ function scriptKind(key) {
 
 const WORD_FIELDS = {
   cop: ["coptic"],
+  el: ["greek"],
   en: ["english", "phonetic", "translation_en"],
   fr: ["translation_fr"],
   de: ["translation_de"],
-  other: ["greek", "pronunciation"],
+  other: ["pronunciation"],
 };
 const wordIndexes = {};
 
@@ -570,9 +577,9 @@ function voiceCaption(record, partIndex = -1, searchedWord = "") {
 
 // Starts the lookup (admin recording) or speech generation right away, so it is ready when the text is sent.
 // Generated Matthew audio from the audio-human branch is the default voice.
-function prepareWordVoice(env, record, media = null) {
+function prepareWordVoice(env, record, media = null, { skipRecorded = false } = {}) {
   return (async () => {
-    if (env.USERS && record?.id != null) {
+    if (!skipRecorded && env.USERS && record?.id != null) {
       try {
         const saved = media ? { value: (await media).voice } : await storeCall(env, { op: "get", key: voiceKey(record.id) });
         if (saved?.value?.fileId) return { fileId: saved.value.fileId };
@@ -905,15 +912,16 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
   const record = records[selected.index];
   const cardLanguage = uiLanguage(normalizedQuery);
   const media = messageId === undefined ? lookupMedia(env, record, cardLanguage) : null;
-  const voice = prepareWordVoice(env, record, media);
+  const voiceRecord = voiceRecordForSearch(record, normalizedQuery);
+  const voice = prepareWordVoice(env, voiceRecord, media, { skipRecorded: scriptKind(normalizedQuery) === "el" });
   const more = moreMeaning(options, matches[0], 1, undefined, true, uiLanguage(normalizedQuery));
   const text = `${formatRecord(record, selected.part, normalizedQuery)}${more.notice ?? ""}`.slice(0, MAX_MESSAGE_LENGTH);
   if (await sendCardEntry(env, chatId, record, text, media, more.reply_markup, cardLanguage)) {
-    await sendPreparedVoice(env, chatId, record, voice, selected.part, normalizedQuery);
+    await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery);
     return undefined;
   }
   const response = await deliver({ text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
-  await sendPreparedVoice(env, chatId, record, voice, selected.part, normalizedQuery);
+  await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery);
   return response;
 }
 
@@ -936,13 +944,15 @@ async function sendOption(env, chatId, options, baseIndex, step, fallback = unde
   if (!record) return;
   const cardLanguage = uiLanguage(searchKey);
   const media = lookupMedia(env, record, cardLanguage);
-  const voice = prepareWordVoice(env, record, media);
+  const voiceRecord = voiceRecordForSearch(record, searchKey);
+  const isGreekSearch = scriptKind(normalize(searchKey)) === "el";
+  const voice = prepareWordVoice(env, voiceRecord, media, { skipRecorded: isGreekSearch });
   const more = moreMeaning(options, baseIndex, step + 1, callbackFor ?? (searchKey ? chainCallback(searchKey) : undefined), true, uiLanguage(searchKey));
   const text = `${formatRecord(record, selected.part, searchKey)}${more.notice ?? ""}`.slice(0, MAX_MESSAGE_LENGTH);
   if (!(await sendCardEntry(env, chatId, record, text, media, more.reply_markup, cardLanguage))) {
     await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
   }
-  if (sendVoice) await sendPreparedVoice(env, chatId, record, voice, selected.part, searchKey);
+  if (sendVoice) await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, searchKey);
 }
 
 // Registered users live in one SQLite-backed Durable Object (no extra Cloudflare token permission needed).
