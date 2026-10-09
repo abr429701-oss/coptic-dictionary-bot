@@ -3,6 +3,17 @@
 
 Runs in GitHub Actions (never inside the Worker), so the Worker keeps serving a
 pre-built, bundled JSON and its per-request CPU time is unchanged.
+
+New sheet layout (columns):
+    A = coptic
+    B = ipa (pronunciation)
+    C = arabic meaning
+    D = english
+    E = french
+    F = german
+    G = greek (new)
+    J = origin (new position)
+    K = kind (new position)
 """
 from __future__ import annotations
 
@@ -19,21 +30,23 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-SHEET_ID = os.environ.get("SHEET_ID", "1kXVA3CNgETqym5Vz3lBUu_2gZ01QNdx7ROtGVnIJp0c")
+SHEET_ID = os.environ.get("SHEET_ID", "14pUNXtrHoMSU9lBWhKQZyspe-DDTMDudSiuL2sJQRUI")
 SHEET_GID = os.environ.get("SHEET_GID", "")
 CSV_FILE = os.environ.get("SHEET_CSV_FILE", "")  # local file, for tests only
 OUT = Path(os.environ.get("OUT_JSON", ROOT / "data" / "dictionary.json"))
 IDS_FILE = Path(os.environ.get("WORD_IDS_JSON", ROOT / "data" / "word_ids.json"))
 MIN_RECORDS = int(os.environ.get("MIN_RECORDS", "8000"))
 
-# Columns: A coptic, B greek, C pronunciation, D english, E phonetic, F kind,
-# G gender, H origin, Z English translation, AA French translation,
-# AB German translation, BM Arabic meanings. BM is the sheet's canonical
-# Arabic column and already contains the meanings separated by Arabic commas.
-TRANSLATION_EN_COLUMN = 25  # Z
-TRANSLATION_FR_COLUMN = 26  # AA
-TRANSLATION_DE_COLUMN = 27  # AB
-MEANING_COLUMN = 64  # BM (A=0, B=1, ..., BM=64)
+# Column indices (A=0, B=1, ...).
+COPTIC_COLUMN = 0          # A
+IPA_COLUMN = 1             # B
+ARABIC_COLUMN = 2          # C
+ENGLISH_COLUMN = 3         # D
+FRENCH_COLUMN = 4          # E
+GERMAN_COLUMN = 5          # F
+GREEK_COLUMN = 6           # G
+ORIGIN_COLUMN = 9          # J
+KIND_COLUMN = 10           # K
 
 
 JINKIM = "\u0300"  # combining grave: the real jinkim, drawn over the letter it follows
@@ -49,21 +62,6 @@ def clean_coptic(value: str) -> str:
     """
     text = _JINKIM_BEFORE_LETTER.sub(lambda match: match.group(1) + JINKIM, value)
     return re.sub(r"\s+", " ", text).strip()
-
-
-def arabic_meaning(value: str, translations: list[str]) -> str:
-    """Keep BM Arabic meanings separate when the sheet formula also appends translations."""
-    text = value.strip()
-    for translation in translations:
-        if not translation:
-            continue
-        text = re.sub(
-            rf"(?:^|[،,]\s*){re.escape(translation)}(?=\s*(?:[،,]|$))",
-            "",
-            text,
-        )
-    parts = [part.strip() for part in re.split(r"\s*[،,]\s*", text) if part.strip()]
-    return "، ".join(parts)
 
 
 def word_key(coptic: str) -> str:
@@ -152,20 +150,16 @@ def main() -> None:
         def cell(index: int) -> str:
             return row[index].strip() if index < len(row) else ""
 
-        translations = [cell(TRANSLATION_EN_COLUMN), cell(TRANSLATION_FR_COLUMN), cell(TRANSLATION_DE_COLUMN)]
         record = {
-            "coptic": clean_coptic(cell(0)),
-            "greek": cell(1),
-            "pronunciation": cell(2),
-            "english": cell(3),
-            "phonetic": cell(4),
-            "kind": cell(5),
-            "gender": cell(6),
-            "origin": cell(7),
-            "translation_en": cell(TRANSLATION_EN_COLUMN),
-            "translation_fr": cell(TRANSLATION_FR_COLUMN),
-            "translation_de": cell(TRANSLATION_DE_COLUMN),
-            "meaning": arabic_meaning(cell(MEANING_COLUMN), translations),
+            "coptic": clean_coptic(cell(COPTIC_COLUMN)),
+            "pronunciation": cell(IPA_COLUMN),
+            "meaning": cell(ARABIC_COLUMN),
+            "english": cell(ENGLISH_COLUMN),
+            "translation_fr": cell(FRENCH_COLUMN),
+            "translation_de": cell(GERMAN_COLUMN),
+            "greek": cell(GREEK_COLUMN),
+            "origin": cell(ORIGIN_COLUMN),
+            "kind": cell(KIND_COLUMN),
         }
         if not any(record.values()):
             continue
