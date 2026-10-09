@@ -2,7 +2,7 @@ import cardManifest from "../data/cards.json" with { type: "json" };
 import test from "node:test";
 import assert from "node:assert/strict";
 import worker, { UserStore } from "../src/index.js";
-import { VALUE_TRANSLATIONS } from "../src/field-translations.js";
+import { translateFieldValue, VALUE_TRANSLATIONS } from "../src/field-translations.js";
 import records from "../data/dictionary.json" with { type: "json" };
 
 // The real manifest lists whichever words have a card today; tests start from "no cards" and add their own.
@@ -197,8 +197,8 @@ test("a single result shows only word, meaning, kind and origin with no heading"
   assert.ok(text.startsWith("<b>Word:</b> "));
   assert.match(text, /<b>Meaning:<\/b> /u);
   assert.doesNotMatch(text, /القاموس القبطي|نتائج|الصفحة|اليونانية|النطق|التهجئة|الجنس|الإنجليزية|كلمات مرتبطة/u);
-  assert.match(text, /No more meanings are available/u);
-  assert.ok(calls.find((call) => call.url.endsWith("/sendMessage"))?.payload.reply_markup);
+  assert.match(text, /No more meanings/u);
+  assert.equal(calls.find((call) => call.url.endsWith("/sendMessage"))?.payload.reply_markup, undefined);
 });
 
 test("tapping a suggestion from an Arabic search shows only the searched meaning", async () => {
@@ -278,9 +278,9 @@ test("multiple meanings are shown separately with a button for the next meaning"
   } }), kvEnv);
   const first = firstCalls.find((call) => call.url.endsWith("/sendMessage")).payload;
   assert.match(first.text, /المعنى/u);
-  assert.match(first.text, /هناك معنى آخر للكلمة التي بحثت بها/u);
+  assert.doesNotMatch(first.text, /هناك معنى آخر للكلمة التي بحثت بها/u);
   const next = first.reply_markup.inline_keyboard[0][0];
-  assert.equal(next.text, "اضغط هنا لعرضه");
+  assert.equal(next.text, "هناك معنى آخر للكلمة، اضغط هنا للعرض");
 
   const secondCalls = [];
   fakeTelegramApi(secondCalls);
@@ -319,7 +319,10 @@ test("the next-meaning button shows every meaning exactly once and then stops", 
     if (data === "e") data = undefined;
     }
     assert.equal(data, undefined, `row ${index}: the terminal button callback leaked`);
-    if (shown.length > 1) assert.match(finalText, /انتهت المعاني المتاحة/u);
+    if (shown.length > 1) {
+      assert.match(finalText, /انتهت المعاني/u);
+      assert.doesNotMatch(finalText, /انتهت المعاني المتاحة/u);
+    }
     assert.equal(new Set(shown).size, shown.length, `row ${index}: a meaning was shown twice: ${shown.join(" | ")}`);
     longest = Math.max(longest, shown.length);
   }
@@ -415,7 +418,8 @@ test("several different Coptic words for one Arabic word are shown one after ano
   assert.ok(shown.length >= 2);
   assert.equal(new Set(shown.map((entry) => entry.split("|")[0])).size, 1, `the searched word changed: ${shown.join(" / ")}`);
   assert.equal(new Set(shown.map((entry) => entry.split("|")[1])).size, shown.length, `a counterpart repeated: ${shown.join(" / ")}`);
-  assert.equal(sent.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data, "e");
+  assert.match(sent.text, /انتهت المعاني/u);
+  assert.equal(sent.reply_markup, undefined);
 });
 
 function fakeKv() {
@@ -616,10 +620,14 @@ test("every current type and origin value has English, French and German transla
   const values = new Set(records.flatMap((record) => [record.kind, record.origin]).map((value) => String(value ?? "").trim()).filter(Boolean));
   for (const value of values) {
     for (const language of ["en", "fr", "de"]) {
-      assert.ok(VALUE_TRANSLATIONS[language][value], `missing ${language} translation for ${value}`);
-      assert.doesNotMatch(VALUE_TRANSLATIONS[language][value], /[\u0600-\u06ff]/u, `Arabic remains in ${language} translation for ${value}`);
+      const translated = translateFieldValue(value, language);
+      assert.ok(translated, `missing ${language} translation for ${value}`);
+      assert.doesNotMatch(translated, /[\u0600-\u06ff]/u, `Arabic remains in ${language} translation for ${value}`);
     }
   }
+  assert.equal(translateFieldValue("يوناني", "en"), "Greek");
+  assert.match(translateFieldValue("فعل، صيغة مصدرية مضافة حديثًا", "en"), /verb.*verbal-noun form.*additional grammatical detail/u);
+  assert.doesNotMatch(translateFieldValue("فعل ، صيغة مصدرية مضافة حديثًا", "fr"), /[\u0600-\u06ff]/u);
 });
 
 test("Greek column searches to the Coptic counterpart", async () => {

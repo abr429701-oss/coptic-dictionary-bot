@@ -1,5 +1,5 @@
 import records from "../data/dictionary.json" with { type: "json" };
-import { VALUE_TRANSLATIONS } from "./field-translations.js";
+import { translateFieldValue } from "./field-translations.js";
 import cardManifest from "../data/cards.json" with { type: "json" };
 import welcomeImageBase64 from "./welcome-image.js";
 
@@ -91,6 +91,13 @@ function hasWholeWords(text, needle) {
 const SUGGESTION_PAGE_SIZE = 10;
 const SUGGESTION_TITLE = "اختر من الاقتراحات التالية:";
 const SHORT_QUERY_MAX = 2;
+const MORE_BUTTON_TEXT = {
+  ar: "هناك معنى آخر للكلمة، اضغط هنا للعرض",
+  en: "There is another meaning for this word, click here to view",
+  fr: "Il existe un autre sens pour ce mot, cliquez ici pour l’afficher",
+  de: "Es gibt eine weitere Bedeutung für dieses Wort, hier klicken zum Anzeigen",
+};
+const END_LABEL = { ar: "انتهت المعاني", en: "No more meanings", fr: "Plus de sens disponible", de: "Keine weiteren Bedeutungen" };
 const UI_TEXT = {
   ar: { word: "الكلمة", meaning: "المعنى", kind: "النوع", origin: "الأصل", more: "هناك معنى آخر للكلمة التي بحثت بها", next: "اضغط هنا لعرضه", end: "انتهت المعاني المتاحة لهذه الكلمة", choose: "اختر من الاقتراحات التالية:", previous: "السابق", pageNext: "التالي", noResult: "القاموس قيد التطوير حاليًا وسيتم إضافة معنى هذه الكلمة لاحقًا" },
   en: { word: "Word", meaning: "Meaning", kind: "Part of speech", origin: "Origin", more: "There is another meaning for the word you searched", next: "Click here to view it", end: "No more meanings are available for this word", choose: "Choose from the following suggestions:", previous: "Previous", pageNext: "Next", noResult: "The dictionary is still under development; this word will be added later" },
@@ -110,8 +117,7 @@ function uiTextFor(searchKey = "") {
 }
 
 function localizedValue(value, language) {
-  const raw = String(value ?? "").trim();
-  return VALUE_TRANSLATIONS[language]?.[raw] ?? raw;
+  return translateFieldValue(value, language);
 }
 
 function splitMeaning(value) {
@@ -120,17 +126,44 @@ function splitMeaning(value) {
 
 // Normalized text, tokenized meanings and "word starts" per record, built once per isolate on first search.
 const searchIndex = lazy(() => {
-  const text = [];
   const meaning = [];
   const prefix = [];
-  for (const record of records) {
-    text.push(normalize(SEARCH_FIELDS.map((key) => record[key] ?? "").join(" ")));
+  const termTokens = [];
+  const textExact = new Map();
+  const textFirst = new Map();
+  const meaningExact = new Map();
+  const meaningFirst = new Map();
+  const addRow = (map, key, row) => {
+    if (!key) return;
+    const rows = map.get(key);
+    if (!rows) map.set(key, [row]);
+    else if (rows[rows.length - 1] !== row) rows.push(row);
+  };
+  records.forEach((record, row) => {
+    const terms = SEARCH_FIELDS.flatMap((field) => splitMeaning(record[field]).map(normalize))
+      .filter(Boolean).map((value) => ({ value, tokens: toTokens(value) })).filter((term) => term.tokens);
+    termTokens.push(terms.map((term) => term.tokens));
+    const firstTerms = new Set();
+    for (const term of terms) {
+      addRow(textExact, term.value, row);
+      const first = term.tokens.split(" ", 1)[0];
+      if (first) firstTerms.add(first);
+    }
+    for (const first of firstTerms) addRow(textFirst, first, row);
     const parts = splitMeaning(record.meaning).map(normalize);
-    meaning.push(parts.map(toTokens));
+    const partTokens = parts.map(toTokens);
+    meaning.push(partTokens);
+    const firstParts = new Set();
+    for (let i = 0; i < parts.length; i += 1) {
+      addRow(meaningExact, partTokens[i], row);
+      const first = partTokens[i]?.split(" ", 1)[0];
+      if (first) firstParts.add(first);
+    }
+    for (const first of firstParts) addRow(meaningFirst, first, row);
     const keys = [record.coptic, record.greek, record.english, record.phonetic].map(normalize);
     prefix.push(keys.concat(parts).filter(Boolean));
-  }
-  return { text, meaning, prefix };
+  });
+  return { meaning, prefix, termTokens, textExact, textFirst, meaningExact, meaningFirst };
 });
 
 function findPrefixMatches(normalizedQuery) {
@@ -309,19 +342,14 @@ function meaningOptions(index, normalizedQuery = "", preferredPart = -1) {
 // The button walks one fixed list of meanings: each meaning is shown once, and the last one has no button.
 // callback: n|<word row>|<first meaning part>|<step to show next>  (the list is rebuilt the same way every time).
 function moreMeaning(options, baseIndex, nextStep = 1, callbackFor = undefined, keepSize = false, language = "ar") {
-  const text = UI_TEXT[language] ?? UI_TEXT.ar;
   if (options.length <= nextStep) {
     if (!keepSize) return {};
-    return {
-      notice: `\n\n<b>${text.end}</b>`,
-      reply_markup: { inline_keyboard: [[{ text: language === "ar" ? "انتهت المعاني" : text.end.slice(0, 48), callback_data: "e" }]] },
-    };
+    return { notice: `\n\n<b>${END_LABEL[language] ?? END_LABEL.ar}</b>` };
   }
   const firstPart = Math.max(0, options[0].part);
   const data = callbackFor?.(nextStep) ?? `n|${baseIndex}|${firstPart}|${nextStep}`;
   return {
-    notice: `\n\n<b>${text.more}</b>`,
-    reply_markup: { inline_keyboard: [[{ text: text.next, callback_data: data }]] },
+    reply_markup: { inline_keyboard: [[{ text: MORE_BUTTON_TEXT[language] ?? MORE_BUTTON_TEXT.ar, callback_data: data }]] },
   };
 }
 
@@ -458,33 +486,28 @@ function renderWordSuggestions(query, words, requestedPage) {
 function findMatches(query) {
   const normalizedQuery = normalize(query);
   if (!normalizedQuery) return [];
-  const matches = [];
+  const index = searchIndex();
   if (ARABIC_LETTER.test(normalizedQuery)) {
     // Arabic: match the sheet's meanings only, as whole words/phrases (never inside a longer word).
     const needle = tokens(normalizedQuery);
     if (!needle) return [];
-    const exact = [];
-    const { meaning: meaningTokens } = searchIndex();
-    for (let index = 0; index < meaningTokens.length; index += 1) {
-      let found = false;
-      let isExact = false;
-      for (const item of meaningTokens[index]) {
-        if (item === needle) { isExact = true; break; }
-        if (hasWholeWords(item, needle)) found = true;
-      }
-      if (isExact) exact.push(index);
-      else if (found) matches.push(index);
+    const exact = index.meaningExact.get(needle) ?? [];
+    const exactRows = new Set(exact);
+    const matches = [];
+    const first = needle.split(" ", 1)[0];
+    for (const row of index.meaningFirst.get(first) ?? []) {
+      if (!exactRows.has(row) && index.meaning[row].some((item) => hasWholeWords(item, needle))) matches.push(row);
     }
     return exact.concat(matches);
   }
   const needle = toTokens(normalizedQuery);
   if (!needle) return [];
-  const exact = [];
+  const exact = index.textExact.get(normalizedQuery) ?? [];
+  const exactRows = new Set(exact);
   const partial = [];
-  for (let index = 0; index < records.length; index += 1) {
-    const fields = SEARCH_FIELDS.flatMap((field) => splitMeaning(records[index]?.[field]).map(normalize));
-    if (fields.some((field) => field === normalizedQuery)) exact.push(index);
-    else if (fields.some((field) => hasWholeWords(toTokens(field), needle))) partial.push(index);
+  const first = needle.split(" ", 1)[0];
+  for (const row of index.textFirst.get(first) ?? []) {
+    if (!exactRows.has(row) && index.termTokens[row].some((field) => hasWholeWords(field, needle))) partial.push(row);
   }
   return exact.concat(partial);
 }

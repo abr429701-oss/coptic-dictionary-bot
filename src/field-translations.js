@@ -147,7 +147,7 @@ export const VALUE_TRANSLATIONS = {
     "قبطي": "Coptic",
     "لاتيني": "Latin",
     "مذكر": "masculine",
-    "يوناتي": "Ionian / Greek (archaic form)"
+    "يوناتي": "Greek"
   },
   "fr": {
     "adv.": "adverbe",
@@ -297,7 +297,7 @@ export const VALUE_TRANSLATIONS = {
     "قبطي": "copte",
     "لاتيني": "latin",
     "مذكر": "masculin",
-    "يوناتي": "ionien / grec (archaïque)"
+    "يوناتي": "grec"
   },
   "de": {
     "adv.": "Adverb",
@@ -447,6 +447,52 @@ export const VALUE_TRANSLATIONS = {
     "قبطي": "Koptisch",
     "لاتيني": "Latein",
     "مذكر": "maskulin",
-    "يوناتي": "ionisch / Griechisch (archaisch)"
+    "يوناتي": "Griechisch"
   }
 };
+
+
+const ORIGIN_ALIASES = {
+  "قبطية": "قبطي", "يوناني": "يوناتي", "يونانية": "يوناتي", "عبري": "عبري", "عبرية": "عبري",
+  "لاتيني": "لاتيني", "لاتينية": "لاتيني", "آرامية": "آرامي", "سريانية": "سرياني",
+};
+const ORIGIN_TRANSLATIONS = {
+  en: { "يوناني": "Greek", "يونانية": "Greek", "قبطية": "Coptic", "عبرية": "Hebrew", "لاتينية": "Latin", "آرامية": "Aramaic", "سريانية": "Syriac", "فارسي": "Persian", "عربي": "Arabic", "فرنسي": "French", "إنجليزي": "English", "مصري": "Egyptian", "حبشي": "Ethiopic" },
+  fr: { "يوناني": "grec", "يونانية": "grec", "قبطية": "copte", "عبرية": "hébreu", "لاتينية": "latin", "آرامية": "araméen", "سريانية": "syriaque", "فارسي": "persan", "عربي": "arabe", "فرنسي": "français", "إنجليزي": "anglais", "مصري": "égyptien", "حبشي": "éthiopien" },
+  de: { "يوناني": "Griechisch", "يونانية": "Griechisch", "قبطية": "Koptisch", "عبرية": "Hebräisch", "لاتينية": "Latein", "آرامية": "Aramäisch", "سريانية": "Syrisch", "فارسي": "Persisch", "عربي": "Arabisch", "فرنسي": "Französisch", "إنجليزي": "Englisch", "مصري": "Ägyptisch", "حبشي": "Äthiopisch" },
+};
+const COMPONENTS = {
+  en: {
+    "حرف جر": "preposition", "أداة ربط": "conjunction", "أداة استفهام": "interrogative particle", "أداة نفي": "negative particle", "أداة تعريف": "definite article", "أداة تنكير": "indefinite article", "أداة ملكية": "possessive particle", "أداة مفعول": "object marker", "ضمير مفعول": "object pronoun", "صيغة مصدرية": "verbal-noun form", "صيغة ضميرية": "pronominal form", "صيغة وصفية": "descriptive form", "صيغة مركبة": "compound form", "صيغة للفعل": "verbal form", "يأتي بعدها": "followed by", "يأتي قبلها": "preceded by", "بدون أداة مفعول": "without an object marker", "مذكر": "masculine", "مؤنث": "feminine", "جمع": "plural", "اسم": "noun", "فعل": "verb", "صفة": "adjective", "ظرف": "adverb", "ضمير": "pronoun", "رقم": "numeral", "حرف": "letter", "أداة": "particle", "بادئة": "prefix", "زائدة": "suffix", "توكيد": "emphasis", "علامة": "marker", "الماضي": "past", "المستقبل": "future", "المضاف إليه": "genitive", "المفعول": "object", "ثم": "then", "حال": "adverbial", "تعجب": "exclamation", "إشارة": "demonstrative", "وصل": "relative", "عطف": "coordinating", "شرط": "conditional", "نداء": "vocative", "مقارنة": "comparative", "تمني": "optative",
+  },
+  fr: {
+    "حرف جر": "préposition", "أداة ربط": "conjonction", "أداة استفهام": "particule interrogative", "أداة نفي": "particule négative", "أداة تعريف": "article défini", "أداة تنكير": "article indéfini", "أداة ملكية": "particule possessive", "أداة مفعول": "marqueur d’objet", "ضمير مفعول": "pronom objet", "صيغة مصدرية": "forme de nom verbal", "صيغة ضميرية": "forme pronominale", "صيغة وصفية": "forme descriptive", "صيغة مركبة": "forme composée", "صيغة للفعل": "forme verbale", "يأتي بعدها": "suivi de", "يأتي قبلها": "précédé de", "بدون أداة مفعول": "sans marqueur d’objet", "مذكر": "masculin", "مؤنث": "féminin", "جمع": "pluriel", "اسم": "nom", "فعل": "verbe", "صفة": "adjectif", "ظرف": "adverbe", "ضمير": "pronom", "رقم": "numéral", "حرف": "lettre", "أداة": "particule", "بادئة": "préfixe", "زائدة": "suffixe", "توكيد": "emphase", "علامة": "marqueur", "الماضي": "passé", "المستقبل": "futur", "المضاف إليه": "génitif", "المفعول": "objet", "ثم": "puis", "حال": "adverbial", "تعجب": "exclamation", "إشارة": "démonstratif", "وصل": "relatif", "عطف": "coordination", "شرط": "conditionnel", "نداء": "vocatif", "مقارنة": "comparatif", "تمني": "optatif",
+  },
+  de: {
+    "حرف جر": "Präposition", "أداة ربط": "Konjunktion", "أداة استفهام": "Fragepartikel", "أداة نفي": "Negationspartikel", "أداة تعريف": "bestimmter Artikel", "أداة تنكير": "unbestimmter Artikel", "أداة ملكية": "Possessivpartikel", "أداة مفعول": "Objektmarker", "ضمير مفعول": "Objektpronomen", "صيغة مصدرية": "Verbalnomenform", "صيغة ضميرية": "pronominale Form", "صيغة وصفية": "beschreibende Form", "صيغة مركبة": "zusammengesetzte Form", "صيغة للفعل": "Verbform", "يأتي بعدها": "gefolgt von", "يأتي قبلها": "vorangestellt", "بدون أداة مفعول": "ohne Objektmarker", "مذكر": "maskulin", "مؤنث": "feminin", "جمع": "Plural", "اسم": "Nomen", "فعل": "Verb", "صفة": "Adjektiv", "ظرف": "Adverb", "ضمير": "Pronomen", "رقم": "Numeral", "حرف": "Buchstabe", "أداة": "Partikel", "بادئة": "Präfix", "زائدة": "Suffix", "توكيد": "Emphase", "علامة": "Marker", "الماضي": "Vergangenheit", "المستقبل": "Zukunft", "المضاف إليه": "Genitiv", "المفعول": "Objekt", "ثم": "danach", "حال": "adverbial", "تعجب": "Ausruf", "إشارة": "Demonstrativ", "وصل": "Relativ", "عطف": "Koordination", "شرط": "Konditional", "نداء": "Vokativ", "مقارنة": "Komparativ", "تمني": "Optativ",
+  },
+};
+const UNKNOWN_DETAIL = { en: "additional grammatical detail", fr: "précision grammaticale supplémentaire", de: "weitere grammatische Angabe" };
+const normalizeFieldKey = (value) => String(value ?? "").normalize("NFKC").replace(/[\u064b-\u065f\u0670\u0640]/gu, "").replace(/\s+/gu, " ").replace(/\s*[,،]\s*/gu, "، ").trim();
+const normalizedTranslations = (() => Object.fromEntries(Object.entries(VALUE_TRANSLATIONS).map(([language, entries]) => [
+  language, new Map(Object.entries(entries).map(([source, translation]) => [normalizeFieldKey(source), translation])),
+])))();
+
+export function translateFieldValue(value, language) {
+  const raw = String(value ?? "").trim();
+  if (!raw || language === "ar") return raw;
+  const normalized = normalizeFieldKey(raw);
+  const aliases = ORIGIN_ALIASES[normalized] ?? normalized;
+  const direct = normalizedTranslations[language]?.get(aliases) ?? ORIGIN_TRANSLATIONS[language]?.[normalized];
+  if (direct) return direct;
+
+  let translated = normalized;
+  const components = Object.entries(COMPONENTS[language] ?? {}).sort(([a], [b]) => b.length - a.length);
+  for (const [source, target] of components) translated = translated.replaceAll(source, target);
+  translated = translated.replace(/،/gu, " — ").replace(/\s+/gu, " ").trim();
+  if (/[\u0600-\u06ff]/u.test(translated)) {
+    translated = translated.replace(/[\u0600-\u06ff]+/gu, "").replace(/\s+/gu, " ").replace(/\s+—\s+—\s+/gu, " — ").replace(/^[\s—,;]+|[\s—,;]+$/gu, "");
+    translated = [translated, UNKNOWN_DETAIL[language] ?? UNKNOWN_DETAIL.en].filter(Boolean).join(" — ");
+  }
+  return translated || UNKNOWN_DETAIL[language] || UNKNOWN_DETAIL.en;
+}
