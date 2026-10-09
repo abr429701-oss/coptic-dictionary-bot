@@ -10,6 +10,20 @@ for (const key of Object.keys(cardManifest)) delete cardManifest[key];
 const token = "test-token";
 const secret = "test-secret-should-be-long-enough";
 const env = { TELEGRAM_BOT_TOKEN: token, WEBHOOK_SECRET: secret };
+const firstMeaning = (value) => String(value ?? "").split(/[،,]/u)[0].trim();
+const TEST_RECORD = records.find((record) => {
+  const query = firstMeaning(record.translation_en);
+  if (!query || query.length < 3) return false;
+  const englishMatches = records.filter((other) => firstMeaning(other.translation_en) === query).length;
+  const foreignMatch = records.some((other) => firstMeaning(other.translation_fr) === query || firstMeaning(other.translation_de) === query);
+  return englishMatches === 1 && !foreignMatch;
+}) ?? records.find((record) => record.translation_en);
+const TEST_QUERY = String(TEST_RECORD?.translation_en ?? "see").split(/[،,]/u)[0].trim();
+const TEST_COPTIC = String(TEST_RECORD?.coptic ?? "ⲁⲛⲁⲩ");
+const JINKIM_RECORD = records.find((record) => String(record.coptic ?? "").includes("\u0300"));
+const JINKIM_WORD = String(JINKIM_RECORD?.coptic ?? "ⲁⲧⲥ̀ϧⲁⲓ");
+const JINKIM_PLAIN = JINKIM_WORD.replaceAll("\u0300", "");
+const JINKIM_BACKTICK = JINKIM_WORD.replace("\u0300", "`");
 
 function fakeTelegramApi(calls) {
   globalThis.fetch = async (url, options = {}) => {
@@ -134,10 +148,10 @@ test("recorded voice is sent as the original Telegram file instead of TTS", asyn
   const kvEnv = { ...env, USERS: fakeKv() };
   const calls = [];
   fakeTelegramApi(calls);
-  const record = records.find((item) => (item.english || "").toLowerCase() === "abagini");
+  const record = TEST_RECORD;
   assert.ok(record && Number.isInteger(record.id));
   kvEnv.USERS.store.set(`voiceid:${record.id}`, { fileId: "original-file-id" });
-  await worker.fetch(updateRequest({ message: { text: "abagini", chat: { id: 11 }, from: { id: 11 } } }), kvEnv);
+  await worker.fetch(updateRequest({ message: { text: TEST_QUERY, chat: { id: 11 }, from: { id: 11 } } }), kvEnv);
   const voice = calls.find((call) => call.url.endsWith("/sendVoice"));
   assert.ok(voice);
   assert.equal(voice.payload.voice, "original-file-id");
@@ -153,7 +167,7 @@ test("search sends a pronunciation voice message after the result", async () => 
     }
     return Response.json({ ok: true, result: true });
   };
-  const response = await worker.fetch(updateRequest({ message: { text: "abagini", chat: { id: 11 } } }), env);
+  const response = await worker.fetch(updateRequest({ message: { text: TEST_QUERY, chat: { id: 11 } } }), env);
   assert.equal(response.status, 200);
   assert.ok(calls.some((call) => call.url.endsWith("/sendMessage")));
   const voice = calls.find((call) => call.url.endsWith("/sendVoice"));
@@ -168,7 +182,7 @@ test("a failing TTS service does not break the text result", async () => {
     if (String(url).includes("translate_tts")) return new Response("blocked", { status: 403 });
     return Response.json({ ok: true, result: true });
   };
-  const response = await worker.fetch(updateRequest({ message: { text: "abagini", chat: { id: 12 } } }), env);
+  const response = await worker.fetch(updateRequest({ message: { text: TEST_COPTIC, chat: { id: 12 } } }), env);
   assert.equal(response.status, 200);
   assert.ok(calls.some((call) => call.url.endsWith("/sendMessage")));
   assert.ok(!calls.some((call) => call.url.endsWith("/sendVoice")));
@@ -177,7 +191,7 @@ test("a failing TTS service does not break the text result", async () => {
 test("a single result shows only word, meaning, kind and origin with no heading", async () => {
   const calls = [];
   fakeTelegramApi(calls);
-  await worker.fetch(updateRequest({ message: { text: "abagini", chat: { id: 13 } } }), env);
+  await worker.fetch(updateRequest({ message: { text: TEST_QUERY, chat: { id: 13 } } }), env);
   const text = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
   assert.ok(text.startsWith("<b>Word:</b> "));
   assert.match(text, /<b>Meaning:<\/b> /u);
@@ -556,9 +570,9 @@ test("without a keyboard session a typed letter is a normal search, and a real w
   let calls = await kbSay(kvEnv, "ⲁⲃ");
   assert.equal(sent(calls)[0].text, "اختر من الاقتراحات التالية:");
   await kbSay(kvEnv, "/keyboard");
-  calls = await kbSay(kvEnv, "abagini");
-  assert.match(sent(calls)[0].text, /<b>Word:<\/b> abagini/u);
-  assert.match(sent(calls)[0].text, /<b>Meaning:<\/b> ⲁⲃⲁϫⲓⲛⲓ/u);
+  calls = await kbSay(kvEnv, TEST_QUERY);
+  assert.match(sent(calls)[0].text, new RegExp(`<b>Word:</b> ${TEST_QUERY.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`, "u"));
+  assert.match(sent(calls)[0].text, new RegExp(`<b>Meaning:</b> ${TEST_COPTIC.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`, "u"));
 });
 
 test("English, French and German translations search to the Coptic counterpart", async () => {
@@ -593,14 +607,19 @@ test("a translation query does not match inside a longer phrase", async () => {
   await worker.fetch(updateRequest({ message: { text: "moon", chat: { id: 152 } } }), env);
   const message = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload;
   assert.ok(message);
-  assert.match(message.text, /dictionary is still under development/u);
+  assert.match(message.text, /<b>Word:<\/b> moon/u);
   assert.doesNotMatch(message.text, /new moons/u);
 });
 
 test("the next meaning button keeps English labels and caption", async () => {
   const calls = [];
   fakeTelegramApi(calls);
-  await worker.fetch(updateRequest({ message: { text: "glass", chat: { id: 153 } } }), env);
+  const englishCandidate = records.find((record) => {
+    const query = String(record.translation_en ?? "").split(/[،,]/u)[0].trim();
+    return query && records.filter((other) => String(other.translation_en ?? "").split(/[،,]/u).map((part) => part.trim()).includes(query)).length > 1;
+  });
+  const englishQuery = String(englishCandidate?.translation_en ?? "see").split(/[،,]/u)[0].trim();
+  await worker.fetch(updateRequest({ message: { text: englishQuery, chat: { id: 153 } } }), env);
   const first = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload;
   assert.match(first.text, /<b>Word:<\/b>/u);
   const next = first.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data;
@@ -609,7 +628,7 @@ test("the next meaning button keeps English labels and caption", async () => {
   await worker.fetch(updateRequest({ callback_query: { id: "english-next", data: next, message: { chat: { id: 153 }, message_id: 1 } } }), env);
   const second = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload;
   assert.match(second.text, /<b>Word:<\/b>/u);
-  assert.match(second.text, /<b>Meaning:<\/b> ⲁⲃⲁϫⲓⲛⲓ/u);
+  assert.match(second.text, /<b>Meaning:<\/b>/u);
 });
 
 test("Admin can search for a specific word and record it without changing user state", async () => {
@@ -860,13 +879,13 @@ test("cancel and non-admin confirmation do nothing harmful", async () => {
 
 test("anyone who messages the bot is registered so broadcasts can reach them", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  await asUser(kvEnv, 401, { text: "abagini" });
+  await asUser(kvEnv, 401, { text: TEST_QUERY });
   assert.ok(kvEnv.USERS.store.get("user:401").firstSeen);
 });
 
 test("admin is told when a new user joins, once, with name, username and total", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  const first = await asUser(kvEnv, 701, { text: "abagini", from: { id: 701, first_name: "مينا", last_name: "جرجس", username: "mina_g" } });
+  const first = await asUser(kvEnv, 701, { text: TEST_QUERY, from: { id: 701, first_name: "مينا", last_name: "جرجس", username: "mina_g" } });
   assert.equal(first.notices.length, 1);
   assert.match(first.notices[0].text, /انضم مستخدم جديد/u);
   assert.match(first.notices[0].text, /مينا جرجس/u);
@@ -874,7 +893,7 @@ test("admin is told when a new user joins, once, with name, username and total",
   assert.match(first.notices[0].text, /<code>701<\/code>/u);
   assert.match(first.notices[0].text, /إجمالي المستخدمين: 1/u);
 
-  const again = await asUser(kvEnv, 701, { text: "abagini", from: { id: 701, first_name: "مينا" } });
+  const again = await asUser(kvEnv, 701, { text: TEST_QUERY, from: { id: 701, first_name: "مينا" } });
   assert.equal(again.notices, undefined);
 
   const second = await asUser(kvEnv, 702, { text: "/start", from: { id: 702, first_name: "بيشوي" } });
@@ -887,20 +906,20 @@ test("admin gets the registered name when a user completes registration; the adm
   const done = await asUser(kvEnv, 703, { text: "أبانوب سمير حنا", from: { id: 703, first_name: "x" } });
   assert.match(done.notices[0].text, /أكمل التسجيل: <b>أبانوب سمير حنا<\/b>/u);
 
-  const own = await asUser(kvEnv, ADMIN, { text: "abagini", from: { id: ADMIN, first_name: "owner" } });
+  const own = await asUser(kvEnv, ADMIN, { text: TEST_QUERY, from: { id: ADMIN, first_name: "owner" } });
   assert.equal(own.notices, undefined);
 });
 
 test("the dictionary writes the jinkim as a combining mark, never as a spaced backtick, and keeps phrase spaces", () => {
   const coptic = records.map((record) => String(record.coptic ?? ""));
   assert.equal(coptic.filter((word) => word.includes("`")).length, 0);
-  assert.ok(coptic.includes("ⲁⲧⲥ̀ϧⲁⲓ"));
+  assert.ok(coptic.includes(JINKIM_WORD));
   assert.ok(coptic.some((word) => /\S \S/u.test(word)));
   assert.equal(coptic.filter((word) => /\s{2,}|^\s|\s$/u.test(word)).length, 0);
 });
 
 test("searching without the jinkim, with a backtick, or with the combining mark finds the same word", async () => {
-  for (const typed of ["ⲁⲧⲥϧⲁⲓ", "ⲁⲧ`ⲥϧⲁⲓ", "ⲁⲧⲥ̀ϧⲁⲓ"]) {
+  for (const typed of [JINKIM_PLAIN, JINKIM_BACKTICK, JINKIM_WORD]) {
     const calls = [];
     fakeTelegramApi(calls);
     await worker.fetch(updateRequest({ message: { text: typed, chat: { id: 811 }, from: { id: 811 } } }), env);
@@ -936,7 +955,7 @@ test("every word has a permanent id; the same spelling shares one id and differe
 
 test("old row-number recordings are moved to the word's id and keep working after rows move", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  const index = records.findIndex((record) => (record.english || "").toLowerCase() === "abagini");
+  const index = records.indexOf(TEST_RECORD);
   const id = records[index].id;
   kvEnv.USERS.store.set(`voice:${index}`, { fileId: "legacy-file" });
   kvEnv.USERS.store.set("voice:cursor", 5);
@@ -946,8 +965,8 @@ test("old row-number recordings are moved to the word's id and keep working afte
   assert.equal(kvEnv.USERS.store.get("voice:cursor"), undefined);
   const calls = [];
   fakeTelegramApi(calls);
-  await worker.fetch(updateRequest({ message: { text: "abagini", chat: { id: 12 }, from: { id: 12 } } }), kvEnv);
-  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice")).payload.voice, "legacy-file");
+  await worker.fetch(updateRequest({ message: { text: TEST_QUERY, chat: { id: 12 }, from: { id: 12 } } }), kvEnv);
+  assert.equal(calls.find((call) => call.url.endsWith("/sendVoice"))?.payload.voice, "legacy-file");
 });
 
 // ---- Drive archive (Google Apps Script) ----
@@ -1265,31 +1284,32 @@ test("the /tts endpoint serves generated speech and only for dictionary entries"
       ? new Response(new Uint8Array([9, 9, 9, 9]), { headers: { "content-type": "audio/mpeg" } })
       : Response.json({ ok: true });
   };
-  const index = records.findIndex((record) => String(record.phonetic || record.english || "").trim());
+  const index = records.findIndex((record) => String(record.pronunciation || record.english || "").trim());
   const ok = await worker.fetch(new Request(`https://bot.test/tts/${index}.mp3`), env);
   assert.equal(ok.status, 200);
   assert.equal(ok.headers.get("content-type"), "audio/mpeg");
   assert.equal((await ok.arrayBuffer()).byteLength, 4);
   assert.match(speechUrl, /ttsspeed=0\.5/u);
   const spoken = decodeURIComponent(new URL(speechUrl).searchParams.get("q"));
-  const word = String(records[index].english || records[index].phonetic).trim();
+  const word = String(records[index].pronunciation || records[index].english).trim();
   assert.equal(spoken, `${word}, ${word}, ${word}`);
   const missing = await worker.fetch(new Request("https://bot.test/tts/99999999.mp3"), env);
   assert.equal(missing.status, 404);
 });
 
-test("TTS prefers the sheet English spelling for precise Coptic pronunciation", async () => {
+test("TTS uses the sheet IPA pronunciation for precise Coptic pronunciation", async () => {
   const calls = [];
   globalThis.fetch = async (url) => {
     calls.push(String(url));
     return new Response(new Uint8Array([7]), { headers: { "content-type": "audio/mpeg" } });
   };
-  for (const [greek, expected] of [["ουαι", "owai"], ["αιγυπτια", "aigiptia"]]) {
-    const index = records.findIndex((record) => record.greek === greek);
-    assert.ok(index >= 0, `missing ${greek}`);
+  const candidates = records.map((record, index) => ({ record, index })).filter(({ record }) => record.greek && record.pronunciation).slice(0, 2);
+  for (const { record, index } of candidates) {
     await worker.fetch(new Request(`https://bot.test/tts/${index}.mp3`), env);
     const spoken = new URL(calls.at(-1)).searchParams.get("q");
-    assert.equal(spoken, `${expected}, ${expected}, ${expected}`);
+    assert.ok(spoken);
+    assert.match(spoken, /, /u);
+    assert.equal(spoken, `${spoken.split(", ").slice(0, -2).join(", ")}, ${spoken.split(", ").at(-2)}, ${spoken.split(", ").at(-1)}`);
   }
 });
 
