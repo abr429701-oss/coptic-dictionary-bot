@@ -590,6 +590,24 @@ test("English, French and German translations search to the Coptic counterpart",
   }
 });
 
+test("search results localize the dictionary type and origin values in English, French and German", async () => {
+  const expected = {
+    translation_en: ["Part of speech:</b> masculine noun", "Origin:</b> Coptic"],
+    translation_fr: ["Nature:</b> nom masculin", "Origine:</b> copte"],
+    translation_de: ["Wortart:</b> maskulines Substantiv", "Herkunft:</b> Koptisch"],
+  };
+  for (const field of Object.keys(expected)) {
+    const record = records.find((item) => item.kind === "اسم مذكر" && item.origin === "قبطي" && String(item[field] ?? "").trim());
+    assert.ok(record, `missing test record for ${field}`);
+    const query = firstMeaning(record[field]);
+    const calls = [];
+    fakeTelegramApi(calls);
+    await worker.fetch(updateRequest({ message: { text: query, chat: { id: 159 } } }), env);
+    const text = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload?.text ?? "";
+    for (const fragment of expected[field]) assert.ok(text.includes(fragment), `${field} result missing ${fragment}`);
+  }
+});
+
 test("Greek column searches to the Coptic counterpart", async () => {
   const record = records.find((item) => String(item.greek ?? "").trim());
   assert.ok(record?.greek, "dictionary fixture must contain a Greek value");
