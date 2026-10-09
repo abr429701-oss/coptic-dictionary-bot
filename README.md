@@ -67,7 +67,7 @@ npm run dev
 
 ## مزامنة القاموس من Google Sheets
 
-مصدر البيانات الآن شيت عام (`SHEET_ID` داخل `scripts/sheet_to_json.py`). يعمل GitHub Actions كل 30 دقيقة: ينزّل الشيت كـ CSV ويحوّله إلى `data/dictionary.json`، وإذا تغيّرت البيانات يحفظها وينشر الـ Worker تلقائيًا. لا يتغيّر شيء في الـ Worker نفسه أثناء الطلبات، فلا تتأثر حدود الاستخدام ولا السرعة. تشغيل يدوي: Actions ← Deploy Coptic Dictionary Bot ← Run workflow.
+مصدر البيانات الآن هو [الشيت الجديد](https://docs.google.com/spreadsheets/d/14pUNXtrHoMSU9lBWhKQZyspe-DDTMDudSiuL2sJQRUI/edit) (`SHEET_ID` داخل `scripts/sheet_to_json.py`). ترتيب الأعمدة: A قبطي، B IPA، C عربي، D إنجليزي، E فرنسي، F ألماني، G يوناني، J الأصل، K النوع. يعمل GitHub Actions كل 30 دقيقة: ينزّل الشيت كـ CSV ويحوّله إلى `data/dictionary.json`، وإذا تغيّرت البيانات يحفظها وينشر الـ Worker تلقائيًا. يدعم البوت الآن البحث بالكلمات اليونانية من العمود G، مع البحث السابق بالقبطية والعربية والإنجليزية والفرنسية والألمانية. لا يتغيّر شيء في الـ Worker نفسه أثناء الطلبات، فلا تتأثر حدود الاستخدام ولا السرعة. تشغيل يدوي: Actions ← Deploy Coptic Dictionary Bot ← Run workflow.
 
 ## البحث من أي محادثة (Inline) وعدّاد الطلبات
 

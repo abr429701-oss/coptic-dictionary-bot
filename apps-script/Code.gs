@@ -15,7 +15,7 @@ const CONFIG = {
   FOLDER_ID: "",
   FOLDER_NAME: "Coptic Dictionary Voices",
   // The dictionary spreadsheet (same one the bot reads).
-  SHEET_ID: "1kXVA3CNgETqym5Vz3lBUu_2gZ01QNdx7ROtGVnIJp0c",
+  SHEET_ID: "14pUNXtrHoMSU9lBWhKQZyspe-DDTMDudSiuL2sJQRUI",
   // Tab that receives one row per recorded word.
   BAN_TAB: "Ban",
   // Telegram users (name, username, id). Empty USERS_SHEET_ID = the same spreadsheet as SHEET_ID.

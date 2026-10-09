@@ -576,6 +576,17 @@ test("English, French and German translations search to the Coptic counterpart",
   }
 });
 
+test("Greek column searches to the Coptic counterpart", async () => {
+  const record = records.find((item) => String(item.greek ?? "").trim());
+  assert.ok(record?.greek, "dictionary fixture must contain a Greek value");
+  const query = String(record.greek).split(/[،,]/u)[0].trim();
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: query, chat: { id: 567 }, from: { id: 567 } } }), env);
+  const text = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload?.text ?? "";
+  assert.doesNotMatch(text, /القاموس قيد التطوير/u);
+});
+
 test("a translation query does not match inside a longer phrase", async () => {
   const calls = [];
   fakeTelegramApi(calls);
