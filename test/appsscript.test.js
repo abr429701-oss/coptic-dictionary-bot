@@ -178,6 +178,17 @@ test("dictionary_get and dictionary_update read and replace the exact dictionary
   const stale = world.post({ action: "dictionary_update", row: 2, expected_coptic: "ⲭⲁⲓ", values });
   assert.equal(stale.ok, false);
 });
+test("dictionary_get finds a row by any translation column and returns its sheet row", () => {
+  const world = build();
+  const english = world.post({ action: "dictionary_get", word: "look", by: { id: "813894692" } });
+  assert.equal(english.ok, true);
+  assert.equal(english.row, 2);
+  assert.equal(english.matched_column, 3);
+  const arabic = world.post({ action: "dictionary_get", word: "نظر", by: { id: "813894692" } });
+  assert.equal(arabic.ok, true);
+  assert.equal(arabic.row, 2);
+  assert.equal(arabic.values[0], "ⲁⲛⲁⲩ");
+});
 test("delete_all trashes every file in the voice folder and clears upload", () => {
   const world = build();
   world.post(upload({ id: 7 }));

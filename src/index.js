@@ -2468,7 +2468,8 @@ async function beginDictionaryEdit(env, chatId, userId, word) {
   if (!result.ok) { await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ ${result.error || "لم أجد الكلمة في ورقة dictionary."}` }); return; }
   const headers = result.headers ?? [];
   await setAdminFlow(env, userId, { kind: "dict_value", row: result.row, expectedCoptic: result.values?.[0] ?? word, values: result.values ?? [], headers, col: null });
-  const lines = [`📖 <b>صف القاموس رقم ${result.row}</b>`, "اختر أي عمود لتعديله. التعديل يُحفظ فورًا في نفس الصف:", ""];
+  const matched = Number.isInteger(result.matched_column) ? `\n🔎 تطابقت مع: <b>${escapeHtml(dictionaryFieldName(headers, result.matched_column))}</b>` : "";
+  const lines = [`📖 <b>صف القاموس رقم ${result.row}</b>${matched}`, "اختر أي عمود لتعديله. التعديل يُحفظ فورًا في نفس الصف:", ""];
   for (let i = 0; i < headers.length; i += 1) lines.push(`<b>${String.fromCharCode(65 + i)} — ${escapeHtml(dictionaryFieldName(headers, i))}:</b> ${escapeHtml(result.values?.[i] ?? "")}`);
   await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML", reply_markup: dictionaryEditMarkup(result.row, headers) });
 }

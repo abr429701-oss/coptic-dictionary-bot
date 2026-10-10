@@ -127,11 +127,16 @@ function dictionaryGet_(word) {
   const columns = Math.max(1, sheet.getLastColumn ? sheet.getLastColumn() : 11);
   const headers = sheet.getRange(1, 1, 1, columns).getValues()[0];
   const rows = sheet.getLastRow() > 1 ? sheet.getRange(2, 1, sheet.getLastRow() - 1, columns).getValues() : [];
+  let partial = null;
   for (let i = 0; i < rows.length; i++) {
-    if (normalizeDictionaryWord_(rows[i][0]) === wanted) {
-      return { ok: true, row: i + 2, headers: headers, values: rows[i] };
+    for (let column = 0; column < rows[i].length; column++) {
+      const cell = normalizeDictionaryWord_(rows[i][column]);
+      if (!cell) continue;
+      if (cell === wanted) return { ok: true, row: i + 2, matched_column: column, headers: headers, values: rows[i] };
+      if (!partial && (cell.indexOf(wanted) >= 0 || wanted.indexOf(cell) >= 0)) partial = { row: i + 2, matched_column: column, headers: headers, values: rows[i] };
     }
   }
+  if (partial) return { ok: true, ...partial };
   return { ok: false, error: "word not found" };
 }
 function dictionaryUpdate_(body) {
