@@ -509,7 +509,7 @@ function findMatches(query) {
   return exact.concat(partial);
 }
 
-const TYPING_DELAY_MS = 0; // raise (e.g. 400) for a longer visible "typing…"
+const TYPING_DELAY_MS = 0; // Telegram displays its native localized “typing…” indicator.
 
 async function telegram(env, method, payload) {
   const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
@@ -938,7 +938,7 @@ async function setCardVisibility(env, chatId, query, visible) {
   await telegram(env, "sendMessage", { chat_id: chatId, text: `🗑️ تم إخفاء بطاقة «${record.coptic}». ستعود فقط عند تسجيل Voice جديد أو استخدام /card_show.` });
 }
 
-async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
+async function sendSearch(env, chatId, query, page = 0, messageId = undefined, ctx = undefined) {
   const cleanQuery = String(query ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, 160);
   const normalizedQuery = normalize(cleanQuery);
   const deliver = (payload) => messageId === undefined
@@ -950,7 +950,7 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
     const isShortQuery = [...normalizedQuery.replace(/\s+/gu, "")].length <= SHORT_QUERY_MAX;
     if (messageId === undefined && !isShortQuery) {
       const chain = exactChain(kind, normalizedQuery);
-      if (chain.length) return sendOption(env, chatId, chain, chain[0].index, 0, undefined, chainCallback(cleanQuery), cleanQuery);
+      if (chain.length) return sendOption(env, chatId, chain, chain[0].index, 0, undefined, chainCallback(cleanQuery), cleanQuery, true, ctx);
     }
     const words = prefixWords(kind, normalizedQuery);
     if (words.length) {
@@ -976,11 +976,13 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined) {
   const more = moreMeaning(options, matches[0], 1, undefined, true, uiLanguage(normalizedQuery));
   const text = `${formatRecord(record, selected.part, normalizedQuery)}${more.notice ?? ""}`.slice(0, MAX_MESSAGE_LENGTH);
   if (await sendCardEntry(env, chatId, record, text, media, more.reply_markup, cardLanguage)) {
-    await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery);
+    if (ctx?.waitUntil) ctx.waitUntil(sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery).catch((error) => console.error("Background voice failed", error instanceof Error ? error.message : "unknown error")));
+    else await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery);
     return undefined;
   }
   const response = await deliver({ text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
-  await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery);
+  if (ctx?.waitUntil) ctx.waitUntil(sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery).catch((error) => console.error("Background voice failed", error instanceof Error ? error.message : "unknown error")));
+  else await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery);
   return response;
 }
 
@@ -997,7 +999,7 @@ async function sendMeaningStep(env, chatId, baseIndex, firstPart, step) {
   if (!options[step]) return;
   await sendOption(env, chatId, options, baseIndex, step, undefined, undefined, "", false);
 }
-async function sendOption(env, chatId, options, baseIndex, step, fallback = undefined, callbackFor = undefined, searchKey = "", sendVoice = true) {
+async function sendOption(env, chatId, options, baseIndex, step, fallback = undefined, callbackFor = undefined, searchKey = "", sendVoice = true, ctx = undefined) {
   const selected = options[step] ?? fallback;
   const record = records[selected?.index];
   if (!record) return;
@@ -1011,7 +1013,10 @@ async function sendOption(env, chatId, options, baseIndex, step, fallback = unde
   if (!(await sendCardEntry(env, chatId, record, text, media, more.reply_markup, cardLanguage))) {
     await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
   }
-  if (sendVoice) await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, searchKey);
+  if (sendVoice) {
+    if (ctx?.waitUntil) ctx.waitUntil(sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, searchKey).catch((error) => console.error("Background voice failed", error instanceof Error ? error.message : "unknown error")));
+    else await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, searchKey);
+  }
 }
 
 // Registered users live in one SQLite-backed Durable Object (no extra Cloudflare token permission needed).
@@ -1479,7 +1484,7 @@ function applyKeyboardAction(word, input) {
   return current;
 }
 
-async function handleKeyboardCallback(env, callback) {
+async function handleKeyboardCallback(env, callback, ctx) {
   const chatId = callback.message?.chat?.id;
   const messageId = callback.message?.message_id;
   if (!chatId || !messageId) return;
@@ -1504,7 +1509,7 @@ async function handleKeyboardCallback(env, callback) {
       return;
     }
     await showTyping(env, chatId);
-    await sendSearch(env, chatId, query, 0);
+    await sendSearch(env, chatId, query, 0, undefined, ctx);
     await telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text: keyboardText(""), reply_markup: keyboardInlineMarkup() });
     await storeCall(env, { op: "kbset", userId, kb: { word: "", msgId: messageId } });
     return;
@@ -1555,7 +1560,7 @@ async function handleKeyboardInput(env, message, userId) {
       return;
     }
     await showTyping(env, chatId);
-    await sendSearch(env, chatId, query, 0);
+    await sendSearch(env, chatId, query, 0, undefined, ctx);
     // Continue below the results with a fresh, empty composition message.
     const sent = await telegram(env, "sendMessage", { chat_id: chatId, text: keyboardText("") });
     await storeCall(env, { op: "kbset", userId, kb: { word: "", msgId: sent?.result?.message_id ?? null } });
@@ -2430,7 +2435,7 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     if (String(callback.data ?? "").startsWith("k|")) {
-      await handleKeyboardCallback(env, callback);
+      await handleKeyboardCallback(env, callback, ctx);
       return;
     }
     // Acknowledge the tap in the background so the answer is not delayed by a round trip.
@@ -2695,8 +2700,8 @@ async function handleUpdate(update, env, ctx) {
       await handleKeyboardInput(env, message, userId);
       return;
     }
-    await inBackground(ctx, showTyping(env, message.chat.id));
-    await sendSearch(env, message.chat.id, text, 0);
+    await showTyping(env, message.chat.id);
+    await sendSearch(env, message.chat.id, text, 0, undefined, ctx);
   }
 }
 

@@ -336,7 +336,7 @@ export async function fetchHumanSpeech(env, record) {
   if (!humanAudioEnabled(env) || record?.id == null) return null;
   try {
     const response = await fetch(humanAudioUrl(env, record.id), {
-      signal: AbortSignal.timeout(4000),
+      signal: AbortSignal.timeout(1800),
     });
     if (!response.ok) return null;
     const audio = await response.arrayBuffer();
@@ -371,7 +371,7 @@ export async function fetchPrebuiltSpeech(
       audioUrl(env, record.id),
       {
         headers,
-        signal: AbortSignal.timeout(8000),
+        signal: AbortSignal.timeout(3000),
       }
     );
 
