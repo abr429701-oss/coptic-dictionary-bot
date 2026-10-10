@@ -1470,6 +1470,16 @@ async function notifyAdmins(env, text) {
   }
 }
 
+async function notifyGroup(env, text) {
+  const chatId = await archiveChatId(env);
+  if (!chatId) return;
+  try {
+    await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML" });
+  } catch (error) {
+    console.error("Group notify failed", error instanceof Error ? error.message : "unknown error");
+  }
+}
+
 function voicePrompt(item) {
   if (!item) return "✅ اكتمل تسجيل النطق لكل كلمات القاموس.";
   const lines = [
@@ -1596,10 +1606,19 @@ async function postToArchiveGroup(env, record, fileId, duration) {
   const chatId = await archiveChatId(env);
   if (!chatId || !fileId) return;
   try {
+    const parts = splitMeaning(record.meaning ?? "");
+    const meaning = parts.join("، ");
+    const lines = [
+      record.coptic ? `الكلمة: ${record.coptic}` : null,
+      meaning ? `المعنى: ${meaning}` : null,
+      record.kind ? `النوع: ${record.kind}` : null,
+      record.origin ? `الأصل: ${record.origin}` : null,
+    ].filter(Boolean);
+    const caption = lines.join("\n").slice(0, 1024);
     await sendVoiceToArchive(env, chatId, {
       voice: fileId,
       ...(duration ? { duration } : {}),
-      caption: `#${record.id} ${record.coptic ?? ""}`.trim(),
+      caption,
     });
   } catch (error) {
     console.error("Archive group post failed", error instanceof Error ? error.message : "unknown error");
@@ -1819,13 +1838,15 @@ async function registerOnFirstContact(env, message, userId, ctx) {
     }
     return result?.user;
   }
-  await notifyAdmins(env, [
+  const joinNotice = [
     "🆕 <b>انضم مستخدم جديد إلى البوت</b>",
     `👤 الاسم: ${escapeHtml(displayName(from))}`,
     `🔗 المعرّف: ${from.username ? `@${escapeHtml(from.username)}` : "—"}`,
     `🆔 الرقم: <code>${escapeHtml(userId)}</code>`,
     `👥 إجمالي المستخدمين: ${Number(result.total ?? 0).toLocaleString("en-US")}`,
-  ].join("\n"));
+  ].join("\n");
+  await notifyAdmins(env, joinNotice);
+  await inBackground(ctx, notifyGroup(env, joinNotice));
   return result.user;
 }
 
