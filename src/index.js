@@ -240,12 +240,10 @@ function renderSuggestions(query, normalizedQuery, matches, requestedPage) {
   const page = Math.max(0, Math.min(requestedPage, totalPages - 1));
   const slice = matches.slice(page * SUGGESTION_PAGE_SIZE, (page + 1) * SUGGESTION_PAGE_SIZE);
   const languageQuery = uiLanguage(query) === "ar" ? "" : truncateBytes(query, CALLBACK_DATA_MAX_BYTES - 18);
-  const labels = slice.map((index) => suggestionLabel(records[index], normalizedQuery));
-  const aligned = equalizeSuggestionLabels(labels);
-  const keyboard = slice.map((index, position) => {
+  const keyboard = slice.map((index) => {
     const part = matchedPartIndex(records[index], normalizedQuery);
     return [{
-      text: aligned[position],
+      text: suggestionLabel(records[index], normalizedQuery),
       callback_data: part >= 0 ? `s|${index}|${part}${languageQuery ? `|${languageQuery}` : ""}` : `s|${index}${languageQuery ? `|${languageQuery}` : ""}`,
     }];
   });
@@ -477,10 +475,8 @@ function renderWordSuggestions(query, words, requestedPage) {
   const ui = uiTextFor(query);
   const totalPages = Math.max(1, Math.ceil(words.length / SUGGESTION_PAGE_SIZE));
   const page = Math.max(0, Math.min(requestedPage, totalPages - 1));
-  const visibleWords = words.slice(page * SUGGESTION_PAGE_SIZE, (page + 1) * SUGGESTION_PAGE_SIZE);
-  const labels = equalizeSuggestionLabels(visibleWords.map((word) => word.label.slice(0, 48)));
-  const keyboard = visibleWords.map((word, position) => [{
-    text: labels[position],
+  const keyboard = words.slice(page * SUGGESTION_PAGE_SIZE, (page + 1) * SUGGESTION_PAGE_SIZE).map((word) => [{
+    text: word.label.slice(0, 48),
     callback_data: `w|${truncateBytes(word.key, CALLBACK_DATA_MAX_BYTES - 2)}`,
   }]);
   const navigation = [];
