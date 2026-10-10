@@ -1229,6 +1229,16 @@ export class UserStore {
       await storage.put(`user:${userId}`, { ...rest, voiceBusy: { id, at: new Date().toISOString() } });
       return Response.json({ claimed: true });
     }
+    if (op === "adminStats") {
+      const [users, voiced, pending] = await Promise.all([
+        storage.list({ prefix: "user:" }),
+        storage.list({ prefix: VOICE_PREFIX }),
+        storage.list({ prefix: "voiceid:" }),
+      ]);
+      let pendingUploads = 0;
+      for (const [, value] of pending) if (!value?.drive) pendingUploads += 1;
+      return Response.json({ users: users.size, voices: voiced.size, pendingUploads });
+    }
     if (op === "voiceIds") {
       const voiced = await storage.list({ prefix: VOICE_PREFIX });
       return Response.json({ ids: [...voiced.keys()].map((key) => Number(key.slice(VOICE_PREFIX.length))).filter(Number.isFinite) });
@@ -2297,6 +2307,63 @@ async function sendBotInfo(env, chatId) {
   await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML" });
 }
 
+function adminDashboardMarkup() {
+  return { inline_keyboard: [
+    [{ text: "🔄 تحديث اللوحة", callback_data: "ad|refresh" }, { text: "☁️ حالة Drive", callback_data: "ad|drive" }],
+    [{ text: "⬆️ مزامنة الأصوات", callback_data: "ad|syncvoices" }, { text: "👥 مزامنة المستخدمين", callback_data: "ad|syncusers" }],
+    [{ text: "🗑 حذف تسجيلات", callback_data: "ad|deletevoices" }, { text: "🎙 بدء التسجيل", callback_data: "ad|record" }],
+  ] };
+}
+async function adminDashboardText(env) {
+  const stats = env.USERS ? await storeCall(env, { op: "adminStats" }) : { users: 0, voices: 0, pendingUploads: 0 };
+  const config = await driveConfig(env);
+  const drive = config ? "✅ مرتبط" : "❌ غير مرتبط";
+  return [
+    "🛠 <b>لوحة تحكم الأدمن</b>",
+    "",
+    `📚 كلمات القاموس: <b>${records.length.toLocaleString("en-US")}</b>`,
+    `👥 المستخدمون المسجلون: <b>${Number(stats.users ?? 0).toLocaleString("en-US")}</b>`,
+    `🎙 التسجيلات المعتمدة: <b>${Number(stats.voices ?? 0).toLocaleString("en-US")}</b>`,
+    `⏳ تسجيلات تنتظر الرفع: <b>${Number(stats.pendingUploads ?? 0).toLocaleString("en-US")}</b>`,
+    `☁️ Google Drive / Sheets: <b>${drive}</b>`,
+    "",
+    "الأوامر السريعة متاحة من الأزرار بالأسفل.",
+  ].join("\n");
+}
+async function sendAdminDashboard(env, chatId, messageId = undefined) {
+  const payload = { chat_id: chatId, text: await adminDashboardText(env), parse_mode: "HTML", reply_markup: adminDashboardMarkup() };
+  if (messageId != null) {
+    const edited = await telegram(env, "editMessageText", { ...payload, message_id: messageId });
+    if (edited?.ok || String(edited?.description ?? "").includes("not modified")) return;
+  }
+  await telegram(env, "sendMessage", payload);
+}
+async function handleAdminDashboardCallback(env, callback, ctx) {
+  if (!isAdmin(env, callback.from?.id)) return;
+  const chatId = callback.message?.chat?.id;
+  if (!chatId) return;
+  const action = String(callback.data ?? "").split("|")[1];
+  if (action === "refresh") {
+    await sendAdminDashboard(env, chatId, callback.message.message_id);
+    return;
+  }
+  if (action === "drive") {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: await driveStatusText(env), parse_mode: "HTML", disable_web_page_preview: true });
+    return;
+  }
+  if (action === "syncvoices") {
+    await inBackground(ctx, syncPendingVoices(env, chatId, recorderInfo(callback.from, await getUser(env, callback.from.id), callback.from.id)));
+    await sendAdminDashboard(env, chatId, callback.message.message_id);
+    return;
+  }
+  if (action === "syncusers") {
+    await inBackground(ctx, syncUsersBatch(env, chatId));
+    await sendAdminDashboard(env, chatId, callback.message.message_id);
+    return;
+  }
+  if (action === "deletevoices") { await askDeleteManyVoices(env, chatId, callback.from.id, await getUser(env, callback.from.id) ?? {}, "", true); return; }
+  if (action === "record") { await beginVoiceRecording(env, chatId, callback.from.id, await getUser(env, callback.from.id) ?? {}); }
+}
 async function handleUpdate(update, env, ctx) {
   if (update.inline_query) {
     await answerInline(env, update.inline_query);
@@ -2306,6 +2373,10 @@ async function handleUpdate(update, env, ctx) {
     const callback = update.callback_query;
     if (String(callback.data ?? "").startsWith("bc|")) {
       await handleBroadcastCallback(env, callback);
+      return;
+    }
+    if (String(callback.data ?? "").startsWith("ad|")) {
+      await handleAdminDashboardCallback(env, callback, ctx);
       return;
     }
     // Acknowledge the tap in the background so the answer is not delayed by a round trip.
@@ -2422,6 +2493,10 @@ async function handleUpdate(update, env, ctx) {
     }
     if (text === "/syncdrive") {
       await inBackground(ctx, syncPendingVoices(env, message.chat.id, recorderInfo(message.from, admin, userId)));
+      return;
+    }
+    if (text === "/admin" || text === "/dashboard") {
+      await sendAdminDashboard(env, message.chat.id);
       return;
     }
     if (text === "/botinfo") {

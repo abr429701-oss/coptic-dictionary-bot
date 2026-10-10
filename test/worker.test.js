@@ -73,6 +73,19 @@ test("/stats returns the number of dictionary records", async () => {
   assert.ok(calls[0].payload.text.includes(records.length.toLocaleString("en-US")));
 });
 
+test("admin dashboard shows statistics and management buttons", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: "/admin", chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+  const dashboard = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload;
+  assert.ok(dashboard);
+  assert.match(dashboard.text, /لوحة تحكم الأدمن/u);
+  assert.match(dashboard.text, /كلمات القاموس/u);
+  assert.match(JSON.stringify(dashboard.reply_markup), /مزامنة الأصوات/u);
+  assert.match(JSON.stringify(dashboard.reply_markup), /مزامنة المستخدمين/u);
+});
+
 test("an exact word is shown directly, without a suggestions list", async () => {
   const calls = [];
   fakeTelegramApi(calls);
