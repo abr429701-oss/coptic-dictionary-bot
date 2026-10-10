@@ -317,7 +317,7 @@ function upsertUsers_(users) {
   try {
     const spreadsheet = CONFIG.USERS_SHEET_ID ? SpreadsheetApp.openById(CONFIG.USERS_SHEET_ID) : openSpreadsheet_();
     let sheet = spreadsheet.getSheetByName(CONFIG.USERS_TAB);
-    const usersHeader = ["name", "username", "id", "joined_at", "registered_at", "blocked"];
+    const usersHeader = ["name", "username", "id", "joined_at", "registered_at", "blocked", "blocked_at"];
     if (!sheet) {
       sheet = spreadsheet.insertSheet(CONFIG.USERS_TAB, spreadsheet.getNumSheets());
       sheet.appendRow(usersHeader);
@@ -333,9 +333,9 @@ function upsertUsers_(users) {
     users.slice(0, 200).forEach(function (user) {
       const id = String(user.id == null ? "" : user.id); if (!/^\d+$/.test(id)) return;
       const username = user.username ? "@" + String(user.username).replace(/^@/, "") : "";
-      const target = rowOf[id]; const old = target ? sheet.getRange(target, 1, 1, 6).getValues()[0] : [];
-      const row = [user.name || old[0] || "", username || old[1] || "", id, user.joined_at || old[3] || "", user.registered_at || old[4] || "", user.blocked === true ? "نعم" : "لا"];
-      if (target) { sheet.getRange(target, 1, 1, 6).setValues([row]); updated++; }
+      const target = rowOf[id]; const old = target ? sheet.getRange(target, 1, 1, usersHeader.length).getValues()[0] : [];
+      const row = [user.name || old[0] || "", username || old[1] || "", id, user.joined_at || old[3] || "", user.registered_at || old[4] || "", user.blocked === true ? "نعم" : "لا", user.blocked_at || old[6] || ""];
+      if (target) { sheet.getRange(target, 1, 1, usersHeader.length).setValues([row]); updated++; }
       else { sheet.appendRow(row); rowOf[id] = sheet.getLastRow(); added++; }
     });
     return { ok: true, added: added, updated: updated };

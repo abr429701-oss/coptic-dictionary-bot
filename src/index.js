@@ -14,7 +14,7 @@ const BROADCAST_MAX_TRANSIENT_RETRIES = 5;
 const FIRST_TIME_TEXT =
   "مرحبًا بك! يبدو أنك تستخدم البوت لأول مرة, الرجاء إدخال اسمك ثلاثي للبدء في استخدام القاموس القبطي الناطق";
 const NAME_RETRY_TEXT = "الرجاء إدخال اسمك ثلاثيًا (ثلاث كلمات على الأقل) بالحروف فقط، مثل: مينا جرجس بشرى.";
-const HELP_TEXT = `${BOT_TITLE}\n\nأهلًا بك في القاموس.\n\nاكتب الكلمة مباشرة، مثل:\nⲁⲛⲁⲩ\nwater\nماء\nα\n\nسأبحث في القبطية والعربية والإنجليزية والفرنسية والألمانية واليونانية والنطق.\n\nاكتب الكلمة أو أول حروفها لتظهر لك اقتراحات بالكلمات التي تبدأ بها.\n\n⌨️ لا يوجد كيبورد قبطي على جهازك؟ أرسل /keyboard لتكتب الكلمة بالأزرار.`;
+const HELP_TEXT = `${BOT_TITLE}\n\nأهلًا بك في القاموس.\n\nاكتب الكلمة مباشرة، مثل:\nⲁⲛⲁⲩ\nwater\nماء\n\nسأبحث في القبطية والعربية والإنجليزية والفرنسية والألمانية والنطق.\n\nاكتب الكلمة أو أول حروفها لتظهر لك اقتراحات بالكلمات التي تبدأ بها.\n\n⌨️ لا يوجد كيبورد قبطي على جهازك؟ أرسل /keyboard لتكتب الكلمة بالأزرار.`;
 
 const ACCENT_MAP = { ὲ: "ⲉ", έ: "ⲉ", ὶ: "ⲓ", ί: "ⲓ", ὸ: "ⲟ", ό: "ⲟ", ὼ: "ⲱ", ώ: "ⲱ", ὴ: "ⲏ", ή: "ⲏ", ὰ: "ⲁ", ά: "ⲁ", ὺ: "ⲩ", ύ: "ⲩ" };
 const ALEF_MAP = { أ: "ا", إ: "ا", آ: "ا", ٱ: "ا", ى: "ي", ة: "ه" };
@@ -518,7 +518,25 @@ function findMatches(query) {
 }
 
 const TYPING_DELAY_MS = 0; // Telegram displays its native localized “typing…” indicator.
-
+const USER_COMMANDS = [
+  { command: "start", description: "بدء استخدام القاموس" },
+  { command: "help", description: "طريقة استخدام البوت" },
+  { command: "keyboard", description: "فتح الكيبورد القبطي" },
+  { command: "stats", description: "إحصائيات القاموس" },
+];
+const ADMIN_COMMANDS = [
+  ...USER_COMMANDS,
+  { command: "admin", description: "لوحة تحكم الأدمن" },
+];
+const commandMenuReady = new Set();
+async function ensureCommandMenu(env, userId) {
+  const admin = isAdmin(env, userId);
+  const key = admin ? "admin" : "user";
+  if (commandMenuReady.has(key)) return;
+  const payload = { commands: admin ? ADMIN_COMMANDS : USER_COMMANDS, ...(admin ? { scope: { type: "chat", chat_id: Number(userId) } } : {}) };
+  const result = await telegram(env, "setMyCommands", payload);
+  if (result?.ok) commandMenuReady.add(key);
+}
 async function telegram(env, method, payload) {
   const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
     method: "POST",
@@ -528,6 +546,9 @@ async function telegram(env, method, payload) {
   const result = await response.json();
   if (!response.ok || !result.ok) {
     console.error(`Telegram ${method} failed`, result.description ?? response.status);
+    if (result?.error_code === 403 || response.status === 403) {
+      await markUserBlocked(env, payload?.chat_id, result.description ?? "Telegram returned 403").catch(() => {});
+    }
   }
   return result;
 }
@@ -664,7 +685,10 @@ async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1, 
     if (voice.neural) form.append("voice", new Blob([voice.audio], { type: "audio/ogg" }), "word.ogg");
     else form.append("voice", new Blob([voice.audio], { type: "audio/mpeg" }), "word.mp3");
     const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVoice`, { method: "POST", body: form });
-    if (!response.ok) console.error("Telegram sendVoice failed", response.status);
+    if (!response.ok) {
+      console.error("Telegram sendVoice failed", response.status);
+      if (response.status === 403) await markUserBlocked(env, chatId, "sendVoice 403");
+    }
     else if (voice.neural && voice.wordId != null && env.USERS) {
       // Remember Telegram's file_id so this word is synthesized only once.
       const sent = await response.json().catch(() => null);
@@ -1193,8 +1217,8 @@ export class UserStore {
         await storage.put(`user:${userId}`, created);
         return Response.json({ created: true, user: created, total: (await storage.list({ prefix: "user:" })).size });
       }
-      let user = existing.blocked ? { ...existing, blocked: false } : existing;
-      let changed = false;
+      let user = existing.blocked ? { ...existing, blocked: false, blockedAt: undefined, blockedReason: undefined } : existing;
+      let changed = user !== existing;
       if (profile && (username !== (existing.username ?? "") || tgName !== (existing.tgName ?? ""))) {
         user = { ...user, username, tgName };
         changed = true;
@@ -1396,6 +1420,18 @@ function isValidFullName(value) {
   return name.split(" ").filter(Boolean).length >= 3;
 }
 
+function userReplyKeyboardMarkup() {
+  return {
+    keyboard: [
+      [{ text: "⌨️ الكيبورد القبطي" }, { text: "📚 المساعدة" }],
+      [{ text: "📊 إحصائيات القاموس" }, { text: "🔎 اكتب كلمة للبحث" }],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+    input_field_placeholder: "اكتب كلمة للبحث أو اضغط زرًا",
+  };
+}
+
 async function sendWelcome(env, chatId, name) {
   const caption =
     `مرحبًا بك يا ${escapeHtml(name)} في القاموس الرقمي الناطق للغة القبطية, تفضل الان بكتابة أي كلمة للبحث عنها`;
@@ -1405,15 +1441,17 @@ async function sendWelcome(env, chatId, name) {
     form.append("chat_id", String(chatId));
     form.append("caption", caption);
     form.append("parse_mode", "HTML");
+    form.append("reply_markup", JSON.stringify(userReplyKeyboardMarkup()));
     form.append("photo", new Blob([bytes], { type: "image/jpeg" }), "welcome.jpg");
     const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, { method: "POST", body: form });
     const result = await response.json().catch(() => ({}));
     if (response.ok && result.ok) return;
     console.error("Telegram sendPhoto failed", result.description ?? response.status);
+    if (response.status === 403 || result?.error_code === 403) await markUserBlocked(env, chatId, result.description ?? "sendPhoto 403");
   } catch (error) {
     console.error("Welcome photo failed", error instanceof Error ? error.message : "unknown error");
   }
-  await telegram(env, "sendMessage", { chat_id: chatId, text: caption, parse_mode: "HTML" });
+  await telegram(env, "sendMessage", { chat_id: chatId, text: caption, parse_mode: "HTML", reply_markup: userReplyKeyboardMarkup() });
 }
 
 // ---- Coptic reply keyboard ----
@@ -1954,6 +1992,7 @@ function userSheetRow(id, record, from = {}) {
     joined_at: record?.firstSeen ?? "",
     registered_at: record?.registeredAt ?? "",
     blocked: record?.blocked === true,
+    blocked_at: record?.blockedAt ?? "",
   };
 }
 
@@ -1971,6 +2010,22 @@ async function pushUsers(env, rows) {
     console.error("User sheet sync failed", error instanceof Error ? error.message : "unknown error");
     return { ok: false, error: error instanceof Error ? error.message : "unknown error" };
   }
+}
+async function markUserBlocked(env, chatId, reason = "Telegram 403") {
+  if (!env.USERS || chatId == null || !/^\d+$/u.test(String(chatId)) || Number(chatId) <= 0) return;
+  const userId = String(chatId);
+  const current = await getUser(env, userId);
+  if (current?.blocked === true) return;
+  const blockedAt = new Date().toISOString();
+  const updated = {
+    ...(current ?? {}),
+    blocked: true,
+    blockedAt,
+    blockedReason: String(reason).replace(/\s+/gu, " ").slice(0, 180),
+  };
+  await saveUser(env, userId, updated);
+  await pushUsers(env, [userSheetRow(userId, updated)]);
+  await notifyAdmins(env, `🚫 <b>مستخدم حظر البوت</b>\n🆔 <code>${escapeHtml(userId)}</code>\n🕒 ${escapeHtml(blockedAt)}\n📌 ${escapeHtml(updated.blockedReason)}`);
 }
 
 async function syncUsersBatch(env, chatId) {
@@ -2645,9 +2700,16 @@ async function handleUpdate(update, env, ctx) {
 
   const message = update.message;
   if (!message?.chat?.id) return;
-  const text = String(message.text ?? "").trim();
+  let text = String(message.text ?? "").trim();
   const userId = message.from?.id ?? message.chat.id;
   const isPrivate = (message.chat.type ?? "private") === "private";
+  const buttonCommands = {
+    "⌨️ الكيبورد القبطي": "/keyboard",
+    "📚 المساعدة": "/help",
+    "📊 إحصائيات القاموس": "/stats",
+  };
+  text = buttonCommands[text] ?? text;
+  if (text === "/" || text === "/start" || text.startsWith("/start ") || text === "/admin") inBackground(ctx, ensureCommandMenu(env, userId));
   const known = await registerOnFirstContact(env, message, userId, ctx);
   if (isAdmin(env, userId) && ["group", "supergroup"].includes(message.chat.type)
       && /^\/setarchive(?:@[^\s]+)?\s+here$/u.test(text)) {
@@ -2769,13 +2831,14 @@ async function handleUpdate(update, env, ctx) {
     return;
   }
   if (text === "/help") {
-    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: HELP_TEXT });
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: HELP_TEXT, reply_markup: userReplyKeyboardMarkup() });
     return;
   }
   if (text === "/stats") {
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
       text: `عدد سجلات القاموس المفهرسة: ${records.length.toLocaleString("en-US")}`,
+      reply_markup: userReplyKeyboardMarkup(),
     });
     return;
   }
