@@ -1416,26 +1416,40 @@ const COPTIC_KEY_ROWS = [
 ];
 const JINKIM_COMBINING = "\u0300";
 const KEY_JINKIM = "◌̀"; // dotted circle + combining grave: shows how the jinkim sits on a letter
-const COPTIC_KEYS = new Set([...COPTIC_KEY_ROWS.flat(), "`", KEY_JINKIM]);
-const KEY_SPACE = "␣ مسافة";
-const KEY_BACK = "⌫ حذف";
-const KEY_CLEAR = "🗑 مسح";
-const KEY_SEARCH = "🔎 بحث";
+const COPTIC_SHORTCUTS = ["ⲟⲩ", "ⲛⲉⲙ", "ⲡⲓ", "ⲉⲣ", "ⲛ̀", "ⲙ̀"];
+const COPTIC_KEYS = new Set([...COPTIC_KEY_ROWS.flat(), ...COPTIC_SHORTCUTS, "`", KEY_JINKIM]);
+const KEY_SPACE = "مسافة";
+const KEY_BACK = "⌫ حذف حرف";
+const KEY_CLEAR = "🗑 مسح الكل";
+const KEY_SEARCH = "🔎 ابحث الآن";
 const KEY_CLOSE = "✖️ إغلاق";
 const KEYBOARD_CONTROLS = new Set([KEY_SPACE, KEY_BACK, KEY_CLEAR, KEY_SEARCH, KEY_CLOSE]);
-const KEYBOARD_TITLE = "⌨️ الكيبورد القبطي\nاضغط الحروف لتكوين الكلمة ثم اضغط «🔎 بحث»";
+const KEYBOARD_TITLE = "⌨️ الكيبورد القبطي السهل\nاضغط الحروف أو الاختصارات الجاهزة، ثم «🔎 ابحث الآن»";
 const KEYBOARD_MAX_LENGTH = 40;
 
 function keyboardReplyMarkup() {
   const rows = COPTIC_KEY_ROWS.map((row) => row.map((text) => ({ text })));
   rows.push([{ text: KEY_JINKIM }, { text: KEY_SPACE }, { text: KEY_BACK }, { text: KEY_CLEAR }]);
   rows.push([{ text: KEY_SEARCH }, { text: KEY_CLOSE }]);
-  return {
-    keyboard: rows,
-    resize_keyboard: true,
-    is_persistent: true,
-    input_field_placeholder: "اضغط الحروف ثم 🔎 بحث",
-  };
+  return { keyboard: rows, resize_keyboard: true, is_persistent: true, input_field_placeholder: "اضغط الحروف ثم 🔎 بحث" };
+}
+function keyboardCallbackValue(value) {
+  return `k|${encodeURIComponent(value)}`;
+}
+function keyboardInlineMarkup() {
+  const rows = COPTIC_KEY_ROWS.map((row) => row.map((text) => ({ text, callback_data: keyboardCallbackValue(text) })));
+  rows.push(COPTIC_SHORTCUTS.map((text) => ({ text: `⚡ ${text}`, callback_data: keyboardCallbackValue(text) })));
+  rows.push([
+    { text: KEY_JINKIM, callback_data: keyboardCallbackValue(KEY_JINKIM) },
+    { text: KEY_SPACE, callback_data: keyboardCallbackValue(KEY_SPACE) },
+    { text: KEY_BACK, callback_data: keyboardCallbackValue(KEY_BACK) },
+    { text: KEY_CLEAR, callback_data: keyboardCallbackValue(KEY_CLEAR) },
+  ]);
+  rows.push([
+    { text: KEY_SEARCH, callback_data: keyboardCallbackValue(KEY_SEARCH) },
+    { text: KEY_CLOSE, callback_data: keyboardCallbackValue(KEY_CLOSE) },
+  ]);
+  return { inline_keyboard: rows };
 }
 
 function keyboardText(word) {
@@ -1448,7 +1462,11 @@ function isKeyboardInput(text) {
 
 function applyKeyboardAction(word, input) {
   const current = String(word ?? "");
-  if (input === KEY_BACK) return Array.from(current).slice(0, -1).join("");
+  if (input === KEY_BACK) {
+    const shortcut = COPTIC_SHORTCUTS.find((value) => current.endsWith(value));
+    if (shortcut) return current.slice(0, -shortcut.length);
+    return Array.from(current).slice(0, -1).join("");
+  }
   if (input === KEY_CLEAR) return "";
   if (input === KEY_SPACE) return current && !current.endsWith(" ") ? `${current} ` : current;
   if (input === KEY_JINKIM || input === "`") {
@@ -1461,11 +1479,43 @@ function applyKeyboardAction(word, input) {
   return current;
 }
 
+async function handleKeyboardCallback(env, callback) {
+  const chatId = callback.message?.chat?.id;
+  const messageId = callback.message?.message_id;
+  if (!chatId || !messageId) return;
+  let input = "";
+  try { input = decodeURIComponent(String(callback.data ?? "").slice(2)); } catch { return; }
+  const step = await storeCall(env, { op: "kbstep", userId: callback.from?.id ?? chatId, input });
+  if (!step.active) {
+    await telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text: keyboardText(""), reply_markup: keyboardInlineMarkup() });
+    await storeCall(env, { op: "kbset", userId: callback.from?.id ?? chatId, kb: { word: "", msgId: messageId } });
+    return;
+  }
+  const userId = callback.from?.id ?? chatId;
+  if (input === KEY_CLOSE) {
+    await storeCall(env, { op: "kbset", userId, kb: null });
+    await telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text: "تم إغلاق الكيبورد القبطي. أرسل /keyboard لفتحه مرة أخرى.", reply_markup: { inline_keyboard: [] } });
+    return;
+  }
+  if (input === KEY_SEARCH) {
+    const query = step.word.trim();
+    if (!query) {
+      await telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text: `${keyboardText("")}\n\nاكتب كلمة أولًا ثم اضغط «${KEY_SEARCH}».`, reply_markup: keyboardInlineMarkup() });
+      return;
+    }
+    await showTyping(env, chatId);
+    await sendSearch(env, chatId, query, 0);
+    await telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text: keyboardText(""), reply_markup: keyboardInlineMarkup() });
+    await storeCall(env, { op: "kbset", userId, kb: { word: "", msgId: messageId } });
+    return;
+  }
+  await telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text: keyboardText(step.word), reply_markup: keyboardInlineMarkup() });
+}
 async function startKeyboard(env, chatId, userId) {
   const sent = await telegram(env, "sendMessage", {
     chat_id: chatId,
     text: keyboardText(""),
-    reply_markup: keyboardReplyMarkup(),
+    reply_markup: keyboardInlineMarkup(),
   });
   await storeCall(env, { op: "kbset", userId, kb: { word: "", msgId: sent?.result?.message_id ?? null } });
 }
@@ -2377,6 +2427,10 @@ async function handleUpdate(update, env, ctx) {
     }
     if (String(callback.data ?? "").startsWith("ad|")) {
       await handleAdminDashboardCallback(env, callback, ctx);
+      return;
+    }
+    if (String(callback.data ?? "").startsWith("k|")) {
+      await handleKeyboardCallback(env, callback);
       return;
     }
     // Acknowledge the tap in the background so the answer is not delayed by a round trip.

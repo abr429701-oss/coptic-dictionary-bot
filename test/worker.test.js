@@ -520,68 +520,62 @@ async function kbSay(kvEnv, text, messageId = 5) {
 const edits = (calls) => calls.filter((call) => call.url.endsWith("/editMessageText")).map((call) => call.payload);
 const sent = (calls) => calls.filter((call) => call.url.endsWith("/sendMessage")).map((call) => call.payload);
 
-test("/keyboard sends a reply keyboard (not inline) with letters and controls", async () => {
+test("/keyboard sends an interactive Coptic keyboard with letters, shortcuts and controls", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const calls = await kbSay(kvEnv, "/keyboard");
   const message = sent(calls)[0];
-  assert.equal(message.reply_markup.inline_keyboard, undefined);
-  assert.equal(message.reply_markup.resize_keyboard, true);
-  const labels = message.reply_markup.keyboard.flat().map((button) => button.text);
-  for (const key of ["ⲁ", "ⲱ", "ϣ", "ϧ", "ϯ", "◌̀", "␣ مسافة", "⌫ حذف", "🗑 مسح", "🔎 بحث", "✖️ إغلاق"]) {
+  assert.ok(Array.isArray(message.reply_markup.inline_keyboard));
+  const labels = message.reply_markup.inline_keyboard.flat().map((button) => button.text);
+  for (const key of ["ⲁ", "ⲱ", "ϣ", "ϧ", "ϯ", "◌̀", "مسافة", "⌫ حذف حرف", "🗑 مسح الكل", "🔎 ابحث الآن", "✖️ إغلاق", "⚡ ⲟⲩ"]) {
     assert.ok(labels.includes(key), key);
   }
   assert.equal(kvEnv.USERS.store.get("user:31").kb.msgId, 900);
 });
-
-test("tapping keys collects the word, deletes the tap and edits one message", async () => {
+async function kbTap(kvEnv, data, messageId = 900) {
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ callback_query: { id: `kb-${messageId}`, data, from: { id: KB_USER }, message: { chat: { id: KB_USER }, message_id: messageId } } }), kvEnv);
+  return calls;
+}
+function kbData(calls, label) {
+  return sent(calls)[0].reply_markup.inline_keyboard.flat().find((button) => button.text === label).callback_data;
+}
+test("tapping interactive keys edits one composition message and supports shortcuts", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  await kbSay(kvEnv, "/keyboard");
-  let calls = await kbSay(kvEnv, "ⲁ", 11);
-  assert.ok(calls.some((call) => call.url.endsWith("/deleteMessage") && call.payload.message_id === 11));
-  assert.equal(edits(calls)[0].message_id, 900);
+  const initial = await kbSay(kvEnv, "/keyboard");
+  let calls = await kbTap(kvEnv, kbData(initial, "ⲁ"));
   assert.match(edits(calls)[0].text, /▸ ⲁ▏/u);
-  assert.equal(sent(calls).length, 0);
-
-  calls = await kbSay(kvEnv, "ϣ", 12);
-  assert.match(edits(calls)[0].text, /▸ ⲁϣ▏/u);
-  calls = await kbSay(kvEnv, "␣ مسافة", 13);
-  assert.match(edits(calls)[0].text, /▸ ⲁϣ ▏/u);
-  calls = await kbSay(kvEnv, "ⲃ", 14);
-  assert.match(edits(calls)[0].text, /▸ ⲁϣ ⲃ▏/u);
-  calls = await kbSay(kvEnv, "⌫ حذف", 15);
-  assert.match(edits(calls)[0].text, /▸ ⲁϣ ▏/u);
-  calls = await kbSay(kvEnv, "🗑 مسح", 16);
+  calls = await kbTap(kvEnv, kbData(initial, "⚡ ⲟⲩ"));
+  assert.match(edits(calls)[0].text, /▸ ⲁⲟⲩ▏/u);
+  calls = await kbTap(kvEnv, kbData(initial, "⌫ حذف حرف"));
+  assert.match(edits(calls)[0].text, /▸ ⲁ▏/u);
+  calls = await kbTap(kvEnv, kbData(initial, "🗑 مسح الكل"));
   assert.match(edits(calls)[0].text, /▸ ▏/u);
 });
-
-test("🔎 بحث searches the collected word then opens a fresh composition message", async () => {
+test("🔎 ابحث الآن searches the collected word and resets the composition", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  await kbSay(kvEnv, "/keyboard");
-  for (const letter of "ⲁⲃⲁϫⲓⲛⲓ") await kbSay(kvEnv, letter);
-  const calls = await kbSay(kvEnv, "🔎 بحث", 40);
+  const initial = await kbSay(kvEnv, "/keyboard");
+  for (const letter of "ⲁⲃⲁϫⲓⲛⲓ") await kbTap(kvEnv, kbData(initial, letter));
+  const calls = await kbTap(kvEnv, kbData(initial, "🔎 ابحث الآن"));
   assert.ok(calls.some((call) => call.url.endsWith("/sendChatAction")));
-  const messages = sent(calls);
-  assert.match(messages[0].text, /ⲁⲃⲁϫⲓⲛⲓ/u);
-  assert.match(messages.at(-1).text, /▸ ▏/u);
+  assert.ok(sent(calls).some((message) => /ⲁⲃⲁϫⲓⲛⲓ/u.test(message.text)));
+  assert.ok(edits(calls).some((message) => /▸ ▏/u.test(message.text)));
   assert.equal(kvEnv.USERS.store.get("user:31").kb.word, "");
 });
-
-test("🔎 بحث with no letters asks for a word and does not search", async () => {
+test("🔎 ابحث الآن with no letters asks for a word and does not search", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  await kbSay(kvEnv, "/keyboard");
-  const calls = await kbSay(kvEnv, "🔎 بحث");
-  assert.match(sent(calls)[0].text, /اكتب كلمة أولًا/u);
+  const initial = await kbSay(kvEnv, "/keyboard");
+  const calls = await kbTap(kvEnv, kbData(initial, "🔎 ابحث الآن"));
+  assert.match(edits(calls)[0].text, /اكتب كلمة أولًا/u);
   assert.ok(!calls.some((call) => call.url.endsWith("/sendChatAction")));
 });
-
-test("✖️ إغلاق ends the session and removes the keyboard", async () => {
+test("✖️ إغلاق ends the session and removes the inline keyboard", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  await kbSay(kvEnv, "/keyboard");
-  const calls = await kbSay(kvEnv, "✖️ إغلاق");
-  assert.equal(sent(calls)[0].reply_markup.remove_keyboard, true);
+  const initial = await kbSay(kvEnv, "/keyboard");
+  const calls = await kbTap(kvEnv, kbData(initial, "✖️ إغلاق"));
+  assert.match(edits(calls)[0].text, /تم إغلاق الكيبورد/u);
   assert.equal(kvEnv.USERS.store.get("user:31").kb, undefined);
 });
-
 test("without a keyboard session a typed letter is a normal search, and a real word still searches during a session", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   let calls = await kbSay(kvEnv, "ⲁⲃ");
