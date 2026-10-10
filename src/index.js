@@ -230,13 +230,9 @@ function pageCallback(page, query) {
   return prefix + truncateBytes(query, CALLBACK_DATA_MAX_BYTES - prefix.length);
 }
 
-function equalizeSuggestionLabels(labels, minimumWidth = 0) {
-  const width = Math.max(minimumWidth, ...labels.map((label) => [...String(label)].length), 0);
-  // Figure spaces keep Telegram inline buttons visually equal without changing callback data.
-  return labels.map((label) => String(label).padEnd(width, "\u2007"));
-}
-function moreButtonWidth(language = "ar") {
-  return [...String(MORE_BUTTON_TEXT[language] ?? MORE_BUTTON_TEXT.ar)].length;
+function equalizeSuggestionLabels(labels) {
+  // Telegram centers inline-button labels by default; do not add invisible padding that enlarges them.
+  return labels.map((label) => String(label));
 }
 function renderSuggestions(query, normalizedQuery, matches, requestedPage) {
   const ui = uiTextFor(query);
@@ -245,8 +241,7 @@ function renderSuggestions(query, normalizedQuery, matches, requestedPage) {
   const slice = matches.slice(page * SUGGESTION_PAGE_SIZE, (page + 1) * SUGGESTION_PAGE_SIZE);
   const languageQuery = uiLanguage(query) === "ar" ? "" : truncateBytes(query, CALLBACK_DATA_MAX_BYTES - 18);
   const labels = slice.map((index) => suggestionLabel(records[index], normalizedQuery));
-  const allWidth = Math.max(moreButtonWidth(uiLanguage(query)), ...matches.map((index) => [...suggestionLabel(records[index], normalizedQuery)].length));
-  const aligned = equalizeSuggestionLabels(labels, allWidth);
+  const aligned = equalizeSuggestionLabels(labels);
   const keyboard = slice.map((index, position) => {
     const part = matchedPartIndex(records[index], normalizedQuery);
     return [{
@@ -354,7 +349,7 @@ function meaningOptions(index, normalizedQuery = "", preferredPart = -1) {
 function moreMeaning(options, baseIndex, nextStep = 1, callbackFor = undefined, keepSize = false, language = "ar") {
   // Keep a blank terminal button so the last result has the same visual footprint.
   if (options.length <= nextStep) {
-    return { reply_markup: { inline_keyboard: [[{ text: "\u2007".repeat(moreButtonWidth(language)), callback_data: "noop" }]] } };
+    return { reply_markup: { inline_keyboard: [[{ text: "\u2007", callback_data: "noop" }]] } };
   }
   const firstPart = Math.max(0, options[0].part);
   const data = callbackFor?.(nextStep) ?? `n|${baseIndex}|${firstPart}|${nextStep}`;
@@ -483,8 +478,7 @@ function renderWordSuggestions(query, words, requestedPage) {
   const totalPages = Math.max(1, Math.ceil(words.length / SUGGESTION_PAGE_SIZE));
   const page = Math.max(0, Math.min(requestedPage, totalPages - 1));
   const visibleWords = words.slice(page * SUGGESTION_PAGE_SIZE, (page + 1) * SUGGESTION_PAGE_SIZE);
-  const allWidth = Math.max(moreButtonWidth(uiLanguage(query)), ...words.map((word) => [...word.label.slice(0, 48)].length));
-  const labels = equalizeSuggestionLabels(visibleWords.map((word) => word.label.slice(0, 48)), allWidth);
+  const labels = equalizeSuggestionLabels(visibleWords.map((word) => word.label.slice(0, 48)));
   const keyboard = visibleWords.map((word, position) => [{
     text: labels[position],
     callback_data: `w|${truncateBytes(word.key, CALLBACK_DATA_MAX_BYTES - 2)}`,
