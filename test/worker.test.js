@@ -544,6 +544,7 @@ test("tapping interactive keys edits one composition message and supports shortc
   const kvEnv = { ...env, USERS: fakeKv() };
   const initial = await kbSay(kvEnv, "/keyboard");
   let calls = await kbTap(kvEnv, kbData(initial, "ⲁ"));
+  assert.ok(calls.some((call) => call.url.endsWith("/answerCallbackQuery")));
   assert.match(edits(calls)[0].text, /▸ ⲁ▏/u);
   calls = await kbTap(kvEnv, kbData(initial, "⚡ ⲟⲩ"));
   assert.match(edits(calls)[0].text, /▸ ⲁⲟⲩ▏/u);

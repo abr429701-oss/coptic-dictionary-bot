@@ -1536,9 +1536,18 @@ async function handleKeyboardCallback(env, callback, ctx) {
   const chatId = callback.message?.chat?.id;
   const messageId = callback.message?.message_id;
   if (!chatId || !messageId) return;
+  // Acknowledge immediately so Telegram removes the loading spinner before any Durable Object/TTS work.
+  await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
   let input = "";
   try { input = decodeURIComponent(String(callback.data ?? "").slice(2)); } catch { return; }
-  const step = await storeCall(env, { op: "kbstep", userId: callback.from?.id ?? chatId, input });
+  let step;
+  try {
+    step = await storeCall(env, { op: "kbstep", userId: callback.from?.id ?? chatId, input });
+  } catch (error) {
+    console.error("Keyboard state failed", error instanceof Error ? error.message : "unknown error");
+    await telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text: "⚠️ أعد فتح الكيبورد القبطي بإرسال /keyboard.", reply_markup: keyboardInlineMarkup() });
+    return;
+  }
   if (!step.active) {
     await telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text: keyboardText(""), reply_markup: keyboardInlineMarkup() });
     await storeCall(env, { op: "kbset", userId: callback.from?.id ?? chatId, kb: { word: "", msgId: messageId } });
