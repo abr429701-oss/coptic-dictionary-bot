@@ -965,6 +965,11 @@ async function setCardVisibility(env, chatId, query, visible) {
   await storeCall(env, { op: "delete", key: `card:${record.id}` });
   await telegram(env, "sendMessage", { chat_id: chatId, text: `🗑️ تم إخفاء بطاقة «${record.coptic}». ستعود فقط عند تسجيل Voice جديد أو استخدام /card_show.` });
 }
+function widenResultText(value, minimumWidth = 36) {
+  const text = String(value ?? "");
+  const currentWidth = Math.max(...text.split("\n").map((line) => [...line].length), 0);
+  return currentWidth >= minimumWidth ? text : `${text}\n${"\u2007".repeat(minimumWidth - currentWidth)}`;
+}
 
 async function sendSearch(env, chatId, query, page = 0, messageId = undefined, ctx = undefined) {
   const cleanQuery = String(query ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, 160);
@@ -1002,7 +1007,7 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined, c
   const voiceRecord = voiceRecordForSearch(record, normalizedQuery);
   const voice = prepareWordVoice(env, voiceRecord, media, { skipRecorded: scriptKind(normalizedQuery) === "el" });
   const more = moreMeaning(options, matches[0], 1, undefined, true, uiLanguage(normalizedQuery));
-  const text = `${formatRecord(record, selected.part, normalizedQuery)}${more.notice ?? ""}`.slice(0, MAX_MESSAGE_LENGTH);
+  const text = widenResultText(`${formatRecord(record, selected.part, normalizedQuery)}${more.notice ?? ""}`).slice(0, MAX_MESSAGE_LENGTH);
   if (await sendCardEntry(env, chatId, record, text, media, more.reply_markup, cardLanguage)) {
     if (ctx?.waitUntil) ctx.waitUntil(sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery).catch((error) => console.error("Background voice failed", error instanceof Error ? error.message : "unknown error")));
     else await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery);
@@ -1037,7 +1042,7 @@ async function sendOption(env, chatId, options, baseIndex, step, fallback = unde
   const isGreekSearch = scriptKind(normalize(searchKey)) === "el";
   const voice = prepareWordVoice(env, voiceRecord, media, { skipRecorded: isGreekSearch });
   const more = moreMeaning(options, baseIndex, step + 1, callbackFor ?? (searchKey ? chainCallback(searchKey) : undefined), true, uiLanguage(searchKey));
-  const text = `${formatRecord(record, selected.part, searchKey)}${more.notice ?? ""}`.slice(0, MAX_MESSAGE_LENGTH);
+  const text = widenResultText(`${formatRecord(record, selected.part, searchKey)}${more.notice ?? ""}`).slice(0, MAX_MESSAGE_LENGTH);
   if (!(await sendCardEntry(env, chatId, record, text, media, more.reply_markup, cardLanguage))) {
     await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
   }
