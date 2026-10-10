@@ -5,7 +5,7 @@
 //
 // Reference targets:
 //   median F0: 183.91 Hz (used only when SOURCE_F0_HZ is supplied)
-//   RMS/loudness: about -17 dBFS (slightly louder than the reference)
+//   RMS/loudness: about -18 dBFS
 //   true peak: <= -3.1 dBFS
 //   spectral landmarks: 203.12 Hz peak, 334.02 Hz centroid, 375 Hz rolloff
 //   speech treatment: aggressive FFT denoise, dry mono signal, gentle compression
@@ -52,11 +52,8 @@ const filters = [
   // changing the speaker into a different person or adding artificial reverb.
   "equalizer=f=2500:t=q:w=0.8:g=1.4",
   "equalizer=f=4200:t=q:w=1.0:g=0.7",
-  // Deliberate, audible amplification for dictionary playback. loudnorm below
-  // keeps it controlled, so louder does not become clipping or harshness.
-  "volume=1.25",
-  "acompressor=threshold=-24dB:ratio=2.5:attack=12:release=180:makeup=2.0:knee=2",
-  "loudnorm=I=-17:TP=-3.1:LRA=7:linear=true:print_format=summary",
+  "acompressor=threshold=-21dB:ratio=2:attack=15:release=180:makeup=1.35:knee=2",
+  "loudnorm=I=-18:TP=-3.1:LRA=7:linear=true:print_format=summary",
 ].filter(Boolean).join(",");
 
 await run("ffmpeg", [
