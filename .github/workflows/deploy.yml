@@ -20,8 +20,7 @@ concurrency:
 
 jobs:
   sync:
-    # Pushes only run when CF_DEPLOY_ENABLED=true; schedule/manual always run.
-    if: ${{ github.event_name != 'push' || vars.CF_DEPLOY_ENABLED == 'true' }}
+    # Every push to main is deployed automatically; schedules also keep the dictionary fresh.
     runs-on: ubuntu-latest
     outputs:
       deploy: ${{ steps.decide.outputs.deploy }}
