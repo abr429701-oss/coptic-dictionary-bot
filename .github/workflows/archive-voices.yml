@@ -46,6 +46,20 @@ jobs:
         if: steps.cfg.outputs.ok == 'true'
         run: node scripts/archive_voices.mjs fetch archive-out
 
+      - name: Install FFmpeg
+        if: steps.cfg.outputs.ok == 'true'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - name: Process recordings against the reference profile
+        if: steps.cfg.outputs.ok == 'true'
+        run: |
+          mkdir -p audio-transformed
+          for input in archive-out/*.ogg; do
+            [ -e "$input" ] || continue
+            id="$(basename "$input" .ogg)"
+            node scripts/process_voice.mjs "$input" "audio-transformed/$id.ogg"
+          done
+
       - name: Upload with rclone
         id: upload
         if: steps.cfg.outputs.ok == 'true'
@@ -59,8 +73,31 @@ jobs:
           curl -fsSL https://rclone.org/install.sh | sudo bash
           printf '%s' "$RCLONE_CONFIG_B64" | base64 -d > rclone.conf
           rclone copy archive-out "$RCLONE_DEST" --config rclone.conf --include "*.ogg"
+          rclone copy audio-transformed "$RCLONE_DEST/transformed" --config rclone.conf --include "*.ogg"
           rm -f rclone.conf
           echo "stored=rclone" >> "$GITHUB_OUTPUT"
+
+      - name: Publish transformed audio branch
+        if: steps.cfg.outputs.ok == 'true'
+        env:
+          REMOTE: https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git
+        run: |
+          if git ls-remote --exit-code --heads "$REMOTE" audio-transformed >/dev/null 2>&1; then
+            git clone -q --depth 1 --branch audio-transformed "$REMOTE" transformed-publish
+            rm -rf transformed-publish/.git
+          else
+            mkdir -p transformed-publish
+          fi
+          cp audio-transformed/*.ogg transformed-publish/ 2>/dev/null || true
+          cd transformed-publish
+          git init -q
+          git checkout -q -b audio-transformed
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -q -m "Process recorded voices to reference profile"
+          git push -q -f "$REMOTE" audio-transformed
 
       - name: Keep the files as an artifact (when rclone is not configured)
         if: steps.upload.outputs.stored == 'artifact'

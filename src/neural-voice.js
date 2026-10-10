@@ -14,6 +14,9 @@ export const NEURAL_VOICE_VERSION = "v8";
 // Bump this whenever the external human-audio files are regenerated. This
 // prevents Telegram file_ids from an older voice build being reused forever.
 export const HUMAN_AUDIO_VERSION = "ipa-reader-matthew-v1";
+// Audio produced by the FFmpeg reference-profile workflow. The raw recording
+// remains the fallback so a delayed GitHub run never breaks dictionary speech.
+export const TRANSFORMED_AUDIO_VERSION = "reference-profile-v1";
 
 // -----------------------------------------------------------------------------
 // IPA normalization
@@ -331,6 +334,30 @@ export const humanAudioUrl = (env, id) =>
     env?.AUDIO_HUMAN_BASE_URL ||
     "https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/audio-human"
   ).replace(/\/+$/u, "")}/${encodeURIComponent(id)}.ogg?v=${encodeURIComponent(HUMAN_AUDIO_VERSION)}`;
+
+export const transformedAudioEnabled = (env) => env?.TRANSFORMED_AUDIO !== "off";
+
+export const transformedAudioUrl = (env, id) =>
+  `${(
+    env?.AUDIO_TRANSFORMED_BASE_URL ||
+    "https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/audio-transformed"
+  ).replace(/\/+$/u, "")}/${encodeURIComponent(id)}.ogg?v=${encodeURIComponent(TRANSFORMED_AUDIO_VERSION)}`;
+
+export async function fetchTransformedSpeech(env, record) {
+  if (!transformedAudioEnabled(env) || record?.id == null) return null;
+  try {
+    const response = await fetch(transformedAudioUrl(env, record.id), {
+      signal: AbortSignal.timeout(1800),
+    });
+    if (!response.ok) return null;
+    const audio = await response.arrayBuffer();
+    if (audio.byteLength < 4) return null;
+    const magic = new TextDecoder().decode(new Uint8Array(audio, 0, 4));
+    return magic === "OggS" ? audio : null;
+  } catch {
+    return null;
+  }
+}
 
 export async function fetchHumanSpeech(env, record) {
   if (!humanAudioEnabled(env) || record?.id == null) return null;
