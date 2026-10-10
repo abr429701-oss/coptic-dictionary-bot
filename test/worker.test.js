@@ -506,86 +506,8 @@ test("if the photo cannot be sent the welcome falls back to text", async () => {
   assert.match(calls.find((call) => call.url.endsWith("/sendMessage")).payload.text, /أبانوب سمير حنا/u);
 });
 
-const KB_USER = 31;
-
-async function kbSay(kvEnv, text, messageId = 5) {
-  const calls = [];
-  fakeTelegramApi(calls);
-  await worker.fetch(updateRequest({
-    message: { message_id: messageId, text, chat: { id: KB_USER }, from: { id: KB_USER } },
-  }), kvEnv);
-  return calls;
-}
-
 const edits = (calls) => calls.filter((call) => call.url.endsWith("/editMessageText")).map((call) => call.payload);
 const sent = (calls) => calls.filter((call) => call.url.endsWith("/sendMessage")).map((call) => call.payload);
-
-test("/keyboard sends an interactive Coptic keyboard with letters, shortcuts and controls", async () => {
-  const kvEnv = { ...env, USERS: fakeKv() };
-  const calls = await kbSay(kvEnv, "/keyboard");
-  const message = sent(calls)[0];
-  assert.ok(Array.isArray(message.reply_markup.inline_keyboard));
-  const labels = message.reply_markup.inline_keyboard.flat().map((button) => button.text);
-  for (const key of ["ⲁ", "ⲱ", "ϣ", "ϧ", "ϯ", "◌̀", "مسافة", "⌫ حذف حرف", "🗑 مسح الكل", "🔎 ابحث الآن", "✖️ إغلاق", "⚡ ⲟⲩ"]) {
-    assert.ok(labels.includes(key), key);
-  }
-  assert.equal(kvEnv.USERS.store.get("user:31").kb.msgId, 900);
-});
-async function kbTap(kvEnv, data, messageId = 900) {
-  const calls = [];
-  fakeTelegramApi(calls);
-  await worker.fetch(updateRequest({ callback_query: { id: `kb-${messageId}`, data, from: { id: KB_USER }, message: { chat: { id: KB_USER }, message_id: messageId } } }), kvEnv);
-  return calls;
-}
-function kbData(calls, label) {
-  return sent(calls)[0].reply_markup.inline_keyboard.flat().find((button) => button.text === label).callback_data;
-}
-test("tapping interactive keys edits one composition message and supports shortcuts", async () => {
-  const kvEnv = { ...env, USERS: fakeKv() };
-  const initial = await kbSay(kvEnv, "/keyboard");
-  let calls = await kbTap(kvEnv, kbData(initial, "ⲁ"));
-  assert.ok(calls.some((call) => call.url.endsWith("/answerCallbackQuery")));
-  assert.match(edits(calls)[0].text, /▸ ⲁ▏/u);
-  calls = await kbTap(kvEnv, kbData(initial, "⚡ ⲟⲩ"));
-  assert.match(edits(calls)[0].text, /▸ ⲁⲟⲩ▏/u);
-  calls = await kbTap(kvEnv, kbData(initial, "⌫ حذف حرف"));
-  assert.match(edits(calls)[0].text, /▸ ⲁ▏/u);
-  calls = await kbTap(kvEnv, kbData(initial, "🗑 مسح الكل"));
-  assert.match(edits(calls)[0].text, /▸ ▏/u);
-});
-test("🔎 ابحث الآن searches the collected word and resets the composition", async () => {
-  const kvEnv = { ...env, USERS: fakeKv() };
-  const initial = await kbSay(kvEnv, "/keyboard");
-  for (const letter of "ⲁⲃⲁϫⲓⲛⲓ") await kbTap(kvEnv, kbData(initial, letter));
-  const calls = await kbTap(kvEnv, kbData(initial, "🔎 ابحث الآن"));
-  assert.ok(calls.some((call) => call.url.endsWith("/sendChatAction")));
-  assert.ok(sent(calls).some((message) => /ⲁⲃⲁϫⲓⲛⲓ/u.test(message.text)));
-  assert.ok(edits(calls).some((message) => /▸ ▏/u.test(message.text)));
-  assert.equal(kvEnv.USERS.store.get("user:31").kb.word, "");
-});
-test("🔎 ابحث الآن with no letters asks for a word and does not search", async () => {
-  const kvEnv = { ...env, USERS: fakeKv() };
-  const initial = await kbSay(kvEnv, "/keyboard");
-  const calls = await kbTap(kvEnv, kbData(initial, "🔎 ابحث الآن"));
-  assert.match(edits(calls)[0].text, /اكتب كلمة أولًا/u);
-  assert.ok(!calls.some((call) => call.url.endsWith("/sendChatAction")));
-});
-test("✖️ إغلاق ends the session and removes the inline keyboard", async () => {
-  const kvEnv = { ...env, USERS: fakeKv() };
-  const initial = await kbSay(kvEnv, "/keyboard");
-  const calls = await kbTap(kvEnv, kbData(initial, "✖️ إغلاق"));
-  assert.match(edits(calls)[0].text, /تم إغلاق الكيبورد/u);
-  assert.equal(kvEnv.USERS.store.get("user:31").kb, undefined);
-});
-test("without a keyboard session a typed letter is a normal search, and a real word still searches during a session", async () => {
-  const kvEnv = { ...env, USERS: fakeKv() };
-  let calls = await kbSay(kvEnv, "ⲁⲃ");
-  assert.equal(sent(calls)[0].text, "اختر من الاقتراحات التالية:");
-  await kbSay(kvEnv, "/keyboard");
-  calls = await kbSay(kvEnv, TEST_QUERY);
-  assert.match(sent(calls)[0].text, new RegExp(`<b>Word:</b> ${TEST_QUERY.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`, "u"));
-  assert.match(sent(calls)[0].text, new RegExp(`<b>Meaning:</b> ${TEST_COPTIC.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`, "u"));
-});
 
 test("English, French and German translations search to the Coptic counterpart", async () => {
   for (const field of ["translation_en", "translation_fr", "translation_de"]) {
@@ -974,18 +896,6 @@ test("searching without the jinkim, with a backtick, or with the combining mark 
     const text = sent(calls)[0].text;
     assert.doesNotMatch(text, /لم أجد نتائج/u, typed);
   }
-});
-
-test("the keyboard jinkim key puts one combining mark on the previous letter", async () => {
-  const kvEnv = { ...env, USERS: fakeKv() };
-  await kbSay(kvEnv, "/keyboard");
-  let calls = await kbSay(kvEnv, "◌̀");
-  assert.equal(edits(calls).length, 0);
-  await kbSay(kvEnv, "ⲥ");
-  calls = await kbSay(kvEnv, "◌̀");
-  assert.match(edits(calls)[0].text, /▸ ⲥ\u0300▏/u);
-  calls = await kbSay(kvEnv, "◌̀");
-  assert.equal(edits(calls).length, 0);
 });
 
 test("every word has a permanent id; the same spelling shares one id and different spellings never do", () => {
