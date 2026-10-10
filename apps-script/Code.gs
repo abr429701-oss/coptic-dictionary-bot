@@ -20,6 +20,9 @@ const CONFIG = {
   SHARE_WITH_LINK: false,
   // Only this Telegram id may upload recordings. Leave empty to disable the check.
   ADMIN_ID: "813894692",
+  // Telegram users are synchronized to this tab in the same spreadsheet.
+  USERS_TAB: "User",
+  USERS_SHEET_ID: "",
 };
 
 const BAN_HEADER = [
@@ -48,6 +51,7 @@ function doPost(e) {
   try {
     const body = JSON.parse((e && e.postData && e.postData.contents) || "{}");
     if (body.action === "ping") return json_(ping_());
+    if (body.action === "users") return json_(upsertUsers_(body.users));
 
     // 🔒 Only the configured admin may upload recordings.
     if (CONFIG.ADMIN_ID) {
@@ -265,5 +269,51 @@ function recordInBan_(spreadsheet, info) {
     sheet.getRange(target, 1, 1, row.length).setValues([row]);
   } else {
     sheet.appendRow(row);
+  }
+}
+
+
+// Upserts Telegram users into the "User" tab, keyed by the Telegram id (column C).
+function upsertUsers_(users) {
+  if (!Array.isArray(users) || !users.length) return { ok: false, error: "users is missing" };
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const spreadsheet = CONFIG.USERS_SHEET_ID ? SpreadsheetApp.openById(CONFIG.USERS_SHEET_ID) : openSpreadsheet_();
+    let sheet = spreadsheet.getSheetByName(CONFIG.USERS_TAB);
+    if (!sheet) {
+      sheet = spreadsheet.insertSheet(CONFIG.USERS_TAB, spreadsheet.getNumSheets());
+      sheet.appendRow(["name", "username", "id", "joined_at", "registered_at", "updated_at"]);
+    }
+    const last = sheet.getLastRow();
+    const rowOf = {};
+    if (last > 1) {
+      sheet.getRange(2, 3, last - 1, 1).getValues().forEach(function (row, i) {
+        rowOf[String(row[0])] = i + 2;
+      });
+    }
+    const now = new Date();
+    let added = 0;
+    let updated = 0;
+    users.slice(0, 200).forEach(function (user) {
+      const id = String(user.id == null ? "" : user.id);
+      if (!/^\d+$/.test(id)) return;
+      const username = user.username ? "@" + String(user.username).replace(/^@/, "") : "";
+      const target = rowOf[id];
+      if (target) {
+        const old = sheet.getRange(target, 1, 1, 6).getValues()[0];
+        sheet.getRange(target, 1, 1, 6).setValues([[
+          user.name || old[0], username || old[1], id, old[3] || user.joined_at || "", user.registered_at || old[4], now,
+        ]]);
+        updated += 1;
+      } else {
+        sheet.appendRow([user.name || "", username, id, user.joined_at || "", user.registered_at || "", now]);
+        rowOf[id] = sheet.getLastRow();
+        added += 1;
+      }
+    });
+    return { ok: true, added: added, updated: updated };
+  } finally {
+    lock.releaseLock();
   }
 }

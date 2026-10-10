@@ -58,8 +58,11 @@ function build() {
   };
   const makeFolder = (name) => ({ id: `folder${folders.length + 1}`, name, getId() { return this.id; }, getName() { return this.name; }, isTrashed() { return false; },
     getUrl() { return `https://drive.google.com/drive/folders/${this.id}`; }, createFile: makeFile });
+  // Match the production Apps Script configuration: fixed folder and upload tab.
+  folders.push(makeFolder("dic_final"));
   const main = new FakeSheet("Dictionary", [["coptic", "greek"]]);
-  const sheets = [main];
+  const uploadSheet = new FakeSheet("upload");
+  const sheets = [main, uploadSheet];
   const spreadsheet = {
     getName: () => "Coptic dictionary", getSheets: () => sheets, getNumSheets: () => sheets.length,
     getSheetByName: (name) => sheets.find((sheet) => sheet.getName() === name) ?? null,
@@ -74,7 +77,7 @@ function build() {
       Access: { ANYONE_WITH_LINK: 1 }, Permission: { VIEW: 1 },
       getFoldersByName: (name) => { const hit = folders.filter((f) => f.name === name); let i = 0; return { hasNext: () => i < hit.length, next: () => hit[i++] }; },
       createFolder: (name) => { const folder = makeFolder(name); folders.push(folder); return folder; },
-      getFolderById: (id) => folders.find((f) => f.id === id),
+      getFolderById: (id) => folders[0],
       getFileById: (id) => { if (!files.has(id)) throw new Error("not found"); return files.get(id); },
     },
     SpreadsheetApp: { openById: () => spreadsheet },
@@ -86,7 +89,7 @@ function build() {
 }
 
 const audio = Buffer.from([79, 103, 103, 83, 1, 2, 3]).toString("base64");
-const upload = (extra = {}) => ({ action: "upload", id: 7, word: "ⲁⲧⲥ̀ϧⲁⲓ", audio_base64: audio, mime_type: "audio/ogg", file_id: "TG", duration: 3, ...extra });
+const upload = (extra = {}) => ({ action: "upload", id: 7, word: "ⲁⲧⲥ̀ϧⲁⲓ", audio_base64: audio, mime_type: "audio/ogg", file_id: "TG", duration: 3, by: { id: "813894692" }, ...extra });
 
 test("answers ping and GET with no password of any kind", () => {
   assert.equal(build().post({ action: "ping" }).ok, true);
@@ -97,13 +100,13 @@ test("ping creates/finds the folder and reports the spreadsheet", () => {
   const world = build();
   const result = world.post({ action: "ping" });
   assert.equal(result.ok, true);
-  assert.equal(result.folder.name, "Coptic Dictionary Voices");
-  assert.equal(result.sheet.tab, "Ban");
+  assert.equal(result.folder.name, "dic_final");
+  assert.equal(result.sheet.tab, "upload");
   world.post({ action: "ping" });
   assert.equal(world.folders.length, 1);
 });
 
-const by = { name: "مينا ميخائيل جرجس", id: "555", username: "mina" };
+const by = { name: "مينا ميخائيل جرجس", id: "813894692", username: "mina" };
 
 test("an upload saves <id>.ogg and writes one Ban row with the drive link, recorder name, id and username", () => {
   const world = build();
@@ -114,9 +117,9 @@ test("an upload saves <id>.ogg and writes one Ban row with the drive link, recor
   assert.deepEqual(file.blob.bytes, [79, 103, 103, 83, 1, 2, 3]);
   assert.equal(result.url, `https://drive.google.com/file/d/${result.file_id}/view?usp=drivesdk`);
 
-  const ban = world.sheets.find((sheet) => sheet.getName() === "Ban");
-  assert.deepEqual(ban.data[0], ["id", "word", "drive_url", "drive_file_id", "telegram_file_id", "duration_s", "full_name", "user_id", "username"]);
-  assert.deepEqual(ban.data[1], ["7", "ⲁⲧⲥ̀ϧⲁⲓ", result.url, result.file_id, "TG", 3, by.name, "555", "@mina"]);
+  const ban = world.sheets.find((sheet) => sheet.getName() === "upload");
+  assert.deepEqual(ban.data[0], ["id", "word", "drive_url", "drive_file_id", "telegram_file_id", "duration_s"]);
+  assert.deepEqual(ban.data[1], ["7", "ⲁⲧⲥ̀ϧⲁⲓ", result.url, result.file_id, "TG", 3]);
   assert.equal(world.sheets.some((sheet) => sheet.getName() === "Voices"), false);
 });
 
@@ -127,7 +130,7 @@ test("re-recording a word replaces its Ban row and moves the old file to trash",
   assert.notEqual(first.file_id, second.file_id);
   assert.equal(world.files.get(first.file_id).trashed, true);
   assert.equal(world.files.get(second.file_id).trashed, false);
-  const ban = world.sheets.find((sheet) => sheet.getName() === "Ban");
+  const ban = world.sheets.find((sheet) => sheet.getName() === "upload");
   assert.equal(ban.data.length, 2);
   assert.equal(ban.data[1][3], second.file_id);
 });

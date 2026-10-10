@@ -1634,7 +1634,7 @@ test("admin links an archive group and new recordings are posted there", async (
   const posted = calls.find((call) => call.url.endsWith("/sendVoice") && call.payload.chat_id === -1001234567890);
   assert.ok(posted, "the recording is posted to the archive group");
   assert.equal(posted.payload.voice, "archived-voice");
-  assert.match(posted.payload.caption, new RegExp(`^#${id}\\b`, "u"));
+  assert.match(posted.payload.caption, /^الكلمة:/u);
 
   await worker.fetch(updateRequest({ message: { text: "/setarchive off", chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
   calls.length = 0;
