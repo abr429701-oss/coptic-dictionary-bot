@@ -1589,7 +1589,8 @@ async function handleKeyboardInput(env, message, userId) {
 }
 
 function adminIds(env) {
-  return String(env.ADMIN_CHAT_ID ?? DEFAULT_ADMIN_IDS).split(",").map((item) => item.trim()).filter(Boolean);
+  // The owner explicitly requested a single fixed administrator identity.
+  return [DEFAULT_ADMIN_IDS];
 }
 
 function isAdmin(env, userId) {
@@ -2370,62 +2371,112 @@ async function sendBotInfo(env, chatId) {
   await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML" });
 }
 
-function adminDashboardMarkup() {
-  return { inline_keyboard: [
-    [{ text: "🔄 تحديث اللوحة", callback_data: "ad|refresh" }, { text: "☁️ حالة Drive", callback_data: "ad|drive" }],
+function adminMenuMarkup(page = "home") {
+  const back = [{ text: "⬅️ الرئيسية", callback_data: "ad|page|home" }];
+  if (page === "home") return { inline_keyboard: [
+    [{ text: "📊 الإحصاءات", callback_data: "ad|page|stats" }, { text: "🎙 الأصوات", callback_data: "ad|page|voices" }],
+    [{ text: "☁️ Drive وSheets", callback_data: "ad|page|drive" }, { text: "👥 المستخدمون", callback_data: "ad|page|users" }],
     [{ text: "⬆️ مزامنة الأصوات", callback_data: "ad|syncvoices" }, { text: "👥 مزامنة المستخدمين", callback_data: "ad|syncusers" }],
-    [{ text: "🗑 حذف تسجيلات", callback_data: "ad|deletevoices" }, { text: "🎙 بدء التسجيل", callback_data: "ad|record" }],
+    [{ text: "⚙️ أدوات النظام", callback_data: "ad|page|tools" }, { text: "🔄 تحديث", callback_data: "ad|refresh" }],
+  ] };
+  if (page === "stats") return { inline_keyboard: [
+    [{ text: "🔄 تحديث الإحصاءات", callback_data: "ad|page|stats" }], back,
+  ] };
+  if (page === "voices") return { inline_keyboard: [
+    [{ text: "🎙 تسجيل التالي", callback_data: "ad|record" }, { text: "🎯 اختيار كلمة", callback_data: "ad|recordchoose" }],
+    [{ text: "⏹ إيقاف التسجيل", callback_data: "ad|recordstop" }, { text: "⬆️ مزامنة الأصوات", callback_data: "ad|syncvoices" }],
+    [{ text: "🗑 حذف تسجيل واحد", callback_data: "ad|deleteone" }, { text: "🗑 حذف مجموعة", callback_data: "ad|deletemany" }],
+    [{ text: "⚠️ حذف كل التسجيلات", callback_data: "ad|deleteall" }], back,
+  ] };
+  if (page === "drive") return { inline_keyboard: [
+    [{ text: "📡 فحص Drive الآن", callback_data: "ad|drive" }, { text: "⬆️ مزامنة الأصوات", callback_data: "ad|syncvoices" }],
+    [{ text: "🔗 تغيير رابط Apps Script", callback_data: "ad|setdrive" }, { text: "🧹 إعادة ضبط الرابط", callback_data: "ad|resetdrive" }],
+    [{ text: "📦 إعداد مجموعة الأرشيف", callback_data: "ad|setarchive" }], back,
+  ] };
+  if (page === "users") return { inline_keyboard: [
+    [{ text: "👥 مزامنة المستخدمين", callback_data: "ad|syncusers" }, { text: "📢 إرسال جماعي", callback_data: "ad|broadcast" }],
+    [{ text: "📈 تقرير الاستخدام", callback_data: "ad|usage" }, { text: "🔄 تحديث المستخدمين", callback_data: "ad|page|users" }], back,
+  ] };
+  return { inline_keyboard: [
+    [{ text: "🤖 معلومات البوت", callback_data: "ad|botinfo" }, { text: "📈 تقرير الاستخدام", callback_data: "ad|usage" }],
+    [{ text: "🖼 إخفاء بطاقة كلمة", callback_data: "ad|cardhide" }, { text: "🖼 إظهار بطاقة كلمة", callback_data: "ad|cardshow" }],
+    [{ text: "📦 إعداد الأرشيف", callback_data: "ad|setarchive" }, { text: "🔄 تحديث اللوحة", callback_data: "ad|refresh" }], back,
   ] };
 }
-async function adminDashboardText(env) {
+async function adminDashboardText(env, page = "home") {
   const stats = env.USERS ? await storeCall(env, { op: "adminStats" }) : { users: 0, voices: 0, pendingUploads: 0 };
   const config = await driveConfig(env);
   const drive = config ? "✅ مرتبط" : "❌ غير مرتبط";
-  return [
-    "🛠 <b>لوحة تحكم الأدمن</b>",
-    "",
+  const common = [
     `📚 كلمات القاموس: <b>${records.length.toLocaleString("en-US")}</b>`,
     `👥 المستخدمون المسجلون: <b>${Number(stats.users ?? 0).toLocaleString("en-US")}</b>`,
-    `🎙 التسجيلات المعتمدة: <b>${Number(stats.voices ?? 0).toLocaleString("en-US")}</b>`,
-    `⏳ تسجيلات تنتظر الرفع: <b>${Number(stats.pendingUploads ?? 0).toLocaleString("en-US")}</b>`,
-    `☁️ Google Drive / Sheets: <b>${drive}</b>`,
-    "",
-    "الأوامر السريعة متاحة من الأزرار بالأسفل.",
-  ].join("\n");
+    `🎙 التسجيلات المحفوظة: <b>${Number(stats.voices ?? 0).toLocaleString("en-US")}</b>`,
+    `⏳ تنتظر الرفع: <b>${Number(stats.pendingUploads ?? 0).toLocaleString("en-US")}</b>`,
+    `☁️ Drive / Sheets: <b>${drive}</b>`,
+  ];
+  const titles = { home: "🛠 لوحة تحكم الأدمن", stats: "📊 إحصاءات القاموس والبوت", voices: "🎙 إدارة الأصوات", drive: "☁️ إدارة Google Drive وSheets", users: "👥 إدارة المستخدمين", tools: "⚙️ أدوات النظام" };
+  const extras = {
+    home: ["اختر القسم المطلوب؛ جميع وظائف الأدمن موجودة هنا."],
+    stats: ["✅ البيانات تُقرأ مباشرة من التخزين الحالي."],
+    voices: ["التسجيل الجديد يبقى مرتبطًا بمعرّف الكلمة، ثم يُرفع ويُزامن مع Drive وupload."],
+    drive: [config ? "الرابط مضبوط ويمكن فحص المصالحة أو تغييره." : "لم يتم ضبط رابط Apps Script بعد."],
+    users: ["المستخدمون الجدد والقدامى يمرون من نفس مسار المزامنة."],
+    tools: ["أدوات صيانة وتشخيص وإدارة البطاقات والأرشيف."],
+  };
+  return [`<b>${titles[page] ?? titles.home}</b>`, "", ...common, "", ...(extras[page] ?? extras.home)].join("\n");
 }
-async function sendAdminDashboard(env, chatId, messageId = undefined) {
-  const payload = { chat_id: chatId, text: await adminDashboardText(env), parse_mode: "HTML", reply_markup: adminDashboardMarkup() };
+async function sendAdminDashboard(env, chatId, messageId = undefined, page = "home") {
+  const payload = { chat_id: chatId, text: await adminDashboardText(env, page), parse_mode: "HTML", reply_markup: adminMenuMarkup(page) };
   if (messageId != null) {
     const edited = await telegram(env, "editMessageText", { ...payload, message_id: messageId });
     if (edited?.ok || String(edited?.description ?? "").includes("not modified")) return;
   }
   await telegram(env, "sendMessage", payload);
 }
+async function setAdminFlow(env, userId, flow) {
+  const user = (await getUser(env, userId)) ?? {};
+  await saveUser(env, userId, { ...user, adminFlow: flow });
+}
+async function clearAdminFlow(env, userId) {
+  const user = (await getUser(env, userId)) ?? {};
+  const { adminFlow, ...rest } = user;
+  await saveUser(env, userId, rest);
+}
+async function handleAdminFlow(env, message, userId, user, text) {
+  const flow = user?.adminFlow;
+  if (!flow || !text || text.startsWith("/")) return false;
+  await clearAdminFlow(env, userId);
+  if (flow === "setdrive") await setDriveConfig(env, message, text);
+  else if (flow === "setarchive") await setArchiveChat(env, message, text);
+  else if (flow === "deleteone") await askDeleteVoice(env, message.chat.id, text);
+  else if (flow === "deletemany") await askDeleteManyVoices(env, message.chat.id, userId, user, text);
+  else if (flow === "cardhide") await setCardVisibility(env, message.chat.id, text, false);
+  else if (flow === "cardshow") await setCardVisibility(env, message.chat.id, text, true);
+  return true;
+}
 async function handleAdminDashboardCallback(env, callback, ctx) {
   if (!isAdmin(env, callback.from?.id)) return;
   const chatId = callback.message?.chat?.id;
   if (!chatId) return;
-  const action = String(callback.data ?? "").split("|")[1];
-  if (action === "refresh") {
-    await sendAdminDashboard(env, chatId, callback.message.message_id);
-    return;
-  }
-  if (action === "drive") {
-    await telegram(env, "sendMessage", { chat_id: chatId, text: await driveStatusText(env), parse_mode: "HTML", disable_web_page_preview: true });
-    return;
-  }
-  if (action === "syncvoices") {
-    await inBackground(ctx, syncPendingVoices(env, chatId, recorderInfo(callback.from, await getUser(env, callback.from.id), callback.from.id)));
-    await sendAdminDashboard(env, chatId, callback.message.message_id);
-    return;
-  }
-  if (action === "syncusers") {
-    await inBackground(ctx, syncUsersBatch(env, chatId));
-    await sendAdminDashboard(env, chatId, callback.message.message_id);
-    return;
-  }
-  if (action === "deletevoices") { await askDeleteManyVoices(env, chatId, callback.from.id, await getUser(env, callback.from.id) ?? {}, "", true); return; }
-  if (action === "record") { await beginVoiceRecording(env, chatId, callback.from.id, await getUser(env, callback.from.id) ?? {}); }
+  await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
+  const parts = String(callback.data ?? "").split("|");
+  const action = parts[1];
+  const page = parts[2] ?? "home";
+  if (action === "page") { await sendAdminDashboard(env, chatId, callback.message.message_id, page); return; }
+  if (action === "refresh") { await sendAdminDashboard(env, chatId, callback.message.message_id, "home"); return; }
+  if (action === "drive") { await telegram(env, "sendMessage", { chat_id: chatId, text: await driveStatusText(env), parse_mode: "HTML", disable_web_page_preview: true }); return; }
+  if (action === "syncvoices") { await telegram(env, "sendMessage", { chat_id: chatId, text: "⏳ بدأت مزامنة الأصوات مع Drive وupload…" }); await inBackground(ctx, syncPendingVoices(env, chatId, recorderInfo(callback.from, await getUser(env, callback.from.id), callback.from.id))); return; }
+  if (action === "syncusers") { await telegram(env, "sendMessage", { chat_id: chatId, text: "⏳ بدأت مزامنة المستخدمين القدامى والجدد…" }); await inBackground(ctx, syncUsersBatch(env, chatId)); return; }
+  if (action === "record") { await beginVoiceRecording(env, chatId, callback.from.id, await getUser(env, callback.from.id) ?? {}); return; }
+  if (action === "recordchoose") { await beginVoiceChoice(env, chatId, callback.from.id, await getUser(env, callback.from.id) ?? {}); return; }
+  if (action === "recordstop") { await stopVoiceRecording(env, chatId, callback.from.id, await getUser(env, callback.from.id) ?? {}); return; }
+  if (action === "deleteall") { await askDeleteManyVoices(env, chatId, callback.from.id, await getUser(env, callback.from.id) ?? {}, "", true); return; }
+  const prompts = { deleteone: ["🗑 أرسل كلمة واحدة لحذف تسجيلها:", "deleteone"], deletemany: ["🗑 أرسل الكلمات مفصولة بعلامة | أو فاصلة:", "deletemany"], setdrive: ["🔗 أرسل رابط Apps Script المنتهي بـ /exec:", "setdrive"], setarchive: ["📦 أرسل رقم المجموعة، أو off لإيقاف الأرشيف:", "setarchive"], cardhide: ["🖼 أرسل الكلمة لإخفاء بطاقتها:", "cardhide"], cardshow: ["🖼 أرسل الكلمة لإظهار بطاقتها:", "cardshow"] };
+  if (prompts[action]) { await setAdminFlow(env, callback.from.id, prompts[action][1]); await telegram(env, "sendMessage", { chat_id: chatId, text: prompts[action][0] }); return; }
+  if (action === "resetdrive") { await setDriveConfig(env, { chat: { id: chatId } }, "reset"); return; }
+  if (action === "broadcast") { await beginBroadcast(env, chatId, callback.from.id, await getUser(env, callback.from.id) ?? {}); return; }
+  if (action === "usage") { await sendUsageReport(env, chatId); return; }
+  if (action === "botinfo") { await sendBotInfo(env, chatId); return; }
 }
 async function handleUpdate(update, env, ctx) {
   if (update.inline_query) {
@@ -2618,6 +2669,7 @@ async function handleUpdate(update, env, ctx) {
       await stopVoiceRecording(env, message.chat.id, userId, admin ?? {});
       return;
     }
+    if (await handleAdminFlow(env, message, userId, admin, text)) return;
     if (admin?.voiceRec && (message.voice || message.audio)) {
       await captureVoiceRecording(env, message, userId, admin, ctx);
       return;
