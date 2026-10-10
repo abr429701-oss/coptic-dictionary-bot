@@ -1479,6 +1479,7 @@ const KEY_CLOSE = "✖️ إغلاق";
 const KEYBOARD_CONTROLS = new Set([KEY_SPACE, KEY_BACK, KEY_CLEAR, KEY_SEARCH, KEY_CLOSE]);
 const KEYBOARD_TITLE = "⌨️ الكيبورد القبطي السهل\nاضغط الحروف أو الاختصارات الجاهزة، ثم «🔎 ابحث الآن»";
 const KEYBOARD_MAX_LENGTH = 40;
+const keyboardFallbackSessions = new Map();
 
 function keyboardReplyMarkup() {
   const rows = COPTIC_KEY_ROWS.map((row) => row.map((text) => ({ text })));
@@ -1532,6 +1533,34 @@ function applyKeyboardAction(word, input) {
   return current;
 }
 
+async function keyboardStep(env, userId, input, fallbackMessageText = "") {
+  const key = String(userId);
+  try {
+    const result = await storeCall(env, { op: "kbstep", userId, input });
+    if (result?.active) {
+      keyboardFallbackSessions.set(key, { word: result.word, msgId: result.msgId });
+      return result;
+    }
+  } catch (error) {
+    console.error("Keyboard state failed", error instanceof Error ? error.message : "unknown error");
+  }
+  const fallback = keyboardFallbackSessions.get(key) ?? {
+    word: /^.*▸\s(.*?)▏/su.exec(String(fallbackMessageText))?.[1] ?? "",
+    msgId: null,
+  };
+  const word = applyKeyboardAction(fallback.word, input);
+  keyboardFallbackSessions.set(key, { word, msgId: fallback.msgId });
+  return { active: true, word, previous: fallback.word, msgId: fallback.msgId };
+}
+
+async function keyboardSet(env, userId, kb) {
+  const key = String(userId);
+  if (kb) keyboardFallbackSessions.set(key, kb);
+  else keyboardFallbackSessions.delete(key);
+  try { return await storeCall(env, { op: "kbset", userId, kb }); }
+  catch (error) { console.error("Keyboard state set failed", error instanceof Error ? error.message : "unknown error"); return { ok: false }; }
+}
+
 async function handleKeyboardCallback(env, callback, ctx) {
   const chatId = callback.message?.chat?.id;
   const messageId = callback.message?.message_id;
@@ -1540,22 +1569,15 @@ async function handleKeyboardCallback(env, callback, ctx) {
   await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
   let input = "";
   try { input = decodeURIComponent(String(callback.data ?? "").slice(2)); } catch { return; }
-  let step;
-  try {
-    step = await storeCall(env, { op: "kbstep", userId: callback.from?.id ?? chatId, input });
-  } catch (error) {
-    console.error("Keyboard state failed", error instanceof Error ? error.message : "unknown error");
-    await telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text: "⚠️ أعد فتح الكيبورد القبطي بإرسال /keyboard.", reply_markup: keyboardInlineMarkup() });
-    return;
-  }
+  const userId = callback.from?.id ?? chatId;
+  const step = await keyboardStep(env, userId, input, callback.message?.text);
   if (!step.active) {
     await telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text: keyboardText(""), reply_markup: keyboardInlineMarkup() });
-    await storeCall(env, { op: "kbset", userId: callback.from?.id ?? chatId, kb: { word: "", msgId: messageId } });
+    await keyboardSet(env, userId, { word: "", msgId: messageId });
     return;
   }
-  const userId = callback.from?.id ?? chatId;
   if (input === KEY_CLOSE) {
-    await storeCall(env, { op: "kbset", userId, kb: null });
+    await keyboardSet(env, userId, null);
     await telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text: "تم إغلاق الكيبورد القبطي. أرسل /keyboard لفتحه مرة أخرى.", reply_markup: { inline_keyboard: [] } });
     return;
   }
@@ -1568,7 +1590,7 @@ async function handleKeyboardCallback(env, callback, ctx) {
     await showTyping(env, chatId);
     await sendSearch(env, chatId, query, 0, undefined, ctx);
     await telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text: keyboardText(""), reply_markup: keyboardInlineMarkup() });
-    await storeCall(env, { op: "kbset", userId, kb: { word: "", msgId: messageId } });
+    await keyboardSet(env, userId, { word: "", msgId: messageId });
     return;
   }
   await telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text: keyboardText(step.word), reply_markup: keyboardInlineMarkup() });
@@ -1579,7 +1601,7 @@ async function startKeyboard(env, chatId, userId) {
     text: keyboardText(""),
     reply_markup: keyboardInlineMarkup(),
   });
-  await storeCall(env, { op: "kbset", userId, kb: { word: "", msgId: sent?.result?.message_id ?? null } });
+  await keyboardSet(env, userId, { word: "", msgId: sent?.result?.message_id ?? null });
 }
 
 async function handleKeyboardInput(env, message, userId, ctx) {
@@ -1588,7 +1610,7 @@ async function handleKeyboardInput(env, message, userId, ctx) {
   const dropTap = () => telegram(env, "deleteMessage", { chat_id: chatId, message_id: message.message_id });
 
   if (text === KEY_CLOSE) {
-    const state = await storeCall(env, { op: "kbset", userId, kb: null });
+    const state = await keyboardSet(env, userId, null);
     await dropTap();
     if (state?.previous?.msgId) {
       await telegram(env, "deleteMessage", { chat_id: chatId, message_id: state.previous.msgId });
@@ -1601,7 +1623,7 @@ async function handleKeyboardInput(env, message, userId, ctx) {
     return;
   }
 
-  const step = await storeCall(env, { op: "kbstep", userId, input: text });
+  const step = await keyboardStep(env, userId, text);
   if (!step.active) {
     // A leftover keyboard button with no active session: start a fresh session.
     await dropTap();
@@ -1620,7 +1642,7 @@ async function handleKeyboardInput(env, message, userId, ctx) {
     await sendSearch(env, chatId, query, 0, undefined, ctx);
     // Continue below the results with a fresh, empty composition message.
     const sent = await telegram(env, "sendMessage", { chat_id: chatId, text: keyboardText("") });
-    await storeCall(env, { op: "kbset", userId, kb: { word: "", msgId: sent?.result?.message_id ?? null } });
+    await keyboardSet(env, userId, { word: "", msgId: sent?.result?.message_id ?? null });
     return;
   }
 
@@ -1633,7 +1655,7 @@ async function handleKeyboardInput(env, message, userId, ctx) {
   if (!edit?.ok && !String(edit?.description ?? "").includes("not modified")) {
     // The composition message was deleted by the user: recreate it.
     const sent = await telegram(env, "sendMessage", { chat_id: chatId, text: keyboardText(step.word) });
-    await storeCall(env, { op: "kbset", userId, kb: { word: step.word, msgId: sent?.result?.message_id ?? null } });
+    await keyboardSet(env, userId, { word: step.word, msgId: sent?.result?.message_id ?? null });
   }
 }
 
@@ -2919,7 +2941,7 @@ async function handleUpdate(update, env, ctx) {
       }
       return;
     }
-    if (user?.kb && isKeyboardInput(text)) {
+    if ((user?.kb || keyboardFallbackSessions.has(String(userId))) && isKeyboardInput(text)) {
       await handleKeyboardInput(env, message, userId, ctx);
       return;
     }
