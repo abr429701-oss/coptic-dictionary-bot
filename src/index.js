@@ -92,12 +92,11 @@ const SUGGESTION_PAGE_SIZE = 10;
 const SUGGESTION_TITLE = "اختر من الاقتراحات التالية:";
 const SHORT_QUERY_MAX = 2;
 const MORE_BUTTON_TEXT = {
-  ar: "هناك معنى آخر للكلمة، اضغط هنا للعرض",
-  en: "There is another meaning for this word, click here to view",
-  fr: "Il existe un autre sens pour ce mot, cliquez ici pour l’afficher",
-  de: "Es gibt eine weitere Bedeutung für dieses Wort, hier klicken zum Anzeigen",
+  ar: "اعرض المزيد",
+  en: "Show more",
+  fr: "Afficher plus",
+  de: "Mehr anzeigen",
 };
-const END_LABEL = { ar: "انتهت المعاني", en: "No more meanings", fr: "Plus de sens disponible", de: "Keine weiteren Bedeutungen" };
 const UI_TEXT = {
   ar: { word: "الكلمة", meaning: "المعنى", kind: "النوع", origin: "الأصل", more: "هناك معنى آخر للكلمة التي بحثت بها", next: "اضغط هنا لعرضه", end: "انتهت المعاني المتاحة لهذه الكلمة", choose: "اختر من الاقتراحات التالية:", previous: "السابق", pageNext: "التالي", noResult: "القاموس قيد التطوير حاليًا وسيتم إضافة معنى هذه الكلمة لاحقًا" },
   en: { word: "Word", meaning: "Meaning", kind: "Part of speech", origin: "Origin", more: "There is another meaning for the word you searched", next: "Click here to view it", end: "No more meanings are available for this word", choose: "Choose from the following suggestions:", previous: "Previous", pageNext: "Next", noResult: "The dictionary is still under development; this word will be added later" },
@@ -342,10 +341,8 @@ function meaningOptions(index, normalizedQuery = "", preferredPart = -1) {
 // The button walks one fixed list of meanings: each meaning is shown once, and the last one has no button.
 // callback: n|<word row>|<first meaning part>|<step to show next>  (the list is rebuilt the same way every time).
 function moreMeaning(options, baseIndex, nextStep = 1, callbackFor = undefined, keepSize = false, language = "ar") {
-  if (options.length <= nextStep) {
-    if (!keepSize) return {};
-    return { notice: `\n\n<b>${END_LABEL[language] ?? END_LABEL.ar}</b>` };
-  }
+  // The last meaning is intentionally clean: no dead-end "no more meanings" label.
+  if (options.length <= nextStep) return {};
   const firstPart = Math.max(0, options[0].part);
   const data = callbackFor?.(nextStep) ?? `n|${baseIndex}|${firstPart}|${nextStep}`;
   return {
@@ -551,9 +548,13 @@ function speechSpelling(record) {
   // Prefer the sheet's IPA pronunciation, converted to an English-friendly
   // phoneme spelling. Google Translate TTS does not parse IPA syntax itself.
   const ipa = String(record?.pronunciation || "").trim();
-  const sheetSpelling = String(record?.english || record?.phonetic || "").trim();
+  // Never fall back to the English gloss: it makes Greek searches speak the
+  // translation instead of the Coptic headword. IPA is preferred; when the
+  // sheet has no IPA, use the Coptic spelling as the only remaining source.
+  const copticSpelling = String(record?.coptic || "").trim();
+  const sheetSpelling = String(record?.phonetic || "").trim();
   const usesIpa = Boolean(ipa);
-  let word = (ipa || sheetSpelling).trim();
+  let word = (ipa || sheetSpelling || copticSpelling).trim();
   word = word
     .replaceAll("`", "")
     .replaceAll("ü", "u")

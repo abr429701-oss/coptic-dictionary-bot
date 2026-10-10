@@ -197,7 +197,7 @@ test("a single result shows only word, meaning, kind and origin with no heading"
   assert.ok(text.startsWith("<b>Word:</b> "));
   assert.match(text, /<b>Meaning:<\/b> /u);
   assert.doesNotMatch(text, /القاموس القبطي|نتائج|الصفحة|اليونانية|النطق|التهجئة|الجنس|الإنجليزية|كلمات مرتبطة/u);
-  assert.match(text, /No more meanings/u);
+  assert.doesNotMatch(text, /No more meanings|No more meanings are available/u);
   assert.equal(calls.find((call) => call.url.endsWith("/sendMessage"))?.payload.reply_markup, undefined);
 });
 
@@ -280,7 +280,7 @@ test("multiple meanings are shown separately with a button for the next meaning"
   assert.match(first.text, /المعنى/u);
   assert.doesNotMatch(first.text, /هناك معنى آخر للكلمة التي بحثت بها/u);
   const next = first.reply_markup.inline_keyboard[0][0];
-  assert.equal(next.text, "هناك معنى آخر للكلمة، اضغط هنا للعرض");
+  assert.equal(next.text, "اعرض المزيد");
 
   const secondCalls = [];
   fakeTelegramApi(secondCalls);
@@ -320,8 +320,7 @@ test("the next-meaning button shows every meaning exactly once and then stops", 
     }
     assert.equal(data, undefined, `row ${index}: the terminal button callback leaked`);
     if (shown.length > 1) {
-      assert.match(finalText, /انتهت المعاني/u);
-      assert.doesNotMatch(finalText, /انتهت المعاني المتاحة/u);
+      assert.doesNotMatch(finalText, /انتهت المعاني|No more meanings|Plus de sens|Keine weiteren Bedeutungen/u);
     }
     assert.equal(new Set(shown).size, shown.length, `row ${index}: a meaning was shown twice: ${shown.join(" | ")}`);
     longest = Math.max(longest, shown.length);
@@ -418,7 +417,7 @@ test("several different Coptic words for one Arabic word are shown one after ano
   assert.ok(shown.length >= 2);
   assert.equal(new Set(shown.map((entry) => entry.split("|")[0])).size, 1, `the searched word changed: ${shown.join(" / ")}`);
   assert.equal(new Set(shown.map((entry) => entry.split("|")[1])).size, shown.length, `a counterpart repeated: ${shown.join(" / ")}`);
-  assert.match(sent.text, /انتهت المعاني/u);
+  assert.doesNotMatch(sent.text, /انتهت المعاني|No more meanings|Plus de sens|Keine weiteren Bedeutungen/u);
   assert.equal(sent.reply_markup, undefined);
 });
 
@@ -674,6 +673,19 @@ test("Greek lookup bypasses a mismatched manual recording and speaks the Coptic 
   assert.ok(!calls.some((call) => call.url.endsWith("/sendVoice") && call.payload?.voice === "wrong-english-recording"));
   const spoken = new URL(tts.url).searchParams.get("q") ?? "";
   assert.equal(spoken.toLowerCase().includes(String(record.english).toLowerCase()), false, "speech must not be generated from the English gloss");
+});
+test("Greek lookup without IPA never falls back to the English gloss", async () => {
+  const record = records.find((item) => String(item.greek ?? "").split(/[،,]/u)[0].trim().length > 2 && !String(item.pronunciation ?? "").trim() && String(item.coptic ?? "").trim() && String(item.english ?? "").trim());
+  assert.ok(record?.greek && record.coptic && record.english, "dictionary fixture must contain a Greek entry without IPA");
+  const query = String(record.greek).split(/[،,]/u)[0].trim();
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: query, chat: { id: 570 }, from: { id: 570 } } }), env);
+  const tts = calls.find((call) => call.url.includes("translate_tts"));
+  assert.ok(tts, "Greek search should use the generated speech fallback");
+  const spoken = new URL(tts.url).searchParams.get("q") ?? "";
+  assert.match(spoken, new RegExp(String(record.coptic).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+  assert.equal(spoken.toLowerCase().includes(String(record.english).toLowerCase()), false);
 });
 
 test("a translation query does not match inside a longer phrase", async () => {
