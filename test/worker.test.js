@@ -211,7 +211,7 @@ test("a single result shows only word, meaning, kind and origin with no heading"
   assert.match(text, /<b>Meaning:<\/b> /u);
   assert.doesNotMatch(text, /القاموس القبطي|نتائج|الصفحة|اليونانية|النطق|التهجئة|الجنس|الإنجليزية|كلمات مرتبطة/u);
   assert.doesNotMatch(text, /No more meanings|No more meanings are available/u);
-  assert.equal(calls.find((call) => call.url.endsWith("/sendMessage"))?.payload.reply_markup, undefined);
+  assert.ok(calls.find((call) => call.url.endsWith("/sendMessage"))?.payload.reply_markup?.inline_keyboard?.[0]?.[0]?.text.trim() === "");
 });
 
 test("tapping a suggestion from an Arabic search shows only the searched meaning", async () => {
@@ -329,7 +329,7 @@ test("the next-meaning button shows every meaning exactly once and then stops", 
       finalText = sent.text;
       shown.push(meaningLine(sent.text));
     data = sent.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data;
-    if (data === "e") data = undefined;
+    if (data === "e" || data === "noop") data = undefined;
     }
     assert.equal(data, undefined, `row ${index}: the terminal button callback leaked`);
     if (shown.length > 1) {
@@ -421,7 +421,7 @@ test("several different Coptic words for one Arabic word are shown one after ano
   for (let tap = 0; tap < 80; tap += 1) {
     shown.push(sent.text.split("\n").slice(0, 2).join("|"));
     const data = sent.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data;
-    if (!data || data === "e") break;
+    if (!data || data === "e" || data === "noop") break;
     calls = [];
     fakeTelegramApi(calls);
     await worker.fetch(updateRequest({ callback_query: { id: `chain-${tap}`, data, message: { chat: { id: 22 }, message_id: tap + 1, date: 1728000000 } } }), kvEnv);
@@ -431,7 +431,7 @@ test("several different Coptic words for one Arabic word are shown one after ano
   assert.equal(new Set(shown.map((entry) => entry.split("|")[0])).size, 1, `the searched word changed: ${shown.join(" / ")}`);
   assert.equal(new Set(shown.map((entry) => entry.split("|")[1])).size, shown.length, `a counterpart repeated: ${shown.join(" / ")}`);
   assert.doesNotMatch(sent.text, /انتهت المعاني|No more meanings|Plus de sens|Keine weiteren Bedeutungen/u);
-  assert.equal(sent.reply_markup, undefined);
+  assert.equal(sent.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data, "noop");
 });
 
 function fakeKv() {

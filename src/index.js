@@ -230,10 +230,13 @@ function pageCallback(page, query) {
   return prefix + truncateBytes(query, CALLBACK_DATA_MAX_BYTES - prefix.length);
 }
 
-function equalizeSuggestionLabels(labels) {
-  const width = Math.max(...labels.map((label) => [...String(label)].length), 0);
+function equalizeSuggestionLabels(labels, minimumWidth = 0) {
+  const width = Math.max(minimumWidth, ...labels.map((label) => [...String(label)].length), 0);
   // Figure spaces keep Telegram inline buttons visually equal without changing callback data.
   return labels.map((label) => String(label).padEnd(width, "\u2007"));
+}
+function moreButtonWidth(language = "ar") {
+  return [...String(MORE_BUTTON_TEXT[language] ?? MORE_BUTTON_TEXT.ar)].length;
 }
 function renderSuggestions(query, normalizedQuery, matches, requestedPage) {
   const ui = uiTextFor(query);
@@ -242,10 +245,12 @@ function renderSuggestions(query, normalizedQuery, matches, requestedPage) {
   const slice = matches.slice(page * SUGGESTION_PAGE_SIZE, (page + 1) * SUGGESTION_PAGE_SIZE);
   const languageQuery = uiLanguage(query) === "ar" ? "" : truncateBytes(query, CALLBACK_DATA_MAX_BYTES - 18);
   const labels = slice.map((index) => suggestionLabel(records[index], normalizedQuery));
+  const allWidth = Math.max(moreButtonWidth(uiLanguage(query)), ...matches.map((index) => [...suggestionLabel(records[index], normalizedQuery)].length));
+  const aligned = equalizeSuggestionLabels(labels, allWidth);
   const keyboard = slice.map((index, position) => {
     const part = matchedPartIndex(records[index], normalizedQuery);
     return [{
-      text: equalizeSuggestionLabels(labels)[position],
+      text: aligned[position],
       callback_data: part >= 0 ? `s|${index}|${part}${languageQuery ? `|${languageQuery}` : ""}` : `s|${index}${languageQuery ? `|${languageQuery}` : ""}`,
     }];
   });
@@ -347,8 +352,10 @@ function meaningOptions(index, normalizedQuery = "", preferredPart = -1) {
 // The button walks one fixed list of meanings: each meaning is shown once, and the last one has no button.
 // callback: n|<word row>|<first meaning part>|<step to show next>  (the list is rebuilt the same way every time).
 function moreMeaning(options, baseIndex, nextStep = 1, callbackFor = undefined, keepSize = false, language = "ar") {
-  // The last meaning is intentionally clean: no dead-end "no more meanings" label.
-  if (options.length <= nextStep) return {};
+  // Keep a blank terminal button so the last result has the same visual footprint.
+  if (options.length <= nextStep) {
+    return { reply_markup: { inline_keyboard: [[{ text: "\u2007".repeat(moreButtonWidth(language)), callback_data: "noop" }]] } };
+  }
   const firstPart = Math.max(0, options[0].part);
   const data = callbackFor?.(nextStep) ?? `n|${baseIndex}|${firstPart}|${nextStep}`;
   return {
@@ -476,7 +483,8 @@ function renderWordSuggestions(query, words, requestedPage) {
   const totalPages = Math.max(1, Math.ceil(words.length / SUGGESTION_PAGE_SIZE));
   const page = Math.max(0, Math.min(requestedPage, totalPages - 1));
   const visibleWords = words.slice(page * SUGGESTION_PAGE_SIZE, (page + 1) * SUGGESTION_PAGE_SIZE);
-  const labels = equalizeSuggestionLabels(visibleWords.map((word) => word.label.slice(0, 48)));
+  const allWidth = Math.max(moreButtonWidth(uiLanguage(query)), ...words.map((word) => [...word.label.slice(0, 48)].length));
+  const labels = equalizeSuggestionLabels(visibleWords.map((word) => word.label.slice(0, 48)), allWidth);
   const keyboard = visibleWords.map((word, position) => [{
     text: labels[position],
     callback_data: `w|${truncateBytes(word.key, CALLBACK_DATA_MAX_BYTES - 2)}`,
@@ -1273,8 +1281,10 @@ export class UserStore {
         storage.list({ prefix: "voiceid:" }),
       ]);
       let pendingUploads = 0;
+      let blocked = 0;
       for (const [, value] of pending) if (!value?.drive) pendingUploads += 1;
-      return Response.json({ users: users.size, voices: voiced.size, pendingUploads });
+      for (const [, value] of users) if (value?.blocked === true) blocked += 1;
+      return Response.json({ users: users.size, voices: voiced.size, pendingUploads, blocked });
     }
     if (op === "voiceIds") {
       const voiced = await storage.list({ prefix: VOICE_PREFIX });
@@ -2294,6 +2304,16 @@ async function sendUsageReport(env, chatId) {
   ];
   await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML" });
 }
+async function sendBroadcastStatus(env, chatId) {
+  const status = env.USERS ? await storeCall(env, { op: "bcstatus" }) : { running: false };
+  await telegram(env, "sendMessage", {
+    chat_id: chatId,
+    text: status.running
+      ? `📢 <b>الإرسال الجماعي يعمل</b>\n✅ تم الإرسال: ${status.sent}\n📦 الإجمالي: ${status.total}\n❌ فشل: ${status.failed}`
+      : "📢 لا يوجد إرسال جماعي يعمل حاليًا.",
+    parse_mode: "HTML",
+  });
+}
 
 // ---- Inline mode: type @bot_username <word> in any chat ----
 const INLINE_LIMIT = 20;
@@ -2470,16 +2490,16 @@ async function updateDictionaryField(env, message, userId, flow, text) {
   while (values.length < flow.headers.length) values.push("");
   values[flow.col] = text === "-" ? "" : text;
   const config = await driveConfig(env);
-  if (!config) { await clearAdminFlow(env, userId); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ لم يتم ربط Google Sheets." }); return; }
+  if (!config) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ لم يتم ربط Google Sheets." }); return; }
   let result;
   try { result = await callAppsScript(config, { action: "dictionary_update", row: flow.row, expected_coptic: flow.expectedCoptic, values, by: { id: "813894692" } }); }
   catch (error) { result = { ok: false, error: error instanceof Error ? error.message : "تعذّر الاتصال بالشيت" }; }
-  await clearAdminFlow(env, userId);
-  if (!result.ok) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `❌ لم يتم الحفظ: ${result.error || "خطأ غير معروف"}` }); return; }
+  if (!result.ok) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `❌ لم يتم الحفظ: ${result.error || "خطأ غير معروف"}\nجلسة نفس الكلمة ما زالت مفتوحة.` }); return; }
   const index = records.findIndex((record) => normalize(record.coptic) === normalize(flow.expectedCoptic));
   const localField = DICTIONARY_LOCAL_FIELDS[flow.col];
   if (index >= 0 && localField) records[index][localField] = values[flow.col];
-  await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم تعديل «${dictionaryFieldName(flow.headers, flow.col)}» في صف dictionary رقم ${flow.row} فورًا.\nيمكنك اختيار عمود آخر من /admin → تعديل القاموس.` });
+  await setAdminFlow(env, userId, { ...flow, values: result.values ?? values, col: null });
+  await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم تعديل «${dictionaryFieldName(flow.headers, flow.col)}» في صف dictionary رقم ${flow.row} فورًا.\nجلسة نفس الكلمة ما زالت مفتوحة؛ اضغط زر عمود آخر من رسالة الصف لتكمل التعديل.` });
 }
 function adminMenuMarkup(page = "home") {
   const back = [{ text: "⬅️ الرئيسية", callback_data: "ad|page|home" }];
@@ -2488,7 +2508,7 @@ function adminMenuMarkup(page = "home") {
     [{ text: "☁️ Drive وSheets", callback_data: "ad|page|drive" }, { text: "👥 المستخدمون", callback_data: "ad|page|users" }],
     [{ text: "📖 تعديل القاموس", callback_data: "ad|page|dictionary" }, { text: "⚙️ أدوات النظام", callback_data: "ad|page|tools" }],
     [{ text: "⬆️ مزامنة الأصوات", callback_data: "ad|syncvoices" }, { text: "👥 مزامنة المستخدمين", callback_data: "ad|syncusers" }],
-    [{ text: "⚙️ أدوات النظام", callback_data: "ad|page|tools" }, { text: "🔄 تحديث", callback_data: "ad|refresh" }],
+    [{ text: "📢 حالة الإرسال", callback_data: "ad|bcstatus" }, { text: "🧹 مسح جلسة", callback_data: "ad|clearflow" }],
   ] };
   if (page === "stats") return { inline_keyboard: [
     [{ text: "🔄 تحديث الإحصاءات", callback_data: "ad|page|stats" }], back,
@@ -2506,7 +2526,8 @@ function adminMenuMarkup(page = "home") {
   ] };
   if (page === "users") return { inline_keyboard: [
     [{ text: "👥 مزامنة المستخدمين", callback_data: "ad|syncusers" }, { text: "📢 إرسال جماعي", callback_data: "ad|broadcast" }],
-    [{ text: "📈 تقرير الاستخدام", callback_data: "ad|usage" }, { text: "🔄 تحديث المستخدمين", callback_data: "ad|page|users" }], back,
+    [{ text: "📢 حالة الإرسال", callback_data: "ad|bcstatus" }, { text: "📈 تقرير الاستخدام", callback_data: "ad|usage" }],
+    [{ text: "🔄 تحديث المستخدمين", callback_data: "ad|page|users" }], back,
   ] };
   if (page === "dictionary") return { inline_keyboard: [
     [{ text: "✏️ تعديل كلمة / صف كامل", callback_data: "ad|dictedit" }],
@@ -2515,7 +2536,8 @@ function adminMenuMarkup(page = "home") {
   return { inline_keyboard: [
     [{ text: "🤖 معلومات البوت", callback_data: "ad|botinfo" }, { text: "📈 تقرير الاستخدام", callback_data: "ad|usage" }],
     [{ text: "🖼 إخفاء بطاقة كلمة", callback_data: "ad|cardhide" }, { text: "🖼 إظهار بطاقة كلمة", callback_data: "ad|cardshow" }],
-    [{ text: "📦 إعداد الأرشيف", callback_data: "ad|setarchive" }, { text: "🔄 تحديث اللوحة", callback_data: "ad|refresh" }], back,
+    [{ text: "📢 حالة الإرسال", callback_data: "ad|bcstatus" }, { text: "🔄 تحديث الأوامر", callback_data: "ad|commands" }],
+    [{ text: "📦 إعداد الأرشيف", callback_data: "ad|setarchive" }, { text: "🧹 مسح الجلسة", callback_data: "ad|clearflow" }], back,
   ] };
 }
 async function adminDashboardText(env, page = "home") {
@@ -2525,6 +2547,7 @@ async function adminDashboardText(env, page = "home") {
   const common = [
     `📚 كلمات القاموس: <b>${records.length.toLocaleString("en-US")}</b>`,
     `👥 المستخدمون المسجلون: <b>${Number(stats.users ?? 0).toLocaleString("en-US")}</b>`,
+    `🚫 حالات الحظر المكتشفة: <b>${Number(stats.blocked ?? 0).toLocaleString("en-US")}</b>`,
     `🎙 التسجيلات المحفوظة: <b>${Number(stats.voices ?? 0).toLocaleString("en-US")}</b>`,
     `⏳ تنتظر الرفع: <b>${Number(stats.pendingUploads ?? 0).toLocaleString("en-US")}</b>`,
     `☁️ Drive / Sheets: <b>${drive}</b>`,
@@ -2595,6 +2618,9 @@ async function handleAdminDashboardCallback(env, callback, ctx) {
   if (prompts[action]) { await setAdminFlow(env, callback.from.id, prompts[action][1]); await telegram(env, "sendMessage", { chat_id: chatId, text: prompts[action][0] }); return; }
   if (action === "resetdrive") { await setDriveConfig(env, { chat: { id: chatId } }, "reset"); return; }
   if (action === "broadcast") { await beginBroadcast(env, chatId, callback.from.id, await getUser(env, callback.from.id) ?? {}); return; }
+  if (action === "bcstatus") { await sendBroadcastStatus(env, chatId); return; }
+  if (action === "commands") { commandMenuReady.delete("admin"); await ensureCommandMenu(env, callback.from.id); await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ تم تحديث قائمة أوامر الأدمن في Telegram." }); return; }
+  if (action === "clearflow") { await clearAdminFlow(env, callback.from.id); await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ تم مسح أي جلسة إدخال معلّقة." }); return; }
   if (action === "usage") { await sendUsageReport(env, chatId); return; }
   if (action === "botinfo") { await sendBotInfo(env, chatId); return; }
 }
@@ -2615,6 +2641,10 @@ async function handleUpdate(update, env, ctx) {
     }
     if (String(callback.data ?? "").startsWith("k|")) {
       await handleKeyboardCallback(env, callback, ctx);
+      return;
+    }
+    if (callback.data === "noop") {
+      await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
       return;
     }
     // Acknowledge the tap in the background so the answer is not delayed by a round trip.
