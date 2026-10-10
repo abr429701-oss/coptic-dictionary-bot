@@ -721,7 +721,7 @@ async function callAppsScript(config, payload) {
 }
 
 // Uploads one saved recording to Drive and remembers the link. Returns { ok, error }.
-async function uploadVoiceToDrive(env, { id, record, fileId, duration, by }) {
+async function uploadVoiceToDrive(env, { id, record, fileId, duration, by, mimeType }) {
   const config = await driveConfig(env);
   if (!config) return { ok: false, error: "not configured" };
   try {
@@ -737,7 +737,7 @@ async function uploadVoiceToDrive(env, { id, record, fileId, duration, by }) {
       id,
       word: record?.coptic ?? "",
       audio_base64: arrayBufferToBase64(await audioResponse.arrayBuffer()),
-      mime_type: "audio/ogg",
+      mime_type: mimeType || "audio/ogg",
       file_id: fileId,
       duration: duration ?? "",
       by: by ?? null,
@@ -1588,7 +1588,8 @@ async function captureVoiceRecording(env, message, userId, user, ctx) {
     await nextVoicePrompt(env, message.chat.id, userId, user);
   }
   await inBackground(ctx, archive);
-  await inBackground(ctx, postToArchiveGroup(env, record, message.voice.file_id, message.voice.duration));
+  // لا نرسل التسجيل إلى مجموعة أرشيف؛ archiveAndReport يرفعه مباشرةً إلى
+  // Apps Script ثم Google Drive وGoogle Sheets.
 }
 
 // Optional archive group: every new recording is also posted there, where a second bot
@@ -1846,7 +1847,6 @@ async function registerOnFirstContact(env, message, userId, ctx) {
     `👥 إجمالي المستخدمين: ${Number(result.total ?? 0).toLocaleString("en-US")}`,
   ].join("\n");
   await notifyAdmins(env, joinNotice);
-  await inBackground(ctx, notifyGroup(env, joinNotice));
   return result.user;
 }
 

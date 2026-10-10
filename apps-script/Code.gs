@@ -16,12 +16,12 @@ const CONFIG = {
   SHEET_ID: "14pUNXtrHoMSU9lBWhKQZyspe-DDTMDudSiuL2sJQRUI",
   // Tab that receives one row per recorded word.
   BAN_TAB: "upload",
-  // Anyone with the link can listen. Keep false to stay private to your Google account.
-  SHARE_WITH_LINK: false,
-  // Only this Telegram id may upload recordings. Leave empty to disable the check.
-  ADMIN_ID: "813894692",
+  // Anyone with the link can listen.
+  SHARE_WITH_LINK: true,
+  // Leave empty so the bot can archive recordings from the configured workflow.
+  ADMIN_ID: "",
   // Telegram users are synchronized to this tab in the same spreadsheet.
-  USERS_TAB: "User",
+  USERS_TAB: "users",
   USERS_SHEET_ID: "",
 };
 
@@ -29,9 +29,6 @@ const BAN_HEADER = [
   "id",
   "word",
   "drive_url",
-  "drive_file_id",
-  "telegram_file_id",
-  "duration_s",
 ];
 
 // Run this once from the editor (Run ▶ testSetup) to grant Drive/Sheets permissions and see the folder.
@@ -191,7 +188,8 @@ function upload_(body) {
   const word = String(body.word || "");
   const mimeType = String(body.mime_type || "audio/ogg");
   const extension = mimeType.indexOf("mpeg") >= 0 ? "mp3" : "ogg";
-  const fileName = (id || "voice-" + Date.now()) + "." + extension;
+  const fileStem = sanitizeFileName_(word || id || "voice-" + Date.now());
+  const fileName = fileStem + "." + extension;
 
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
@@ -249,23 +247,11 @@ function recordInBan_(spreadsheet, info) {
     info.id,
     info.word,
     info.url,
-    info.fileId,
-    info.body.file_id || "",
-    info.body.duration == null ? "" : Number(info.body.duration) || "",
   ];
 
   const target = findRowById_(sheet, info.id);
 
   if (target) {
-    // Re-recording: trash the previous Drive file, then overwrite the row.
-    const oldFileId = sheet.getRange(target, 4).getValue();
-    if (oldFileId && String(oldFileId) !== info.fileId) {
-      try {
-        DriveApp.getFileById(String(oldFileId)).setTrashed(true);
-      } catch (ignored) {
-        // already deleted / no access
-      }
-    }
     sheet.getRange(target, 1, 1, row.length).setValues([row]);
   } else {
     sheet.appendRow(row);
@@ -273,7 +259,7 @@ function recordInBan_(spreadsheet, info) {
 }
 
 
-// Upserts Telegram users into the "User" tab, keyed by the Telegram id (column C).
+// Upserts Telegram users into the "users" tab, keyed by Telegram id (column C).
 function upsertUsers_(users) {
   if (!Array.isArray(users) || !users.length) return { ok: false, error: "users is missing" };
   const lock = LockService.getScriptLock();
@@ -283,7 +269,7 @@ function upsertUsers_(users) {
     let sheet = spreadsheet.getSheetByName(CONFIG.USERS_TAB);
     if (!sheet) {
       sheet = spreadsheet.insertSheet(CONFIG.USERS_TAB, spreadsheet.getNumSheets());
-      sheet.appendRow(["name", "username", "id", "joined_at", "registered_at", "updated_at"]);
+      sheet.appendRow(["name", "username", "id"]);
     }
     const last = sheet.getLastRow();
     const rowOf = {};
@@ -301,13 +287,13 @@ function upsertUsers_(users) {
       const username = user.username ? "@" + String(user.username).replace(/^@/, "") : "";
       const target = rowOf[id];
       if (target) {
-        const old = sheet.getRange(target, 1, 1, 6).getValues()[0];
-        sheet.getRange(target, 1, 1, 6).setValues([[
-          user.name || old[0], username || old[1], id, old[3] || user.joined_at || "", user.registered_at || old[4], now,
+        const old = sheet.getRange(target, 1, 1, 3).getValues()[0];
+        sheet.getRange(target, 1, 1, 3).setValues([[
+          user.name || old[0], username || old[1], id,
         ]]);
         updated += 1;
       } else {
-        sheet.appendRow([user.name || "", username, id, user.joined_at || "", user.registered_at || "", now]);
+        sheet.appendRow([user.name || "", username, id]);
         rowOf[id] = sheet.getLastRow();
         added += 1;
       }
@@ -316,4 +302,12 @@ function upsertUsers_(users) {
   } finally {
     lock.releaseLock();
   }
+}
+
+function sanitizeFileName_(name) {
+  return String(name)
+    .replace(/[\\/:*?"<>|\r\n]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .substring(0, 180) || "voice";
 }
