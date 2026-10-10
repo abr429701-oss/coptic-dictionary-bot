@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ipaForSpeech, ipaToEspeak, audioUrl, fetchPrebuiltSpeech, fetchHumanSpeech, humanAudioUrl, fetchTransformedSpeech, transformedAudioUrl } from "../src/neural-voice.js";
+import { ipaForSpeech, ipaToEspeak, audioUrl, fetchPrebuiltSpeech, fetchHumanSpeech, humanAudioUrl } from "../src/neural-voice.js";
 
 test("IPA is cleaned for the engine", () => {
   assert.equal(ipaForSpeech({ pronunciation: "ref-tshoːl" }), "ref tʃoːl");
@@ -46,16 +46,4 @@ test("human audio is opt-in and read from the audio-human branch", async () => {
   } finally {
     globalThis.fetch = original;
   }
-});
-
-test("transformed audio is enabled by default and read from the reference branch", async () => {
-  assert.match(transformedAudioUrl({}, 7), /\/audio-transformed\/7\.ogg\?v=/u);
-  const original = globalThis.fetch;
-  globalThis.fetch = async (url) => String(url).split("?", 1)[0].endsWith("/5.ogg")
-    ? new Response(new Uint8Array([79, 103, 103, 83, 1, 2]))
-    : new Response("", { status: 404 });
-  try {
-    assert.equal((await fetchTransformedSpeech({}, { id: 5 })).byteLength, 6);
-    assert.equal(await fetchTransformedSpeech({ TRANSFORMED_AUDIO: "off" }, { id: 5 }), null);
-  } finally { globalThis.fetch = original; }
 });

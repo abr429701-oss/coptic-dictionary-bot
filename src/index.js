@@ -54,11 +54,10 @@ function lazy(build) {
 const SEARCH_FIELDS = ["coptic", "pronunciation", "english", "phonetic", "translation_en", "translation_fr", "translation_de"];
 
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
-import { fetchHumanSpeech, fetchPrebuiltSpeech, fetchTransformedSpeech, TRANSFORMED_AUDIO_VERSION, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
+import { fetchHumanSpeech, fetchPrebuiltSpeech, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 const VOICE_PREFIX = "voiceid:";
 const neuralKey = (id) => `ttsid:${NEURAL_VOICE_VERSION}:${id}`;
 const humanKey = (id) => `ttsid:human:${HUMAN_AUDIO_VERSION}:${id}`;
-const transformedKey = (id) => `ttsid:transformed:${TRANSFORMED_AUDIO_VERSION}:${id}`;
 const voiceKey = (id) => `${VOICE_PREFIX}${id}`;
 const CARD_DISABLED_PREFIX = "card-disabled:";
 const cardDisabledKey = (id) => `${CARD_DISABLED_PREFIX}${id}`;
@@ -628,16 +627,6 @@ function voiceCaption(record, partIndex = -1, searchedWord = "") {
 // Generated Matthew audio from the audio-human branch is the default voice.
 function prepareWordVoice(env, record, media = null, { skipRecorded = false } = {}) {
   return (async () => {
-    if (!skipRecorded && record?.id != null) {
-      try {
-        const cached = env.USERS ? (await storeCall(env, { op: "get", key: transformedKey(record.id) })).value : null;
-        if (cached?.fileId) return { fileId: cached.fileId, transformed: true };
-        const transformed = await fetchTransformedSpeech(env, record);
-        if (transformed) return { audio: transformed, neural: true, transformed: true, wordId: record.id };
-      } catch (error) {
-        console.error("Transformed voice failed", error instanceof Error ? error.message : "unknown error");
-      }
-    }
     if (!skipRecorded && env.USERS && record?.id != null) {
       try {
         const saved = media ? { value: (await media).voice } : await storeCall(env, { op: "get", key: voiceKey(record.id) });
@@ -699,7 +688,7 @@ async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1, 
       // Remember Telegram's file_id so this word is synthesized only once.
       const sent = await response.json().catch(() => null);
       const fileId = sent?.result?.voice?.file_id;
-      if (fileId) await storeCall(env, { op: "put", key: voice.transformed ? transformedKey(voice.wordId) : (voice.human ? humanKey(voice.wordId) : neuralKey(voice.wordId)), value: { fileId } }).catch(() => {});
+      if (fileId) await storeCall(env, { op: "put", key: voice.human ? humanKey(voice.wordId) : neuralKey(voice.wordId), value: { fileId } }).catch(() => {});
     }
   } catch (error) {
     console.error("Voice failed", error instanceof Error ? error.message : "unknown error");
@@ -1606,9 +1595,6 @@ async function captureVoiceRecording(env, message, userId, user, ctx) {
     duration: message.voice.duration,
     by: recorderInfo(message.from, user, userId),
   });
-  // The archiver workflow downloads this copy, applies the reference-profile
-  // DSP, publishes audio-transformed/<id>.ogg, and optionally stores it in Drive.
-  const archiveGroup = postToArchiveGroup(env, record, message.voice.file_id, message.voice.duration);
   await telegram(env, "sendMessage", {
     chat_id: message.chat.id,
     text: `✅ تم حفظ تسجيل <b>${escapeHtml(record.coptic ?? "الكلمة")}</b>.`,
@@ -1621,7 +1607,8 @@ async function captureVoiceRecording(env, message, userId, user, ctx) {
     await nextVoicePrompt(env, message.chat.id, userId, user);
   }
   await inBackground(ctx, archive);
-  await inBackground(ctx, archiveGroup);
+  // لا نرسل التسجيل إلى مجموعة أرشيف؛ archiveAndReport يرفعه مباشرةً إلى
+  // Apps Script ثم Google Drive وGoogle Sheets.
 }
 
 // Optional archive group: every new recording is also posted there, where a second bot
@@ -1651,7 +1638,7 @@ async function postToArchiveGroup(env, record, fileId, duration) {
     await sendVoiceToArchive(env, chatId, {
       voice: fileId,
       ...(duration ? { duration } : {}),
-      caption: `#${record.id}\n${caption}`.slice(0, 1024),
+      caption,
     });
   } catch (error) {
     console.error("Archive group post failed", error instanceof Error ? error.message : "unknown error");
