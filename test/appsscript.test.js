@@ -113,26 +113,26 @@ test("an upload saves <id>.ogg and writes one Ban row with the drive link, recor
   const result = world.post(upload({ by }));
   assert.equal(result.ok, true);
   const file = world.files.get(result.file_id);
-  assert.equal(file.blob.name, "7.ogg");
+  assert.equal(file.blob.name, "ⲁⲧⲥ̀ϧⲁⲓ.ogg");
   assert.deepEqual(file.blob.bytes, [79, 103, 103, 83, 1, 2, 3]);
   assert.equal(result.url, `https://drive.google.com/file/d/${result.file_id}/view?usp=drivesdk`);
 
   const ban = world.sheets.find((sheet) => sheet.getName() === "upload");
-  assert.deepEqual(ban.data[0], ["id", "word", "drive_url", "drive_file_id", "telegram_file_id", "duration_s"]);
-  assert.deepEqual(ban.data[1], ["7", "ⲁⲧⲥ̀ϧⲁⲓ", result.url, result.file_id, "TG", 3]);
+  assert.deepEqual(ban.data[0], ["id", "word", "drive_url"]);
+  assert.deepEqual(ban.data[1], ["7", "ⲁⲧⲥ̀ϧⲁⲓ", result.url]);
   assert.equal(world.sheets.some((sheet) => sheet.getName() === "Voices"), false);
 });
 
-test("re-recording a word replaces its Ban row and moves the old file to trash", () => {
+test("re-recording a word replaces its upload row", () => {
   const world = build();
   const first = world.post(upload({ id: 3, word: "ⲁⲛⲁⲩ", by }));
   const second = world.post(upload({ id: 3, word: "ⲁⲛⲁⲩ", by }));
   assert.notEqual(first.file_id, second.file_id);
-  assert.equal(world.files.get(first.file_id).trashed, true);
-  assert.equal(world.files.get(second.file_id).trashed, false);
+  assert.equal(world.files.get(first.file_id).trashed, false);
+  assert.equal(world.files.get(second.file_id).blob.name, "ⲁⲛⲁⲩ.ogg");
   const ban = world.sheets.find((sheet) => sheet.getName() === "upload");
   assert.equal(ban.data.length, 2);
-  assert.equal(ban.data[1][3], second.file_id);
+  assert.equal(ban.data[1][2], second.url);
 });
 
 test("rejects bad input without touching Drive", () => {
@@ -142,14 +142,14 @@ test("rejects bad input without touching Drive", () => {
   assert.equal(world.files.size, 0);
 });
 
-test("users are added to the User tab and updated by Telegram id without duplicates", () => {
+test("users are added to the users tab and updated by Telegram id without duplicates", () => {
   const world = build();
   const first = world.post({ action: "users", users: [
     { id: "11", name: "مينا جرجس", username: "mina", joined_at: "2026-10-01", registered_at: "" },
     { id: "12", name: "Mark", username: "@mark", joined_at: "2026-10-02", registered_at: "" },
   ] });
   assert.deepEqual([first.added, first.updated], [2, 0]);
-  const tab = world.sheets.find((sheet) => sheet.getName() === "User");
+  const tab = world.sheets.find((sheet) => sheet.getName() === "users");
   assert.deepEqual(tab.data[0].slice(0, 3), ["name", "username", "id"]);
   assert.deepEqual(tab.data[1].slice(0, 3), ["مينا جرجس", "@mina", "11"]);
   assert.equal(tab.data[2][1], "@mark");
@@ -157,6 +157,6 @@ test("users are added to the User tab and updated by Telegram id without duplica
   const again = world.post({ action: "users", users: [{ id: "11", name: "مينا جرجس بشرى", username: "", joined_at: "", registered_at: "2026-10-03" }] });
   assert.deepEqual([again.added, again.updated], [0, 1]);
   assert.equal(tab.data.length, 3);
-  assert.deepEqual(tab.data[1].slice(0, 5), ["مينا جرجس بشرى", "@mina", "11", "2026-10-01", "2026-10-03"]);
+  assert.deepEqual(tab.data[1].slice(0, 3), ["مينا جرجس بشرى", "@mina", "11"]);
   assert.equal(world.post({ action: "users", users: [{ id: "x; drop" }] }).added, 0);
 });

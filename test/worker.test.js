@@ -1616,58 +1616,12 @@ test("admin can delete a recorded voice and the word returns to the generated vo
   }
 });
 
-test("admin links an archive group and new recordings are posted there", async () => {
+test("recordings are not sent to an archive group", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const calls = [];
   fakeTelegramApi(calls);
-  await worker.fetch(updateRequest({ message: { text: "/setarchive abc", chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
-  assert.equal(kvEnv.USERS.store.get("archive-chat"), undefined);
-
-  await worker.fetch(updateRequest({ message: { text: "/setarchive -1001234567890", chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
-  assert.equal(kvEnv.USERS.store.get("archive-chat").chatId, -1001234567890);
-  assert.ok(calls.some((call) => call.url.endsWith("/sendMessage") && call.payload.chat_id === -1001234567890));
-
   await worker.fetch(updateRequest({ message: { text: "/record", chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
-  const id = kvEnv.USERS.store.get(`user:${ADMIN}`).voiceRec.id;
   calls.length = 0;
-  await worker.fetch(updateRequest({ message: { voice: { file_id: "archived-voice", duration: 3 }, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
-  const posted = calls.find((call) => call.url.endsWith("/sendVoice") && call.payload.chat_id === -1001234567890);
-  assert.ok(posted, "the recording is posted to the archive group");
-  assert.equal(posted.payload.voice, "archived-voice");
-  assert.match(posted.payload.caption, /^الكلمة:/u);
-
-  await worker.fetch(updateRequest({ message: { text: "/setarchive off", chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
-  calls.length = 0;
-  await worker.fetch(updateRequest({ message: { voice: { file_id: "second", duration: 1 }, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
-  assert.ok(!calls.some((call) => call.url.endsWith("/sendVoice") && call.payload.chat_id === -1001234567890));
-});
-
-test("archive group that Telegram upgraded to a supergroup is re-linked automatically", async () => {
-  const kvEnv = { ...env, USERS: fakeKv() };
-  kvEnv.USERS.store.set("archive-chat", { chatId: -4000 });
-  const sent = [];
-  const original = globalThis.fetch;
-  globalThis.fetch = async (url, options) => {
-    if (!String(url).includes("api.telegram.org")) return new Response("", { status: 404 });
-    const payload = JSON.parse(options?.body ?? "{}");
-    sent.push({ method: String(url).split("/").pop(), payload });
-    if (String(url).endsWith("/sendVoice") && payload.chat_id === -4000) {
-      return Response.json({
-        ok: false,
-        error_code: 400,
-        description: "Bad Request: group chat was upgraded to a supergroup chat",
-        parameters: { migrate_to_chat_id: -1004000000001 },
-      }, { status: 400 });
-    }
-    return Response.json({ ok: true, result: {} });
-  };
-  try {
-    await worker.fetch(updateRequest({ message: { voice: { file_id: "v1", duration: 2 }, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
-    const voices = sent.filter((call) => call.method === "sendVoice");
-    assert.deepEqual(voices.map((call) => call.payload.chat_id), [-4000, -1004000000001]);
-    assert.equal(kvEnv.USERS.store.get("archive-chat").chatId, -1004000000001);
-    assert.match(sent.filter((call) => call.method === "sendMessage").at(-1).payload.text, /تم إرسال الـVoice/u);
-  } finally {
-    globalThis.fetch = original;
-  }
+  await worker.fetch(updateRequest({ message: { voice: { file_id: "direct-voice", duration: 3 }, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
+  assert.equal(calls.some((call) => call.url.endsWith("/sendVoice")), false);
 });
