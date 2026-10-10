@@ -63,14 +63,14 @@ test("rejects webhook calls with an invalid secret", async () => {
   assert.equal(response.status, 403);
 });
 
-test("/stats returns the number of dictionary records", async () => {
+test("/stats is not exposed to ordinary users", async () => {
   const calls = [];
   fakeTelegramApi(calls);
   const response = await worker.fetch(updateRequest({ message: { text: "/stats", chat: { id: 7 } } }), env);
   assert.equal(response.status, 200);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].payload.chat_id, 7);
-  assert.ok(calls[0].payload.text.includes(records.length.toLocaleString("en-US")));
+  assert.doesNotMatch(calls[0].payload.text, /عدد سجلات القاموس|إحصائيات القاموس/u);
 });
 
 test("admin dashboard shows statistics and management buttons", async () => {

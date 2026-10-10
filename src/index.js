@@ -528,9 +528,7 @@ function findMatches(query) {
 const TYPING_DELAY_MS = 0; // Telegram displays its native localized “typing…” indicator.
 const USER_COMMANDS = [
   { command: "start", description: "بدء استخدام القاموس" },
-  { command: "help", description: "طريقة استخدام البوت" },
   { command: "keyboard", description: "فتح الكيبورد القبطي" },
-  { command: "stats", description: "إحصائيات القاموس" },
 ];
 const ADMIN_COMMANDS = [
   ...USER_COMMANDS,
@@ -1433,8 +1431,7 @@ function isValidFullName(value) {
 function userReplyKeyboardMarkup() {
   return {
     keyboard: [
-      [{ text: "⌨️ الكيبورد القبطي" }, { text: "📚 المساعدة" }],
-      [{ text: "📊 إحصائيات القاموس" }, { text: "🔎 اكتب كلمة للبحث" }],
+      [{ text: "⌨️ الكيبورد القبطي" }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -1581,7 +1578,7 @@ async function startKeyboard(env, chatId, userId) {
   await storeCall(env, { op: "kbset", userId, kb: { word: "", msgId: sent?.result?.message_id ?? null } });
 }
 
-async function handleKeyboardInput(env, message, userId) {
+async function handleKeyboardInput(env, message, userId, ctx) {
   const chatId = message.chat.id;
   const text = String(message.text ?? "").trim();
   const dropTap = () => telegram(env, "deleteMessage", { chat_id: chatId, message_id: message.message_id });
@@ -2447,11 +2444,33 @@ async function sendBotInfo(env, chatId) {
 }
 
 const DICTIONARY_LOCAL_FIELDS = ["coptic", "pronunciation", "meaning", "translation_en", "translation_fr", "translation_de", "greek", null, null, "origin", "kind"];
+const DICTIONARY_LOCAL_HEADERS = ["coptic", "ipa", "meaning", "english", "french", "german", "greek", "unused_h", "unused_i", "origin", "kind"];
+function localDictionaryLookup(word) {
+  const wanted = normalize(word);
+  if (!wanted) return { ok: false, error: "word is required" };
+  let partial = null;
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    const values = DICTIONARY_LOCAL_FIELDS.map((field) => field ? String(record?.[field] ?? "") : "");
+    for (let column = 0; column < values.length; column += 1) {
+      const cell = normalize(values[column]);
+      if (!cell) continue;
+      if (cell === wanted) return { ok: true, sheet: "dictionary", row: index + 2, matched_column: column, headers: DICTIONARY_LOCAL_HEADERS, values };
+      if (!partial && (cell.includes(wanted) || wanted.includes(cell))) partial = { ok: true, sheet: "dictionary", row: index + 2, matched_column: column, headers: DICTIONARY_LOCAL_HEADERS, values };
+    }
+  }
+  return partial ?? { ok: false, error: "word not found" };
+}
 async function dictionaryGetFromSheet(env, word) {
   const config = await driveConfig(env);
-  if (!config) return { ok: false, error: "لم يتم ربط Apps Script/Google Sheets بعد." };
-  try { return await callAppsScript(config, { action: "dictionary_get", word, by: { id: "813894692" } }); }
-  catch (error) { return { ok: false, error: error instanceof Error ? error.message : "تعذّر الاتصال بالشيت" }; }
+  if (!config) return localDictionaryLookup(word);
+  try {
+    const result = await callAppsScript(config, { action: "dictionary_get", word, by: { id: "813894692" } });
+    return result.ok ? result : localDictionaryLookup(word);
+  } catch (error) {
+    const fallback = localDictionaryLookup(word);
+    return fallback.ok ? fallback : { ok: false, error: error instanceof Error ? error.message : "تعذّر الاتصال بالشيت" };
+  }
 }
 function dictionaryFieldName(headers, index) {
   return String(headers?.[index] || `العمود ${String.fromCharCode(65 + index)}`).trim();
@@ -2469,7 +2488,7 @@ async function beginDictionaryEdit(env, chatId, userId, word) {
   const headers = result.headers ?? [];
   await setAdminFlow(env, userId, { kind: "dict_value", row: result.row, expectedCoptic: result.values?.[0] ?? word, values: result.values ?? [], headers, col: null });
   const matched = Number.isInteger(result.matched_column) ? `\n🔎 تطابقت مع: <b>${escapeHtml(dictionaryFieldName(headers, result.matched_column))}</b>` : "";
-  const lines = [`📖 <b>صف القاموس رقم ${result.row}</b>${matched}`, "اختر أي عمود لتعديله. التعديل يُحفظ فورًا في نفس الصف:", ""];
+  const lines = [`📄 <b>الورقة: dictionary</b>\n🔢 <b>رقم الصف: ${result.row}</b>${matched}`, "اختر أي عمود لتعديله. التعديل يُحفظ فورًا في نفس الصف:", ""];
   for (let i = 0; i < headers.length; i += 1) lines.push(`<b>${String.fromCharCode(65 + i)} — ${escapeHtml(dictionaryFieldName(headers, i))}:</b> ${escapeHtml(result.values?.[i] ?? "")}`);
   await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML", reply_markup: dictionaryEditMarkup(result.row, headers) });
 }
@@ -2736,8 +2755,6 @@ async function handleUpdate(update, env, ctx) {
   const isPrivate = (message.chat.type ?? "private") === "private";
   const buttonCommands = {
     "⌨️ الكيبورد القبطي": "/keyboard",
-    "📚 المساعدة": "/help",
-    "📊 إحصائيات القاموس": "/stats",
   };
   text = buttonCommands[text] ?? text;
   if (text === "/" || text === "/start" || text.startsWith("/start ") || text === "/admin") inBackground(ctx, ensureCommandMenu(env, userId));
@@ -2845,7 +2862,7 @@ async function handleUpdate(update, env, ctx) {
   if (text === "/start" || text.startsWith("/start ")) {
     if (!env.USERS) {
       // No user store bound: registration is unavailable, so fall back to the plain help text.
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: HELP_TEXT });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "اكتب الكلمة مباشرة أو استخدم زر «⌨️ الكيبورد القبطي»." });
       return;
     }
     const user = known ?? await getUser(env, userId);
@@ -2859,18 +2876,6 @@ async function handleUpdate(update, env, ctx) {
   }
   if (text === "/keyboard" || text === "/k") {
     await startKeyboard(env, message.chat.id, userId);
-    return;
-  }
-  if (text === "/help") {
-    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: HELP_TEXT, reply_markup: userReplyKeyboardMarkup() });
-    return;
-  }
-  if (text === "/stats") {
-    await telegram(env, "sendMessage", {
-      chat_id: message.chat.id,
-      text: `عدد سجلات القاموس المفهرسة: ${records.length.toLocaleString("en-US")}`,
-      reply_markup: userReplyKeyboardMarkup(),
-    });
     return;
   }
   if (message.voice || message.audio) {
@@ -2889,7 +2894,7 @@ async function handleUpdate(update, env, ctx) {
   if (text.startsWith("/")) {
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
-      text: "اكتب الكلمة مباشرة للبحث، أو استخدم /keyboard للكيبورد القبطي و/start للمساعدة و/stats لعدد السجلات.",
+      text: "اكتب الكلمة مباشرة للبحث، أو استخدم /keyboard لفتح الكيبورد القبطي و/start للبدء.",
     });
     return;
   }
@@ -2911,12 +2916,12 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     if (user?.kb && isKeyboardInput(text)) {
-      await handleKeyboardInput(env, message, userId);
+      await handleKeyboardInput(env, message, userId, ctx);
       return;
     }
     if (KEYBOARD_CONTROLS.has(text)) {
       // Leftover keyboard button after a restart/close: reopen a session instead of searching the label.
-      await handleKeyboardInput(env, message, userId);
+      await handleKeyboardInput(env, message, userId, ctx);
       return;
     }
     await showTyping(env, message.chat.id);
