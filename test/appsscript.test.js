@@ -118,8 +118,8 @@ test("an upload saves <id>.ogg and writes one Ban row with the drive link, recor
   assert.equal(result.url, `https://drive.google.com/file/d/${result.file_id}/view?usp=drivesdk`);
 
   const ban = world.sheets.find((sheet) => sheet.getName() === "upload");
-  assert.deepEqual(ban.data[0], ["id", "word", "drive_url"]);
-  assert.deepEqual(ban.data[1], ["7", "ⲁⲧⲥ̀ϧⲁⲓ", result.url]);
+  assert.deepEqual(ban.data[0].slice(0, 4), ["id", "word", "drive_url", "drive_file_id"]);
+  assert.deepEqual(ban.data[1].slice(0, 4), ["7", "ⲁⲧⲥ̀ϧⲁⲓ", result.url, result.file_id]);
   assert.equal(world.sheets.some((sheet) => sheet.getName() === "Voices"), false);
 });
 
@@ -128,7 +128,7 @@ test("re-recording a word replaces its upload row", () => {
   const first = world.post(upload({ id: 3, word: "ⲁⲛⲁⲩ", by }));
   const second = world.post(upload({ id: 3, word: "ⲁⲛⲁⲩ", by }));
   assert.notEqual(first.file_id, second.file_id);
-  assert.equal(world.files.get(first.file_id).trashed, false);
+  assert.equal(world.files.get(first.file_id).trashed, true);
   assert.equal(world.files.get(second.file_id).blob.name, "ⲁⲛⲁⲩ.ogg");
   const ban = world.sheets.find((sheet) => sheet.getName() === "upload");
   assert.equal(ban.data.length, 2);

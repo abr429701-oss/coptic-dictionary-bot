@@ -721,6 +721,31 @@ async function callAppsScript(config, payload) {
 }
 
 // Uploads one saved recording to Drive and remembers the link. Returns { ok, error }.
+async function pruneLocalVoices(env, deletedIds) {
+  if (!env.USERS) return { removed: 0 };
+  const result = await storeCall(env, { op: "voiceDeleteIds", ids: deletedIds.map(String) });
+  return { removed: Number(result?.removed ?? 0) };
+}
+async function reconcileDrive(env) {
+  const config = await driveConfig(env);
+  if (!config) return { ok: false, skipped: true };
+  try {
+    const result = await callAppsScript(config, { action: "sync" });
+    const active = Array.isArray(result.active_ids) ? result.active_ids : [];
+    const deletedIds = Array.isArray(result.deleted_ids) ? result.deleted_ids : [];
+    const pruned = await pruneLocalVoices(env, deletedIds);
+    return { ok: true, activeIds: active, deletedIds, removed: pruned.removed };
+  } catch (error) {
+    console.error("Drive reconciliation failed", error instanceof Error ? error.message : "unknown error");
+    return { ok: false, error: error instanceof Error ? error.message : "unknown error" };
+  }
+}
+async function deleteRemoteVoice(env, id) {
+  const config = await driveConfig(env);
+  if (!config) return { ok: true, skipped: true };
+  try { return await callAppsScript(config, { action: "delete", id, by: { id: adminIds(env)[0] } }); }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : "unknown error" }; }
+}
 async function uploadVoiceToDrive(env, { id, record, fileId, duration, by, mimeType }) {
   const config = await driveConfig(env);
   if (!config) return { ok: false, error: "not configured" };
@@ -779,12 +804,14 @@ async function driveStatusText(env) {
   if (!config) {
     return "☁️ لم يتم ربط جوجل درايف بعد.\nأرسل: /setdrive رابط_السكريبت";
   }
+  const sync = await reconcileDrive(env);
   const counts = await storeCall(env, { op: "voicepending", limit: 0 });
   const lines = [
     "☁️ <b>أرشيف جوجل درايف</b>",
     `✅ مرفوع: ${counts.uploaded}`,
     `⏳ في الانتظار: ${counts.pendingTotal}`,
     `🎙 إجمالي التسجيلات: ${counts.total}`,
+    ...(sync.ok && sync.removed ? [`🧹 أزيلت من البوت بعد المصالحة: ${sync.removed}`] : []),
   ];
   try {
     const ping = await callAppsScript(config, { action: "ping" });
@@ -803,6 +830,11 @@ async function syncPendingVoices(env, chatId, by) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: "لم يتم ربط جوجل درايف بعد. استخدم /setdrive أولًا." });
     return;
   }
+  const sync = await reconcileDrive(env);
+  if (!sync.ok) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ تعذّرت مزامنة Drive/Sheet: ${sync.error ?? "unknown error"}` });
+    return;
+  }
   const batch = await storeCall(env, { op: "voicepending", limit: SYNC_DRIVE_BATCH });
   let uploaded = 0;
   let failure = "";
@@ -816,7 +848,7 @@ async function syncPendingVoices(env, chatId, by) {
     }
   }
   const left = Math.max(0, batch.pendingTotal - uploaded);
-  const lines = [`☁️ تم رفع ${uploaded} تسجيل.`, `⏳ المتبقي: ${left}`];
+  const lines = [`☁️ تمت المصالحة، وأزيل من البوت: ${sync.removed ?? 0}.`, `☁️ تم رفع ${uploaded} تسجيل.`, `⏳ المتبقي: ${left}`];
   if (failure) lines.push(`❌ توقف الرفع: ${failure}`);
   else if (left) lines.push("أرسل /syncdrive مرة أخرى لمتابعة الرفع.");
   else lines.push("🎉 كل التسجيلات مرفوعة.");
@@ -1185,6 +1217,36 @@ export class UserStore {
         .sort((a, b) => (a.day < b.day ? 1 : -1));
       return Response.json({ days: days.slice(0, Number(limit ?? 8)) });
     }
+    if (op === "voiceClaim") {
+      const user = (await storage.get(`user:${userId}`)) ?? {};
+      const currentId = user.voiceRec?.id ?? records[Number(user.voiceRec?.index)]?.id;
+      if (String(currentId) !== String(id)) return Response.json({ claimed: false, currentId: currentId ?? null });
+      const { voiceRec, ...rest } = user;
+      await storage.put(`user:${userId}`, { ...rest, voiceBusy: { id, at: new Date().toISOString() } });
+      return Response.json({ claimed: true });
+    }
+    if (op === "voiceIds") {
+      const voiced = await storage.list({ prefix: VOICE_PREFIX });
+      return Response.json({ ids: [...voiced.keys()].map((key) => Number(key.slice(VOICE_PREFIX.length))).filter(Number.isFinite) });
+    }
+    if (op === "voiceDeleteIds") {
+      const ids = new Set((Array.isArray(body.ids) ? body.ids : []).map(String));
+      let removed = 0;
+      for (const id of ids) if (await storage.delete(voiceKey(id))) removed += 1;
+      return Response.json({ removed });
+    }
+    if (op === "voicePrune") {
+      const active = new Set((Array.isArray(body.activeIds) ? body.activeIds : []).map(String));
+      const voiced = await storage.list({ prefix: VOICE_PREFIX });
+      let removed = 0;
+      for (const [key] of voiced) {
+        if (!active.has(String(key.slice(VOICE_PREFIX.length)))) {
+          await storage.delete(key);
+          removed += 1;
+        }
+      }
+      return Response.json({ removed });
+    }
     if (op === "voiceFiles") {
       const wanted = Array.isArray(body.ids) ? body.ids.slice(0, 50) : [];
       const entries = await Promise.all(wanted.map(async (wordId) => [wordId, (await storage.get(voiceKey(wordId)))?.fileId ?? null]));
@@ -1547,6 +1609,14 @@ async function nextVoicePrompt(env, chatId, userId, user) {
 }
 
 async function beginVoiceRecording(env, chatId, userId, user) {
+  const activeId = user?.voiceRec?.id ?? records[Number(user?.voiceRec?.index)]?.id;
+  if (activeId != null) {
+    const active = records[recordIndexById().get(activeId)];
+    if (active) {
+      await telegram(env, "sendMessage", { chat_id: chatId, text: voicePrompt({ ...active, recorded: 0, total: 1 }), parse_mode: "HTML" });
+      return;
+    }
+  }
   await nextVoicePrompt(env, chatId, userId, user ?? {});
 }
 
@@ -1560,6 +1630,11 @@ async function captureVoiceRecording(env, message, userId, user, ctx) {
   const record = records[recordIndexById().get(id)];
   if (id == null || !record) {
     await beginVoiceRecording(env, message.chat.id, userId, user);
+    return;
+  }
+  const claim = await storeCall(env, { op: "voiceClaim", userId, id });
+  if (!claim.claimed) {
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⚠️ تم استلام تسجيل آخر لهذه الجلسة بالفعل؛ لم أربط هذا الصوت بكلمة ثانية." });
     return;
   }
   await storeCall(env, {
@@ -1714,7 +1789,7 @@ async function askDeleteVoice(env, chatId, query) {
   }
   await telegram(env, "sendMessage", {
     chat_id: chatId,
-    text: `🗑️ حذف تسجيلك لكلمة «${record.coptic}»؟\nستعود الكلمة للصوت الآلي. (نسخة درايف، إن وُجدت، تبقى كما هي.)`,
+    text: `🗑️ حذف تسجيل كلمة «${record.coptic}» من البوت وDrive وورقة upload؟\nستعود الكلمة للصوت الآلي.`,
     reply_markup: { inline_keyboard: [[
       { text: "✅ احذف", callback_data: `vd|${record.id}` },
       { text: "↩️ إلغاء", callback_data: "vd|x" },
@@ -1722,6 +1797,39 @@ async function askDeleteVoice(env, chatId, query) {
   });
 }
 
+async function askDeleteManyVoices(env, chatId, userId, user, argument, all = false) {
+  let ids = [];
+  if (all) {
+    const page = await storeCall(env, { op: "voiceIds" });
+    ids = page.ids ?? [];
+  } else {
+    ids = String(argument ?? "").split(/[|،,\n]+/u).map((item) => cardRecord(item.trim())?.id).filter((id) => id != null);
+  }
+  ids = [...new Set(ids.map(Number))].slice(0, 100);
+  if (!ids.length) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: all ? "لا توجد تسجيلات محفوظة." : "لم أجد كلمات مسجلة. افصل الكلمات بعلامة | أو فاصلة." });
+    return;
+  }
+  await saveUser(env, userId, { ...user, voiceDeleteBatch: ids });
+  await telegram(env, "sendMessage", { chat_id: chatId, text: all ? `🗑️ سيتم حذف كل التسجيلات (${ids.length}) من البوت وDrive وورقة upload، والعودة للصوت الآلي. هل أؤكد؟` : `🗑️ سيتم حذف ${ids.length} تسجيلات من البوت وDrive وورقة upload. هل أؤكد؟`, reply_markup: { inline_keyboard: [[{ text: "✅ تأكيد الحذف", callback_data: "vdb|yes" }, { text: "↩️ إلغاء", callback_data: "vdb|no" }]] } });
+}
+async function finishDeleteBatch(env, callback, confirm) {
+  const chatId = callback.message?.chat?.id;
+  if (!chatId || !isAdmin(env, callback.from?.id)) return;
+  const userId = callback.from.id;
+  const user = (await getUser(env, userId)) ?? {};
+  const edit = (text) => telegram(env, "editMessageText", { chat_id: chatId, message_id: callback.message.message_id, text });
+  if (confirm !== "yes") { await saveUser(env, userId, { ...user, voiceDeleteBatch: undefined }); await edit("تم إلغاء الحذف."); return; }
+  const ids = Array.isArray(user.voiceDeleteBatch) ? user.voiceDeleteBatch : [];
+  let deleted = 0, failed = 0;
+  for (const id of ids) {
+    const remote = await deleteRemoteVoice(env, id);
+    if (!remote.ok) { failed++; continue; }
+    await storeCall(env, { op: "delete", key: voiceKey(id) }); deleted++;
+  }
+  await saveUser(env, userId, { ...user, voiceDeleteBatch: undefined });
+  await edit(`✅ حُذف ${deleted} تسجيل من كل الأنظمة، وعاد الصوت الآلي.${failed ? `\n❌ تعذّر حذف ${failed} بسبب اتصال Drive.` : ""}`);
+}
 async function finishDeleteVoice(env, callback, choice) {
   const chatId = callback.message?.chat?.id;
   const messageId = callback.message?.message_id;
@@ -1736,8 +1844,10 @@ async function finishDeleteVoice(env, callback, choice) {
     await edit("تعذّر الحذف: لم أجد الكلمة.");
     return;
   }
+  const remote = await deleteRemoteVoice(env, record.id);
+  if (!remote.ok) { await edit(`❌ تعذّر حذف تسجيل «${record.coptic}» من Drive/Sheet: ${remote.error ?? "unknown error"}`); return; }
   await storeCall(env, { op: "delete", key: voiceKey(record.id) });
-  await edit(`✅ حُذف تسجيل «${record.coptic}». ستُقرأ الآن بالصوت الآلي.`);
+  await edit(`✅ حُذف تسجيل «${record.coptic}» من البوت وDrive وورقة upload. ستُقرأ الآن بالصوت الآلي.`);
 }
 
 async function stopVoiceRecording(env, chatId, userId, user) {
@@ -2193,6 +2303,11 @@ async function handleUpdate(update, env, ctx) {
       await finishDeleteVoice(env, callback, voiceDelete[1]);
       return;
     }
+    const voiceDeleteBatch = /^vdb\|(yes|no)$/u.exec(callback.data ?? "");
+    if (voiceDeleteBatch) {
+      await finishDeleteBatch(env, callback, voiceDeleteBatch[1]);
+      return;
+    }
     const voicePick = /^vr\|(\d+)$/u.exec(callback.data ?? "");
     if (voicePick) {
       if (chatForPick && isAdmin(env, callback.from?.id)) {
@@ -2330,6 +2445,14 @@ async function handleUpdate(update, env, ctx) {
     }
     if (text === "/setarchive" || text.startsWith("/setarchive ")) {
       await setArchiveChat(env, message, text.slice("/setarchive".length));
+      return;
+    }
+    if (text === "/voice_delete_all") {
+      await askDeleteManyVoices(env, message.chat.id, userId, admin ?? {}, "", true);
+      return;
+    }
+    if (text === "/voice_delete_many" || text.startsWith("/voice_delete_many ")) {
+      await askDeleteManyVoices(env, message.chat.id, userId, admin ?? {}, text.slice("/voice_delete_many".length));
       return;
     }
     if (text === "/voice_delete" || text.startsWith("/voice_delete ")) {

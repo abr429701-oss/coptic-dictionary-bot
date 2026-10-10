@@ -1,21 +1,25 @@
 # Voice archive (Google Apps Script)
 
-كل تسجيل Voice لكلمة (/record) يُرفع إلى Google Drive، ويُكتب في ورقة **Ban** صف واحد لكل كلمة:
-`id, word, drive_url, drive_file_id, telegram_file_id, duration_s, full_name, user_id, username`
-ورابط الملف بصيغة `https://drive.google.com/file/d/<FILE_ID>/view?usp=drivesdk`.
+كل تسجيل Voice من `/record` يُرفع إلى Google Drive، ويُكتب في ورقة **upload** صف واحد بهذه الأعمدة:
+`id, word, drive_url, drive_file_id, telegram_file_id, duration_s, full_name, user_id, username, file_name, updated_at`.
+العمود الثاني (`word`) يظل الكلمة القبطية فقط. أما اسم الملف في Drive فيُبنى من صف الكلمة في ورقة `dictionary` بصيغة: **العربي الكامل - القبطي.ogg** (أو `.mp3` حسب نوع الملف).
 
-1. افتح https://script.google.com ← مشروعك وتأكد أن الكود مطابق لـ `Code.gs`.
-2. اختر الدالة `testSetup` واضغط **Run** مرة واحدة ووافق على الصلاحيات (Drive + Sheets).
-3. **Deploy ← Manage deployments ← Edit (القلم) ← Version: New version ← Deploy** (Execute as: **Me**، Who has access: **Anyone**).
-4. انسخ رابط الـ Web app المنشور (ينتهي بـ `/exec`) وضعه في GitHub Actions Secrets باسم `APPS_SCRIPT_URL`، ثم شغّل workflow يدويًا مع `setup_webhook=false` كي ينتقل السر إلى Cloudflare Worker. أو أرسل الرابط للأدمن في البوت بالأمر `/setdrive الرابط`.
-5. نفّذ `/drive` للتأكد من الاتصال ثم `/syncdrive` لإعادة محاولة التسجيلات المنتظرة. الرابط المحفوظ عبر `/setdrive` يتقدم على سرّ `APPS_SCRIPT_URL`؛ أرسل `/setdrive reset` للعودة إلى السرّ.
+## التشغيل
 
-بعد أي تعديل على الكود لازم **New version** وإلا يظل الرابط يشغّل النسخة القديمة. عند تعديل النسخة في عملية نشر قائمة، يبقى رابط `/exec` نفسه عادةً ثابتًا.
+1. افتح Google Apps Script وتأكد أن الكود مطابق لـ `Code.gs`.
+2. شغّل `testSetup` مرة واحدة ووافق على صلاحيات Drive وSheets.
+3. Deploy → Manage deployments → Edit → **Version: New version** → Execute as **Me** وWho has access **Anyone**.
+4. ضع رابط `/exec` في GitHub Actions Secret باسم `APPS_SCRIPT_URL` أو أرسله للأدمن عبر `/setdrive <الرابط>`.
+5. استخدم `/drive` لفحص الاتصال، ثم `/syncdrive` لمصالحة Drive مع Sheet ورفع التسجيلات القديمة المعلقة.
 
-## ورقة User (المستخدمون)
+## المزامنة ثنائية الاتجاه
 
-عند أول تواصل لمستخدم جديد، وعند إكماله التسجيل، وعند تغيّر اسمه أو يوزره في تيليجرام، يُكتب/يُحدَّث صف له في ورقة **User**: `name, username, id, joined_at, registered_at, updated_at` (مفتاح التحديث هو `id` فلا تتكرر الصفوف). لنقل المستخدمين الحاليين أرسل للأدمن `/syncusers` (دفعات من 30، كرّره حتى تنتهي).
+- حذف ملف الصوت من Drive يحذف صفه من `upload`، ثم يحذف البوت تسجيله المحلي عند تشغيل `/syncdrive` أو `/drive`.
+- حذف صف من `upload` يضع ملف Drive المرتبط به في المهملات، باستخدام manifest محفوظ في Script Properties.
+- حذف تسجيل من البوت عبر `/voice_delete <كلمة>` أو `/voice_delete_many كلمة1|كلمة2` يحذف من البوت وDrive و`upload` معًا.
+- `/voice_delete_all` يحذف كل التسجيلات بعد تأكيد الأدمن.
+- بعد تعديل Apps Script يجب إنشاء **New version** حتى يعمل الرابط بنفس النسخة الجديدة.
 
-⚠️ أي ورقة داخل نفس الملف تكون عامة لكل من معه الرابط. ملف القاموس مشارك للجميع، فبيانات المستخدمين (الأسماء الحقيقية والأرقام) ستكون ظاهرة. لفصلها، أنشئ ملفًا خاصًا وضع رقمه في `USERS_SHEET_ID` داخل `CONFIG`.
+## المستخدمون
 
-بعد أي تعديل على الكود: **Deploy ← Manage deployments ← Edit ← New version**.
+المستخدمون الجدد والقدامى يُكتبون/يُحدّثون في ورقة **users** بمفتاح Telegram ID، لمنع التكرار. شغّل `/syncusers` عدة مرات حتى تظهر رسالة اكتمال كل الدفعات؛ هذا يرحّل المستخدمين القدامى أيضًا، وليس الجدد فقط.
