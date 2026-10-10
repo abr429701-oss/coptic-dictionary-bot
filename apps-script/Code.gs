@@ -35,6 +35,11 @@ function doPost(e) {
   try {
     const body = JSON.parse((e && e.postData && e.postData.contents) || "{}");
     if (body.action === "ping") return json_(ping_());
+    if (body.action === "dictionary_get" || body.action === "dictionary_update") {
+      const dictionaryAdmin = body.by && body.by.id != null ? String(body.by.id) : "";
+      if (dictionaryAdmin !== "813894692") return json_({ ok: false, error: "unauthorized" });
+      return json_(body.action === "dictionary_get" ? dictionaryGet_(body.word) : dictionaryUpdate_(body));
+    }
     if (body.action === "users") return json_(upsertUsers_(body.users));
     if (["sync", "reconcile", "delete", "delete_many", "delete_all"].indexOf(body.action) >= 0) {
       if (CONFIG.ADMIN_ID) {
@@ -105,6 +110,45 @@ function ping_() {
     dictionary_tab: CONFIG.DICTIONARY_TAB,
     admin_id: CONFIG.ADMIN_ID || null,
   };
+}
+
+function dictionarySheet_() {
+  const sheet = openSpreadsheet_().getSheetByName(CONFIG.DICTIONARY_TAB);
+  if (!sheet) throw new Error("dictionary sheet not found");
+  return sheet;
+}
+function normalizeDictionaryWord_(value) {
+  return String(value || "").normalize("NFC").replace(/`/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+function dictionaryGet_(word) {
+  const wanted = normalizeDictionaryWord_(word);
+  if (!wanted) return { ok: false, error: "word is required" };
+  const sheet = dictionarySheet_();
+  const columns = Math.max(1, sheet.getLastColumn ? sheet.getLastColumn() : 11);
+  const headers = sheet.getRange(1, 1, 1, columns).getValues()[0];
+  const rows = sheet.getLastRow() > 1 ? sheet.getRange(2, 1, sheet.getLastRow() - 1, columns).getValues() : [];
+  for (let i = 0; i < rows.length; i++) {
+    if (normalizeDictionaryWord_(rows[i][0]) === wanted) {
+      return { ok: true, row: i + 2, headers: headers, values: rows[i] };
+    }
+  }
+  return { ok: false, error: "word not found" };
+}
+function dictionaryUpdate_(body) {
+  const row = Number(body.row);
+  const expected = normalizeDictionaryWord_(body.expected_coptic);
+  if (!Number.isInteger(row) || row < 2 || !expected || !Array.isArray(body.values)) return { ok: false, error: "row, expected_coptic and values are required" };
+  const sheet = dictionarySheet_();
+  const columns = Math.max(1, sheet.getLastColumn ? sheet.getLastColumn() : body.values.length);
+  if (row > sheet.getLastRow()) return { ok: false, error: "row is out of range" };
+  const current = sheet.getRange(row, 1, 1, columns).getValues()[0];
+  if (normalizeDictionaryWord_(current[0]) !== expected) return { ok: false, error: "row changed; search for the word again" };
+  const values = Array.from({ length: columns }, function (_, index) {
+    return index < body.values.length ? body.values[index] : current[index];
+  });
+  sheet.getRange(row, 1, 1, columns).setValues([values]);
+  SpreadsheetApp.flush();
+  return { ok: true, row: row, headers: sheet.getRange(1, 1, 1, columns).getValues()[0], values: values };
 }
 
 // The dictionary sheet is A=Coptic, B=IPA, C=Arabic/full meaning.

@@ -2371,11 +2371,67 @@ async function sendBotInfo(env, chatId) {
   await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML" });
 }
 
+const DICTIONARY_LOCAL_FIELDS = ["coptic", "pronunciation", "meaning", "translation_en", "translation_fr", "translation_de", "greek", null, null, "origin", "kind"];
+async function dictionaryGetFromSheet(env, word) {
+  const config = await driveConfig(env);
+  if (!config) return { ok: false, error: "لم يتم ربط Apps Script/Google Sheets بعد." };
+  try { return await callAppsScript(config, { action: "dictionary_get", word, by: { id: "813894692" } }); }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : "تعذّر الاتصال بالشيت" }; }
+}
+function dictionaryFieldName(headers, index) {
+  return String(headers?.[index] || `العمود ${String.fromCharCode(65 + index)}`).trim();
+}
+function dictionaryEditMarkup(row, headers) {
+  const buttons = (headers ?? []).map((header, index) => ({ text: `✏️ ${String.fromCharCode(65 + index)}: ${String(header || "بدون عنوان").slice(0, 22)}`, callback_data: `ad|dictfield|${row}|${index}` }));
+  const rows = [];
+  for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
+  rows.push([{ text: "⬅️ قسم تعديل القاموس", callback_data: "ad|page|dictionary" }]);
+  return { inline_keyboard: rows };
+}
+async function beginDictionaryEdit(env, chatId, userId, word) {
+  const result = await dictionaryGetFromSheet(env, word);
+  if (!result.ok) { await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ ${result.error || "لم أجد الكلمة في ورقة dictionary."}` }); return; }
+  const headers = result.headers ?? [];
+  await setAdminFlow(env, userId, { kind: "dict_value", row: result.row, expectedCoptic: result.values?.[0] ?? word, values: result.values ?? [], headers, col: null });
+  const lines = [`📖 <b>صف القاموس رقم ${result.row}</b>`, "اختر أي عمود لتعديله. التعديل يُحفظ فورًا في نفس الصف:", ""];
+  for (let i = 0; i < headers.length; i += 1) lines.push(`<b>${String.fromCharCode(65 + i)} — ${escapeHtml(dictionaryFieldName(headers, i))}:</b> ${escapeHtml(result.values?.[i] ?? "")}`);
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML", reply_markup: dictionaryEditMarkup(result.row, headers) });
+}
+async function chooseDictionaryField(env, callback) {
+  const userId = callback.from.id;
+  const user = await getUser(env, userId);
+  const flow = user?.adminFlow;
+  const row = Number(callback.data.split("|")[2]);
+  const col = Number(callback.data.split("|")[3]);
+  if (!flow || flow.kind !== "dict_value" || flow.row !== row || !Number.isInteger(col) || col < 0 || col >= flow.headers.length) {
+    await telegram(env, "sendMessage", { chat_id: callback.message.chat.id, text: "انتهت جلسة التعديل. ابدأ من /admin ثم تعديل القاموس مرة أخرى." });
+    return;
+  }
+  await setAdminFlow(env, userId, { ...flow, col });
+  await telegram(env, "sendMessage", { chat_id: callback.message.chat.id, text: `✏️ أرسل القيمة الجديدة للحقل «${dictionaryFieldName(flow.headers, col)}».\nأرسل - لمسح محتوى الخلية.` });
+}
+async function updateDictionaryField(env, message, userId, flow, text) {
+  const values = [...(flow.values ?? [])];
+  while (values.length < flow.headers.length) values.push("");
+  values[flow.col] = text === "-" ? "" : text;
+  const config = await driveConfig(env);
+  if (!config) { await clearAdminFlow(env, userId); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ لم يتم ربط Google Sheets." }); return; }
+  let result;
+  try { result = await callAppsScript(config, { action: "dictionary_update", row: flow.row, expected_coptic: flow.expectedCoptic, values, by: { id: "813894692" } }); }
+  catch (error) { result = { ok: false, error: error instanceof Error ? error.message : "تعذّر الاتصال بالشيت" }; }
+  await clearAdminFlow(env, userId);
+  if (!result.ok) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `❌ لم يتم الحفظ: ${result.error || "خطأ غير معروف"}` }); return; }
+  const index = records.findIndex((record) => normalize(record.coptic) === normalize(flow.expectedCoptic));
+  const localField = DICTIONARY_LOCAL_FIELDS[flow.col];
+  if (index >= 0 && localField) records[index][localField] = values[flow.col];
+  await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم تعديل «${dictionaryFieldName(flow.headers, flow.col)}» في صف dictionary رقم ${flow.row} فورًا.\nيمكنك اختيار عمود آخر من /admin → تعديل القاموس.` });
+}
 function adminMenuMarkup(page = "home") {
   const back = [{ text: "⬅️ الرئيسية", callback_data: "ad|page|home" }];
   if (page === "home") return { inline_keyboard: [
     [{ text: "📊 الإحصاءات", callback_data: "ad|page|stats" }, { text: "🎙 الأصوات", callback_data: "ad|page|voices" }],
     [{ text: "☁️ Drive وSheets", callback_data: "ad|page|drive" }, { text: "👥 المستخدمون", callback_data: "ad|page|users" }],
+    [{ text: "📖 تعديل القاموس", callback_data: "ad|page|dictionary" }, { text: "⚙️ أدوات النظام", callback_data: "ad|page|tools" }],
     [{ text: "⬆️ مزامنة الأصوات", callback_data: "ad|syncvoices" }, { text: "👥 مزامنة المستخدمين", callback_data: "ad|syncusers" }],
     [{ text: "⚙️ أدوات النظام", callback_data: "ad|page|tools" }, { text: "🔄 تحديث", callback_data: "ad|refresh" }],
   ] };
@@ -2397,6 +2453,10 @@ function adminMenuMarkup(page = "home") {
     [{ text: "👥 مزامنة المستخدمين", callback_data: "ad|syncusers" }, { text: "📢 إرسال جماعي", callback_data: "ad|broadcast" }],
     [{ text: "📈 تقرير الاستخدام", callback_data: "ad|usage" }, { text: "🔄 تحديث المستخدمين", callback_data: "ad|page|users" }], back,
   ] };
+  if (page === "dictionary") return { inline_keyboard: [
+    [{ text: "✏️ تعديل كلمة / صف كامل", callback_data: "ad|dictedit" }],
+    [{ text: "🔄 فتح قسم آخر", callback_data: "ad|page|home" }],
+  ] };
   return { inline_keyboard: [
     [{ text: "🤖 معلومات البوت", callback_data: "ad|botinfo" }, { text: "📈 تقرير الاستخدام", callback_data: "ad|usage" }],
     [{ text: "🖼 إخفاء بطاقة كلمة", callback_data: "ad|cardhide" }, { text: "🖼 إظهار بطاقة كلمة", callback_data: "ad|cardshow" }],
@@ -2414,13 +2474,14 @@ async function adminDashboardText(env, page = "home") {
     `⏳ تنتظر الرفع: <b>${Number(stats.pendingUploads ?? 0).toLocaleString("en-US")}</b>`,
     `☁️ Drive / Sheets: <b>${drive}</b>`,
   ];
-  const titles = { home: "🛠 لوحة تحكم الأدمن", stats: "📊 إحصاءات القاموس والبوت", voices: "🎙 إدارة الأصوات", drive: "☁️ إدارة Google Drive وSheets", users: "👥 إدارة المستخدمين", tools: "⚙️ أدوات النظام" };
+  const titles = { home: "🛠 لوحة تحكم الأدمن", stats: "📊 إحصاءات القاموس والبوت", voices: "🎙 إدارة الأصوات", drive: "☁️ إدارة Google Drive وSheets", users: "👥 إدارة المستخدمين", dictionary: "📖 تعديل القاموس", tools: "⚙️ أدوات النظام" };
   const extras = {
     home: ["اختر القسم المطلوب؛ جميع وظائف الأدمن موجودة هنا."],
     stats: ["✅ البيانات تُقرأ مباشرة من التخزين الحالي."],
     voices: ["التسجيل الجديد يبقى مرتبطًا بمعرّف الكلمة، ثم يُرفع ويُزامن مع Drive وupload."],
     drive: [config ? "الرابط مضبوط ويمكن فحص المصالحة أو تغييره." : "لم يتم ضبط رابط Apps Script بعد."],
     users: ["المستخدمون الجدد والقدامى يمرون من نفس مسار المزامنة."],
+    dictionary: ["تحكم كامل في خلايا صف الكلمة، مع تحقق من رقم الصف والكلمة قبل الحفظ."],
     tools: ["أدوات صيانة وتشخيص وإدارة البطاقات والأرشيف."],
   };
   return [`<b>${titles[page] ?? titles.home}</b>`, "", ...common, "", ...(extras[page] ?? extras.home)].join("\n");
@@ -2445,6 +2506,8 @@ async function clearAdminFlow(env, userId) {
 async function handleAdminFlow(env, message, userId, user, text) {
   const flow = user?.adminFlow;
   if (!flow || !text || text.startsWith("/")) return false;
+  if (flow.kind === "dict_find") { await clearAdminFlow(env, userId); await beginDictionaryEdit(env, message.chat.id, userId, text); return true; }
+  if (flow.kind === "dict_value" && Number.isInteger(flow.col) && flow.col >= 0) { await updateDictionaryField(env, message, userId, flow, text); return true; }
   await clearAdminFlow(env, userId);
   if (flow === "setdrive") await setDriveConfig(env, message, text);
   else if (flow === "setarchive") await setArchiveChat(env, message, text);
@@ -2471,6 +2534,8 @@ async function handleAdminDashboardCallback(env, callback, ctx) {
   if (action === "recordchoose") { await beginVoiceChoice(env, chatId, callback.from.id, await getUser(env, callback.from.id) ?? {}); return; }
   if (action === "recordstop") { await stopVoiceRecording(env, chatId, callback.from.id, await getUser(env, callback.from.id) ?? {}); return; }
   if (action === "deleteall") { await askDeleteManyVoices(env, chatId, callback.from.id, await getUser(env, callback.from.id) ?? {}, "", true); return; }
+  if (action === "dictedit") { await setAdminFlow(env, callback.from.id, { kind: "dict_find" }); await telegram(env, "sendMessage", { chat_id: chatId, text: "📖 أرسل الكلمة القبطية كما تظهر في القاموس للبحث عن صفها." }); return; }
+  if (action === "dictfield") { await chooseDictionaryField(env, callback); return; }
   const prompts = { deleteone: ["🗑 أرسل كلمة واحدة لحذف تسجيلها:", "deleteone"], deletemany: ["🗑 أرسل الكلمات مفصولة بعلامة | أو فاصلة:", "deletemany"], setdrive: ["🔗 أرسل رابط Apps Script المنتهي بـ /exec:", "setdrive"], setarchive: ["📦 أرسل رقم المجموعة، أو off لإيقاف الأرشيف:", "setarchive"], cardhide: ["🖼 أرسل الكلمة لإخفاء بطاقتها:", "cardhide"], cardshow: ["🖼 أرسل الكلمة لإظهار بطاقتها:", "cardshow"] };
   if (prompts[action]) { await setAdminFlow(env, callback.from.id, prompts[action][1]); await telegram(env, "sendMessage", { chat_id: chatId, text: prompts[action][0] }); return; }
   if (action === "resetdrive") { await setDriveConfig(env, { chat: { id: chatId } }, "reset"); return; }

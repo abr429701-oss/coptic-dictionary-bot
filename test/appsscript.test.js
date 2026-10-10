@@ -62,7 +62,7 @@ function build() {
     getFiles() { const own = [...files.values()].filter((file) => !file.trashed); let i = 0; return { hasNext: () => i < own.length, next: () => own[i++] }; }, });
   // Match the production Apps Script configuration: fixed folder and upload tab.
   folders.push(makeFolder("dic_final"));
-  const main = new FakeSheet("Dictionary", [["coptic", "greek"]]);
+  const main = new FakeSheet("dictionary", [["coptic", "ipa", "meaning", "english", "french", "german", "greek", "unused_h", "unused_i", "origin", "kind"], ["ⲁⲛⲁⲩ", "anau", "نظر", "look", "regarder", "schauen", "ἀναυ", "", "", "فعل", "فعل"]]);
   const uploadSheet = new FakeSheet("upload");
   const sheets = [main, uploadSheet];
   const spreadsheet = {
@@ -82,7 +82,7 @@ function build() {
       getFolderById: (id) => folders[0],
       getFileById: (id) => { if (!files.has(id)) throw new Error("not found"); return files.get(id); },
     },
-    SpreadsheetApp: { openById: () => spreadsheet },
+    SpreadsheetApp: { openById: () => spreadsheet, flush() {} },
     Logger: { log() {} },
   });
   const api = vm.runInContext(`${source}\n({ doPost, doGet })`, context);
@@ -131,7 +131,7 @@ test("re-recording a word replaces its upload row", () => {
   const second = world.post(upload({ id: 3, word: "ⲁⲛⲁⲩ", by }));
   assert.notEqual(first.file_id, second.file_id);
   assert.equal(world.files.get(first.file_id).trashed, true);
-  assert.equal(world.files.get(second.file_id).blob.name, "ⲁⲛⲁⲩ.ogg");
+  assert.equal(world.files.get(second.file_id).blob.name, "نظر - ⲁⲛⲁⲩ.ogg");
   const ban = world.sheets.find((sheet) => sheet.getName() === "upload");
   assert.equal(ban.data.length, 2);
   assert.equal(ban.data[1][2], second.url);
@@ -161,6 +161,22 @@ test("users are added to the users tab and updated by Telegram id without duplic
   assert.equal(tab.data.length, 3);
   assert.deepEqual(tab.data[1].slice(0, 3), ["مينا جرجس بشرى", "@mina", "11"]);
   assert.equal(world.post({ action: "users", users: [{ id: "x; drop" }] }).added, 0);
+});
+test("dictionary_get and dictionary_update read and replace the exact dictionary row", () => {
+  const world = build();
+  const found = world.post({ action: "dictionary_get", word: "ⲁⲛⲁⲩ", by: { id: "813894692" } });
+  assert.equal(found.ok, true);
+  assert.equal(found.row, 2);
+  assert.equal(found.values[3], "look");
+  const values = [...found.values];
+  values[3] = "watch";
+  values[9] = "اسم";
+  const updated = world.post({ action: "dictionary_update", row: found.row, expected_coptic: "ⲁⲛⲁⲩ", values, by: { id: "813894692" } });
+  assert.equal(updated.ok, true);
+  assert.equal(world.main.data[1][3], "watch");
+  assert.equal(world.main.data[1][9], "اسم");
+  const stale = world.post({ action: "dictionary_update", row: 2, expected_coptic: "ⲭⲁⲓ", values });
+  assert.equal(stale.ok, false);
 });
 test("delete_all trashes every file in the voice folder and clears upload", () => {
   const world = build();
