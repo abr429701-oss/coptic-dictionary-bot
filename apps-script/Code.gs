@@ -36,12 +36,15 @@ function doPost(e) {
     const body = JSON.parse((e && e.postData && e.postData.contents) || "{}");
     if (body.action === "ping") return json_(ping_());
     if (body.action === "users") return json_(upsertUsers_(body.users));
-    if (body.action === "sync" || body.action === "reconcile" || body.action === "delete") {
+    if (["sync", "reconcile", "delete", "delete_many", "delete_all"].indexOf(body.action) >= 0) {
       if (CONFIG.ADMIN_ID) {
         const senderId = body.by && body.by.id != null ? String(body.by.id) : "";
         if (senderId !== String(CONFIG.ADMIN_ID)) return json_({ ok: false, error: "unauthorized" });
       }
-      return json_(body.action === "delete" ? deleteUpload_(body) : reconcile_());
+      if (body.action === "delete") return json_(deleteUpload_(body));
+      if (body.action === "delete_many") return json_(deleteUploads_(body.ids));
+      if (body.action === "delete_all") return json_(deleteAllUploads_());
+      return json_(reconcile_());
     }
     if (CONFIG.ADMIN_ID) {
       const senderId = body.by && body.by.id != null ? String(body.by.id) : "";
@@ -173,6 +176,52 @@ function saveManifest_(value) { PropertiesService.getScriptProperties().setPrope
 function rememberUpload_(id, fileId) { if (!id) return; const m = manifest_(); m[String(id)] = String(fileId); saveManifest_(m); }
 function removeManifest_(id) { const m = manifest_(); delete m[String(id)]; saveManifest_(m); }
 function trashFile_(fileId) { if (!fileId) return false; try { DriveApp.getFileById(String(fileId)).setTrashed(true); return true; } catch (ignored) { return false; } }
+function deleteUploads_(ids) {
+  const wanted = Array.from(new Set((Array.isArray(ids) ? ids : []).map(String).filter(function (id) { return /^\d+$/.test(id); })));
+  if (!wanted.length) return { ok: true, deleted: 0 };
+  const lock = LockService.getScriptLock(); lock.waitLock(30000);
+  try {
+    const sheet = banSheet_(openSpreadsheet_());
+    const wantedSet = {};
+    wanted.forEach(function (id) { wantedSet[id] = true; });
+    const fileIds = {};
+    const manifest = manifest_();
+    for (let row = sheet.getLastRow(); row >= 2; row--) {
+      const values = sheet.getRange(row, 1, 1, BAN_HEADER.length).getValues()[0];
+      const id = String(values[0] || "");
+      if (wantedSet[id]) {
+        if (values[3] || manifest[id]) fileIds[String(values[3] || manifest[id])] = true;
+        sheet.deleteRow(row);
+        delete manifest[id];
+      }
+    }
+    Object.keys(fileIds).forEach(trashFile_);
+    saveManifest_(manifest);
+    return { ok: true, deleted: wanted.length, trashed: Object.keys(fileIds).length };
+  } finally { lock.releaseLock(); }
+}
+function deleteAllUploads_() {
+  const lock = LockService.getScriptLock(); lock.waitLock(30000);
+  try {
+    const sheet = banSheet_(openSpreadsheet_());
+    const fileIds = {};
+    const manifest = manifest_();
+    for (let row = 2; row <= sheet.getLastRow(); row++) {
+      const values = sheet.getRange(row, 1, 1, BAN_HEADER.length).getValues()[0];
+      const fileId = String(values[3] || manifest[String(values[0] || "")] || "");
+      if (fileId) fileIds[fileId] = true;
+    }
+    Object.keys(manifest).forEach(function (id) { if (manifest[id]) fileIds[String(manifest[id])] = true; });
+    // Also clear orphan files that are still inside the configured folder.
+    const folder = getFolder_();
+    const files = folder.getFiles ? folder.getFiles() : null;
+    if (files) while (files.hasNext()) fileIds[String(files.next().getId())] = true;
+    Object.keys(fileIds).forEach(trashFile_);
+    for (let row = sheet.getLastRow(); row >= 2; row--) sheet.deleteRow(row);
+    saveManifest_({});
+    return { ok: true, deleted: Object.keys(fileIds).length, folder_cleared: true };
+  } finally { lock.releaseLock(); }
+}
 function deleteUpload_(body) {
   const id = String(body.id == null ? "" : body.id);
   if (!/^\d+$/.test(id)) return { ok: false, error: "id must be a number" };
@@ -224,13 +273,13 @@ function upsertUsers_(users) {
   try {
     const spreadsheet = CONFIG.USERS_SHEET_ID ? SpreadsheetApp.openById(CONFIG.USERS_SHEET_ID) : openSpreadsheet_();
     let sheet = spreadsheet.getSheetByName(CONFIG.USERS_TAB);
-    const usersHeader = ["name", "username", "id", "joined_at", "registered_at", "updated_at"];
+    const usersHeader = ["name", "username", "id", "joined_at", "registered_at", "blocked"];
     if (!sheet) {
       sheet = spreadsheet.insertSheet(CONFIG.USERS_TAB, spreadsheet.getNumSheets());
       sheet.appendRow(usersHeader);
     } else {
       const header = sheet.getRange(1, 1, 1, usersHeader.length).getValues()[0];
-      if (!header.slice(0, 3).every(function (cell, i) { return String(cell).toLowerCase() === usersHeader[i]; })) {
+      if (!usersHeader.every(function (expected, i) { return String(header[i]).toLowerCase() === expected; })) {
         sheet.getRange(1, 1, 1, usersHeader.length).setValues([usersHeader]);
       }
     }
@@ -241,7 +290,7 @@ function upsertUsers_(users) {
       const id = String(user.id == null ? "" : user.id); if (!/^\d+$/.test(id)) return;
       const username = user.username ? "@" + String(user.username).replace(/^@/, "") : "";
       const target = rowOf[id]; const old = target ? sheet.getRange(target, 1, 1, 6).getValues()[0] : [];
-      const row = [user.name || old[0] || "", username || old[1] || "", id, user.joined_at || old[3] || "", user.registered_at || old[4] || "", new Date().toISOString()];
+      const row = [user.name || old[0] || "", username || old[1] || "", id, user.joined_at || old[3] || "", user.registered_at || old[4] || "", user.blocked === true ? "نعم" : "لا"];
       if (target) { sheet.getRange(target, 1, 1, 6).setValues([row]); updated++; }
       else { sheet.appendRow(row); rowOf[id] = sheet.getLastRow(); added++; }
     });

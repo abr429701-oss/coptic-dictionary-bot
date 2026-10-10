@@ -11,6 +11,7 @@ class FakeSheet {
   getName() { return this.name; }
   getLastRow() { return this.data.length; }
   appendRow(row) { this.data.push([...row]); }
+  deleteRow(row) { this.data.splice(row - 1, 1); }
   getRange(row, col, numRows = 1, numCols = 1) {
     const sheet = this;
     const cell = (r, c) => sheet.data[r - 1]?.[c - 1] ?? "";
@@ -57,7 +58,8 @@ function build() {
     return file;
   };
   const makeFolder = (name) => ({ id: `folder${folders.length + 1}`, name, getId() { return this.id; }, getName() { return this.name; }, isTrashed() { return false; },
-    getUrl() { return `https://drive.google.com/drive/folders/${this.id}`; }, createFile: makeFile });
+    getUrl() { return `https://drive.google.com/drive/folders/${this.id}`; }, createFile: makeFile,
+    getFiles() { const own = [...files.values()].filter((file) => !file.trashed); let i = 0; return { hasNext: () => i < own.length, next: () => own[i++] }; }, });
   // Match the production Apps Script configuration: fixed folder and upload tab.
   folders.push(makeFolder("dic_final"));
   const main = new FakeSheet("Dictionary", [["coptic", "greek"]]);
@@ -159,4 +161,17 @@ test("users are added to the users tab and updated by Telegram id without duplic
   assert.equal(tab.data.length, 3);
   assert.deepEqual(tab.data[1].slice(0, 3), ["مينا جرجس بشرى", "@mina", "11"]);
   assert.equal(world.post({ action: "users", users: [{ id: "x; drop" }] }).added, 0);
+});
+test("delete_all trashes every file in the voice folder and clears upload", () => {
+  const world = build();
+  world.post(upload({ id: 7 }));
+  world.post(upload({ id: 8, word: "ⲁⲛⲁⲩ" }));
+  const result = world.post({ action: "delete_all" });
+  assert.equal(result.ok, true);
+  assert.equal(result.folder_cleared, true);
+  assert.equal(world.files.size, 2);
+  assert.ok([...world.files.values()].every((file) => file.trashed));
+  assert.deepEqual(world.sheets.find((sheet) => sheet.getName() === "upload").data, [[
+    "id", "word", "drive_url", "drive_file_id", "telegram_file_id", "duration_s", "full_name", "user_id", "username", "file_name", "updated_at",
+  ]]);
 });
