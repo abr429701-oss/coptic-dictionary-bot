@@ -51,7 +51,7 @@ function lazy(build) {
 }
 
 // Search only the sheet's own text; never derived/generated fields.
-const SEARCH_FIELDS = ["coptic", "greek", "pronunciation", "english", "phonetic", "translation_en", "translation_fr", "translation_de"];
+const SEARCH_FIELDS = ["coptic", "pronunciation", "english", "phonetic", "translation_en", "translation_fr", "translation_de"];
 
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
 import { fetchHumanSpeech, fetchPrebuiltSpeech, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
@@ -92,10 +92,10 @@ const SUGGESTION_PAGE_SIZE = 10;
 const SUGGESTION_TITLE = "اختر من الاقتراحات التالية:";
 const SHORT_QUERY_MAX = 2;
 const MORE_BUTTON_TEXT = {
-  ar: "اعرض المزيد",
-  en: "Show more",
-  fr: "Afficher plus",
-  de: "Mehr anzeigen",
+  ar: "اعرض المزيد من الكلمات",
+  en: "Show more words",
+  fr: "Afficher plus de mots",
+  de: "Mehr Wörter anzeigen",
 };
 const UI_TEXT = {
   ar: { word: "الكلمة", meaning: "المعنى", kind: "النوع", origin: "الأصل", more: "هناك معنى آخر للكلمة التي بحثت بها", next: "اضغط هنا لعرضه", end: "انتهت المعاني المتاحة لهذه الكلمة", choose: "اختر من الاقتراحات التالية:", previous: "السابق", pageNext: "التالي", noResult: "القاموس قيد التطوير حاليًا وسيتم إضافة معنى هذه الكلمة لاحقًا" },
@@ -159,7 +159,7 @@ const searchIndex = lazy(() => {
       if (first) firstParts.add(first);
     }
     for (const first of firstParts) addRow(meaningFirst, first, row);
-    const keys = [record.coptic, record.greek, record.english, record.phonetic].map(normalize);
+    const keys = [record.coptic, record.english, record.phonetic].map(normalize);
     prefix.push(keys.concat(parts).filter(Boolean));
   });
   return { meaning, prefix, termTokens, textExact, textFirst, meaningExact, meaningFirst };
@@ -230,16 +230,22 @@ function pageCallback(page, query) {
   return prefix + truncateBytes(query, CALLBACK_DATA_MAX_BYTES - prefix.length);
 }
 
+function equalizeSuggestionLabels(labels) {
+  const width = Math.max(...labels.map((label) => [...String(label)].length), 0);
+  // Figure spaces keep Telegram inline buttons visually equal without changing callback data.
+  return labels.map((label) => String(label).padEnd(width, "\u2007"));
+}
 function renderSuggestions(query, normalizedQuery, matches, requestedPage) {
   const ui = uiTextFor(query);
   const totalPages = Math.max(1, Math.ceil(matches.length / SUGGESTION_PAGE_SIZE));
   const page = Math.max(0, Math.min(requestedPage, totalPages - 1));
   const slice = matches.slice(page * SUGGESTION_PAGE_SIZE, (page + 1) * SUGGESTION_PAGE_SIZE);
   const languageQuery = uiLanguage(query) === "ar" ? "" : truncateBytes(query, CALLBACK_DATA_MAX_BYTES - 18);
-  const keyboard = slice.map((index) => {
+  const labels = slice.map((index) => suggestionLabel(records[index], normalizedQuery));
+  const keyboard = slice.map((index, position) => {
     const part = matchedPartIndex(records[index], normalizedQuery);
     return [{
-      text: suggestionLabel(records[index], normalizedQuery),
+      text: equalizeSuggestionLabels(labels)[position],
       callback_data: part >= 0 ? `s|${index}|${part}${languageQuery ? `|${languageQuery}` : ""}` : `s|${index}${languageQuery ? `|${languageQuery}` : ""}`,
     }];
   });
@@ -288,7 +294,7 @@ function formatRecord(record, partIndex = -1, searchedWord = "") {
   return lines.join("\n");
 }
 
-const SAME_WORD_FIELDS = ["coptic", "greek", "english", "phonetic", "translation_en", "translation_fr", "translation_de"];
+const SAME_WORD_FIELDS = ["coptic", "english", "phonetic", "translation_en", "translation_fr", "translation_de"];
 
 // Rows sharing a normalized coptic/greek/english/phonetic value, built once (instead of scanning every row per lookup).
 const sameWordRows = lazy(() => {
@@ -369,7 +375,7 @@ function scriptKind(key) {
 
 const WORD_FIELDS = {
   cop: ["coptic"],
-  el: ["greek"],
+  el: [], // Greek search is intentionally disabled; the Greek column remains display-only data.
   en: ["english", "phonetic", "translation_en"],
   fr: ["translation_fr"],
   de: ["translation_de"],
@@ -469,8 +475,10 @@ function renderWordSuggestions(query, words, requestedPage) {
   const ui = uiTextFor(query);
   const totalPages = Math.max(1, Math.ceil(words.length / SUGGESTION_PAGE_SIZE));
   const page = Math.max(0, Math.min(requestedPage, totalPages - 1));
-  const keyboard = words.slice(page * SUGGESTION_PAGE_SIZE, (page + 1) * SUGGESTION_PAGE_SIZE).map((word) => [{
-    text: word.label.slice(0, 48),
+  const visibleWords = words.slice(page * SUGGESTION_PAGE_SIZE, (page + 1) * SUGGESTION_PAGE_SIZE);
+  const labels = equalizeSuggestionLabels(visibleWords.map((word) => word.label.slice(0, 48)));
+  const keyboard = visibleWords.map((word, position) => [{
+    text: labels[position],
     callback_data: `w|${truncateBytes(word.key, CALLBACK_DATA_MAX_BYTES - 2)}`,
   }]);
   const navigation = [];

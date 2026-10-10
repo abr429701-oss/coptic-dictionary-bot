@@ -120,7 +120,7 @@ test("tapping a suggested word shows that word", async () => {
   await worker.fetch(updateRequest({ callback_query: { id: "w1", data: first.callback_data, message: { message_id: 1, chat: { id: 19 }, text: "x" } } }), env);
   const text = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
   assert.ok(text.startsWith("<b>الكلمة:</b> "));
-  assert.ok(text.replaceAll("`", "").includes(first.text.replaceAll("`", "")));
+  assert.ok(text.replaceAll("`", "").includes(first.text.replace(/\u2007/gu, "").replaceAll("`", "")));
 });
 
 test("callback pagination edits the suggestions message using the query in the callback data", async () => {
@@ -293,7 +293,7 @@ test("multiple meanings are shown separately with a button for the next meaning"
   assert.match(first.text, /المعنى/u);
   assert.doesNotMatch(first.text, /هناك معنى آخر للكلمة التي بحثت بها/u);
   const next = first.reply_markup.inline_keyboard[0][0];
-  assert.equal(next.text, "اعرض المزيد");
+  assert.equal(next.text, "اعرض المزيد من الكلمات");
 
   const secondCalls = [];
   fakeTelegramApi(secondCalls);
@@ -636,7 +636,7 @@ test("every current type and origin value has English, French and German transla
   assert.doesNotMatch(translateFieldValue("فعل ، صيغة مصدرية مضافة حديثًا", "fr"), /[\u0600-\u06ff]/u);
 });
 
-test("Greek column searches to the Coptic counterpart", async () => {
+test("Greek search is disabled", async () => {
   const record = records.find((item) => String(item.greek ?? "").trim());
   assert.ok(record?.greek, "dictionary fixture must contain a Greek value");
   const query = String(record.greek).split(/[،,]/u)[0].trim();
@@ -644,57 +644,10 @@ test("Greek column searches to the Coptic counterpart", async () => {
   fakeTelegramApi(calls);
   await worker.fetch(updateRequest({ message: { text: query, chat: { id: 567 }, from: { id: 567 } } }), env);
   const text = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload?.text ?? "";
-  assert.doesNotMatch(text, /القاموس قيد التطوير/u);
+  assert.doesNotMatch(text, /<b>Word:|<b>الكلمة:/u);
+  assert.equal(text.includes(record.coptic), false);
+  assert.match(text, /dictionary|القاموس/u);
 });
-
-test("Greek searches show English fields while suggestion entries remain Greek", async () => {
-  const record = records.find((item) => String(item.greek ?? "").split(/[،,]/u)[0].trim().length > 2 && item.kind && item.origin);
-  assert.ok(record?.greek, "dictionary fixture must contain a Greek word with metadata");
-  const query = String(record.greek).split(/[،,]/u)[0].trim();
-  const calls = [];
-  fakeTelegramApi(calls);
-  await worker.fetch(updateRequest({ message: { text: query, chat: { id: 568 }, from: { id: 568 } } }), env);
-  const text = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload?.text ?? "";
-  assert.ok(text.includes(`<b>Word:</b> ${query}`), text);
-  assert.ok(text.includes(`<b>Meaning:</b> ${record.coptic}`), text);
-  assert.ok(text.includes(`Part of speech:</b> ${VALUE_TRANSLATIONS.en[record.kind]}`), text);
-  assert.ok(text.includes(`Origin:</b> ${VALUE_TRANSLATIONS.en[record.origin]}`), text);
-
-  calls.length = 0;
-  await worker.fetch(updateRequest({ message: { text: [...query][0], chat: { id: 568 }, from: { id: 568 } } }), env);
-  const keyboardText = JSON.stringify(calls.find((call) => call.url.endsWith("/sendMessage"))?.payload?.reply_markup ?? "");
-  assert.match(keyboardText, /[\u0370-\u03ff\u1f00-\u1fff]/u, "Greek suggestions should stay Greek");
-});
-
-test("Greek lookup bypasses a mismatched manual recording and speaks the Coptic IPA entry", async () => {
-  const record = records.find((item) => String(item.greek ?? "").split(/[،,]/u)[0].trim().length > 2 && item.pronunciation && item.english);
-  assert.ok(record?.greek && record.id != null, "dictionary fixture must contain a pronounceable Greek entry");
-  const query = String(record.greek).split(/[،,]/u)[0].trim();
-  const kvEnv = { ...env, USERS: fakeKv() };
-  kvEnv.USERS.store.set(`voiceid:${record.id}`, { fileId: "wrong-english-recording" });
-  const calls = [];
-  fakeTelegramApi(calls);
-  await worker.fetch(updateRequest({ message: { text: query, chat: { id: 569 }, from: { id: 569 } } }), kvEnv);
-  const tts = calls.find((call) => call.url.includes("translate_tts"));
-  assert.ok(tts, "Greek search should reach the IPA-based speech fallback in this test");
-  assert.ok(!calls.some((call) => call.url.endsWith("/sendVoice") && call.payload?.voice === "wrong-english-recording"));
-  const spoken = new URL(tts.url).searchParams.get("q") ?? "";
-  assert.equal(spoken.toLowerCase().includes(String(record.english).toLowerCase()), false, "speech must not be generated from the English gloss");
-});
-test("Greek lookup without IPA never falls back to the English gloss", async () => {
-  const record = records.find((item) => String(item.greek ?? "").split(/[،,]/u)[0].trim().length > 2 && !String(item.pronunciation ?? "").trim() && String(item.coptic ?? "").trim() && String(item.english ?? "").trim());
-  assert.ok(record?.greek && record.coptic && record.english, "dictionary fixture must contain a Greek entry without IPA");
-  const query = String(record.greek).split(/[،,]/u)[0].trim();
-  const calls = [];
-  fakeTelegramApi(calls);
-  await worker.fetch(updateRequest({ message: { text: query, chat: { id: 570 }, from: { id: 570 } } }), env);
-  const tts = calls.find((call) => call.url.includes("translate_tts"));
-  assert.ok(tts, "Greek search should use the generated speech fallback");
-  const spoken = new URL(tts.url).searchParams.get("q") ?? "";
-  assert.match(spoken, new RegExp(String(record.coptic).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
-  assert.equal(spoken.toLowerCase().includes(String(record.english).toLowerCase()), false);
-});
-
 test("a translation query does not match inside a longer phrase", async () => {
   const calls = [];
   fakeTelegramApi(calls);
