@@ -1,4 +1,4 @@
-name: Build human voice (IPA Reader - Matthew)
+name: Build human voice (IPA Reader - Joanna female)
 
 on:
   workflow_dispatch:
@@ -43,9 +43,9 @@ jobs:
             mkdir audio-out
           fi
 
-      - name: Generate words through IPA Reader (Matthew, slow, 3 repeats)
+      - name: Generate words through IPA Reader (Joanna female, slow, 3 repeats)
         env:
-          IPA_VOICE: Matthew
+          IPA_VOICE: Joanna
           IPA_SLOW_FACTOR: "0.75"
           IPA_REPEATS: "3"
           IPA_BREAK_MS: "700"

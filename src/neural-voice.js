@@ -13,7 +13,7 @@
 export const NEURAL_VOICE_VERSION = "v8";
 // Bump this whenever the external human-audio files are regenerated. This
 // prevents Telegram file_ids from an older voice build being reused forever.
-export const HUMAN_AUDIO_VERSION = "ipa-reader-matthew-v1";
+export const HUMAN_AUDIO_VERSION = "ipa-reader-joanna-v1";
 
 // -----------------------------------------------------------------------------
 // IPA normalization

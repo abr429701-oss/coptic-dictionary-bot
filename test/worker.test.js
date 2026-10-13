@@ -25,6 +25,7 @@ const JINKIM_RECORD = records.find((record) => String(record.coptic ?? "").inclu
 const JINKIM_WORD = String(JINKIM_RECORD?.coptic ?? "ⲁⲧⲥ̀ϧⲁⲓ");
 const JINKIM_PLAIN = JINKIM_WORD.replaceAll("\u0300", "");
 const JINKIM_BACKTICK = JINKIM_WORD.replace("\u0300", "`");
+const escapeRegex = (value) => String(value ?? "").replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 
 function fakeTelegramApi(calls) {
   globalThis.fetch = async (url, options = {}) => {
@@ -521,6 +522,8 @@ test("English, French and German translations search to the Coptic counterpart",
     const labels = field === "translation_en" ? ["Word", "Meaning"] : field === "translation_fr" ? ["Mot", "Sens"] : ["Wort", "Bedeutung"];
     assert.ok(message.text.includes(`<b>${labels[0]}:</b> ${record[field]}`));
     assert.ok(message.text.includes(`<b>${labels[1]}:</b> ${record.coptic}`));
+    assert.doesNotMatch(message.text, new RegExp(`<b>${field === "translation_en" ? "Part of speech" : field === "translation_fr" ? "Nature" : "Wortart"}:<\\/b> ${escapeRegex(record.kind)}`, "u"));
+    assert.doesNotMatch(message.text, new RegExp(`<b>${field === "translation_en" ? "Origin" : field === "translation_fr" ? "Origine" : "Herkunft"}:<\\/b> ${escapeRegex(record.origin)}`, "u"));
   }
 });
 

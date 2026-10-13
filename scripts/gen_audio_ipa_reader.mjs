@@ -15,7 +15,7 @@ import records from "../data/dictionary.json" with { type: "json" };
 
 const run = promisify(execFile);
 const SITE = "https://ipa-reader.com/";
-const VOICE = process.env.IPA_VOICE ?? "Matthew";
+const VOICE = process.env.IPA_VOICE ?? "Joanna";
 const RATE = Number(process.env.IPA_SLOW_FACTOR ?? 0.75);
 const REPEATS = Math.max(1, Number(process.env.IPA_REPEATS ?? 3));
 const BREAK_MS = Math.max(0, Number(process.env.IPA_BREAK_MS ?? 700));
@@ -61,7 +61,7 @@ console.log(`${todo.length} pending (of ${jobs.length}); site=${SITE}; voice=${V
 
 async function downloadFromReader(page, ipa) {
   await page.goto(SITE, { waitUntil: "domcontentloaded", timeout: 60000 });
-  await page.locator('#polly-voice option[value="Matthew"]').waitFor({ state: "attached", timeout: 60000 });
+  await page.locator(`#polly-voice option[value="${VOICE}"]`).waitFor({ state: "attached", timeout: 60000 });
   // IPA Reader hides the native select and creates a custom visible menu.
   // Click the visible menu so its own change handler updates the real value.
   await page.locator(".select-styled").click();
