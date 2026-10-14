@@ -61,7 +61,7 @@ jobs:
           IPA_REPEATS: "3"
           IPA_BREAK_MS: "700"
           IPA_WORKERS: "1"
-        run: node scripts/gen_audio_ipa_reader.mjs audio-out
+        run: node scripts/gen_audio_ipa_reader.mjs audio-out 1500
 
       - name: Publish the audio filename index to main
         run: |
@@ -92,9 +92,13 @@ jobs:
           git push -q -f "$REMOTE" audio
 
       - name: Update effective audio links in dictionary!L
-        if: ${{ env.APPS_SCRIPT_URL != '' && env.AUDIO_SYNC_SECRET != '' }}
+        if: ${{ !cancelled() }}
         env:
           APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
           AUDIO_SYNC_SECRET: ${{ secrets.AUDIO_SYNC_SECRET }}
           AUDIO_BASE_URL: https://raw.githubusercontent.com/${{ github.repository }}/audio
-        run: node scripts/sync_audio_sheet.mjs data/audio-manifest.json
+        run: |
+          if [ -z "$APPS_SCRIPT_URL" ] || [ -z "$AUDIO_SYNC_SECRET" ]; then
+            echo "::error::APPS_SCRIPT_URL or AUDIO_SYNC_SECRET is missing"; exit 1
+          fi
+          node scripts/sync_audio_sheet.mjs data/audio-manifest.json
