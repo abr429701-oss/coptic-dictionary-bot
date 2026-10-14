@@ -11,6 +11,8 @@ for (const key of Object.keys(cardManifest)) delete cardManifest[key];
 const token = "test-token";
 const secret = "test-secret-should-be-long-enough";
 const env = { TELEGRAM_BOT_TOKEN: token, WEBHOOK_SECRET: secret };
+const fakeOgg = () => new Response(new Uint8Array([79, 103, 103, 83, 1, 2, 3]), { headers: { "content-type": "audio/ogg" } });
+const isGeneratedAudio = (url) => String(url).includes("raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/audio/");
 const firstMeaning = (value) => String(value ?? "").split(/[،,]/u)[0].trim();
 const TEST_RECORD = records.find((record) => {
   const query = firstMeaning(record.translation_en);
@@ -29,6 +31,7 @@ const escapeRegex = (value) => String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g
 
 function fakeTelegramApi(calls) {
   globalThis.fetch = async (url, options = {}) => {
+    if (isGeneratedAudio(url)) return fakeOgg();
     const body = options.body;
     const payload = !body ? null : typeof body === "string" ? JSON.parse(body) : Object.fromEntries(body.entries());
     const isNotice = String(url).endsWith("/sendMessage") && String(payload?.chat_id) === "813894692" &&
@@ -177,6 +180,7 @@ test("search sends a pronunciation voice message after the result", async () => 
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url: String(url), options });
+    if (isGeneratedAudio(url)) return fakeOgg();
     if (String(url).includes("translate_tts")) {
       return new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "audio/mpeg" } });
     }
@@ -194,6 +198,7 @@ test("a failing TTS service does not break the text result", async () => {
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url: String(url), options });
+    if (isGeneratedAudio(url)) return new Response("missing", { status: 404 });
     if (String(url).includes("translate_tts")) return new Response("blocked", { status: 403 });
     return Response.json({ ok: true, result: true });
   };
@@ -371,6 +376,7 @@ test("Arabic search preserves the exact word typed, including ة, across meaning
 test("Arabic meaning chains send the new Coptic word voice for each step", async () => {
   const firstCalls = [];
   globalThis.fetch = async (url, options = {}) => {
+    if (isGeneratedAudio(url)) return fakeOgg();
     const body = options.body;
     const payload = !body ? null : typeof body === "string" ? JSON.parse(body) : Object.fromEntries(body.entries());
     firstCalls.push({ url: String(url), options, payload });
@@ -385,6 +391,7 @@ test("Arabic meaning chains send the new Coptic word voice for each step", async
 
   const secondCalls = [];
   globalThis.fetch = async (url, options = {}) => {
+    if (isGeneratedAudio(url)) return fakeOgg();
     const body = options.body;
     const payload = !body ? null : typeof body === "string" ? JSON.parse(body) : Object.fromEntries(body.entries());
     secondCalls.push({ url: String(url), options, payload });
@@ -1126,16 +1133,14 @@ async function inline(query, id = "q1") {
   return calls.find((call) => call.url.endsWith("/answerInlineQuery"))?.payload;
 }
 
-test("inline: a word returns articles with the entry as the message to send", async () => {
+test("inline: a word returns Polly audio with the entry as the message to send", async () => {
   const answer = await inline("غراب");
   assert.equal(answer.inline_query_id, "q1");
   assert.ok(answer.results.length >= 1 && answer.results.length <= 20);
   const first = answer.results[0];
-  assert.equal(first.type, "article");
+  assert.equal(first.type, "audio");
   assert.ok(first.title && first.id.length <= 64);
-  assert.match(first.input_message_content.message_text, /<b>الكلمة:<\/b> /u);
-  assert.match(first.input_message_content.message_text, /<b>المعنى:<\/b> [^\n]*ⲁⲃⲱⲕ/u);
-  assert.doesNotMatch(first.input_message_content.message_text, /الاستغراب/u);
+  assert.match(first.audio_url, /raw\.githubusercontent\.com\/abr429701-oss\/coptic-dictionary-bot\/audio\//u);
   assert.equal(answer.is_personal, false);
   assert.ok(answer.cache_time >= 60);
 });
@@ -1143,7 +1148,7 @@ test("inline: a word returns articles with the entry as the message to send", as
 test("inline: one or two letters list words that start with them; empty shows a tip", async () => {
   const short = await inline("ⲁⲃ", "q2");
   assert.ok(short.results.length > 1);
-  assert.ok(short.results.every((item) => /^ⲁⲃ/u.test(item.title.replaceAll("`", "").toLowerCase()) || item.description));
+  assert.ok(short.results.every((item) => item.type === "audio" || /^ⲁⲃ/u.test(item.title.replaceAll("`", "").toLowerCase()) || item.description));
   const empty = await inline("", "q3");
   assert.deepEqual(empty.results, []); // placeholder only, no list above the input
   const none = await inline("zzzzqqq", "q4");
@@ -1217,11 +1222,12 @@ test("inline: if Telegram rejects a stored recording, the answer is repeated as 
   assert.ok(answers[1].payload.results.every((item) => item.type === "article"));
 });
 
-test("inline: words without a recording become audio results when Google speech works", async () => {
+test("inline: words without a recording become Polly audio results", async () => {
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
     const payload = typeof options.body === "string" ? JSON.parse(options.body) : null;
     calls.push({ url: String(url), payload });
+    if (isGeneratedAudio(url)) return fakeOgg();
     if (String(url).includes("translate_tts")) {
       return new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "audio/mpeg" } });
     }
@@ -1233,7 +1239,7 @@ test("inline: words without a recording become audio results when Google speech 
   const answer = calls.find((call) => call.url.endsWith("/answerInlineQuery")).payload;
   const audio = answer.results.find((item) => item.type === "audio");
   assert.ok(audio, "expected an audio result");
-  assert.match(audio.audio_url, /^https:\/\/bot\.test\/tts\/\d+\.mp3$/u);
+  assert.match(audio.audio_url, /raw\.githubusercontent\.com\/abr429701-oss\/coptic-dictionary-bot\/audio\/.*\.ogg$/u);
   assert.equal(audio.caption, undefined);
 });
 
@@ -1241,19 +1247,16 @@ test("the /tts endpoint serves generated speech and only for dictionary entries"
   let speechUrl = "";
   globalThis.fetch = async (url) => {
     speechUrl = String(url);
-    return speechUrl.includes("translate_tts")
-      ? new Response(new Uint8Array([9, 9, 9, 9]), { headers: { "content-type": "audio/mpeg" } })
+    return isGeneratedAudio(url)
+      ? new Response(new Uint8Array([79, 103, 103, 83, 9, 9, 9, 9]), { headers: { "content-type": "audio/ogg" } })
       : Response.json({ ok: true });
   };
   const index = records.findIndex((record) => String(record.pronunciation || record.english || "").trim());
   const ok = await worker.fetch(new Request(`https://bot.test/tts/${index}.mp3`), env);
   assert.equal(ok.status, 200);
-  assert.equal(ok.headers.get("content-type"), "audio/mpeg");
-  assert.equal((await ok.arrayBuffer()).byteLength, 4);
-  assert.match(speechUrl, /ttsspeed=0\.5/u);
-  const spoken = decodeURIComponent(new URL(speechUrl).searchParams.get("q"));
-  const word = String(records[index].pronunciation || records[index].english).trim();
-  assert.equal(spoken, `${word}, ${word}, ${word}`);
+  assert.equal(ok.headers.get("content-type"), "audio/ogg");
+  assert.equal((await ok.arrayBuffer()).byteLength, 8);
+  assert.match(speechUrl, /raw\.githubusercontent\.com\/abr429701-oss\/coptic-dictionary-bot\/audio\//u);
   const missing = await worker.fetch(new Request("https://bot.test/tts/99999999.mp3"), env);
   assert.equal(missing.status, 404);
 });
@@ -1262,19 +1265,16 @@ test("TTS uses the sheet IPA pronunciation for precise Coptic pronunciation", as
   const calls = [];
   globalThis.fetch = async (url) => {
     calls.push(String(url));
-    return new Response(new Uint8Array([7]), { headers: { "content-type": "audio/mpeg" } });
+    return fakeOgg();
   };
   const candidates = records.map((record, index) => ({ record, index })).filter(({ record }) => record.greek && record.pronunciation).slice(0, 2);
   for (const { record, index } of candidates) {
     await worker.fetch(new Request(`https://bot.test/tts/${index}.mp3`), env);
-    const spoken = new URL(calls.at(-1)).searchParams.get("q");
-    assert.ok(spoken);
-    assert.match(spoken, /, /u);
-    assert.equal(spoken, `${spoken.split(", ").slice(0, -2).join(", ")}, ${spoken.split(", ").at(-2)}, ${spoken.split(", ").at(-1)}`);
+    assert.match(calls.at(-1), /raw\.githubusercontent\.com\/abr429701-oss\/coptic-dictionary-bot\/audio\//u);
   }
 });
 
-test("/botinfo (admin) reports inline support, webhook updates and Google speech", async () => {
+test("/botinfo (admin) reports inline support, webhook updates and Polly speech", async () => {
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
     const payload = typeof options.body === "string" ? JSON.parse(options.body) : null;
@@ -1290,7 +1290,7 @@ test("/botinfo (admin) reports inline support, webhook updates and Google speech
   assert.match(text, /Uploade33_bot/u);
   assert.match(text, /inline\): مفعّل/u);
   assert.match(text, /يستقبل inline: نعم/u);
-  assert.match(text, /لا يعمل/u);
+  assert.match(text, /Amazon Polly.*Miguel/u);
 });
 
 // ---- Word cards ----
@@ -1398,6 +1398,7 @@ function pickWorld(kvEnv, { speech = true } = {}) {
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
     url = String(url);
+    if (isGeneratedAudio(url)) return fakeOgg();
     const body = options.body;
     const payload = !body ? null : typeof body === "string" ? JSON.parse(body) : Object.fromEntries(body.entries());
     calls.push({ url, payload });

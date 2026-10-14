@@ -1,6 +1,6 @@
 // src/neural-voice.js
 //
-// Coptic IPA -> eSpeak-ng phonemes
+// Coptic IPA -> Amazon Polly phonemes
 //
 // The dictionary IPA/pronunciation field is the primary pronunciation source.
 // We do not reconstruct pronunciation from Coptic spelling when IPA exists.
@@ -8,11 +8,11 @@
 // Target:
 // Modern Greco-Bohairic pronunciation.
 //
-// Audio is prebuilt by scripts/gen_audio.mjs.
+// Audio is prebuilt by scripts/gen_audio_polly.mjs using Miguel [US Spanish].
 
 import audioManifest from "../data/audio-manifest.json" with { type: "json" };
 
-export const NEURAL_VOICE_VERSION = "v8";
+export const NEURAL_VOICE_VERSION = "polly-miguel-v1";
 // Bump this whenever the external human-audio files are regenerated. This
 // prevents Telegram file_ids from an older voice build being reused forever.
 export const HUMAN_AUDIO_VERSION = "ipa-reader-joanna-v1";

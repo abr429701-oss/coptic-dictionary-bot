@@ -54,7 +54,7 @@ function lazy(build) {
 const SEARCH_FIELDS = ["coptic", "pronunciation", "english", "phonetic", "translation_en", "translation_fr", "translation_de"];
 
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
-import { fetchHumanSpeech, fetchPrebuiltSpeech, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
+import { audioUrl, fetchHumanSpeech, fetchPrebuiltSpeech, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 const VOICE_PREFIX = "voiceid:";
 const neuralKey = (id) => `ttsid:${NEURAL_VOICE_VERSION}:${id}`;
 const humanKey = (id) => `ttsid:human:${HUMAN_AUDIO_VERSION}:${id}`;
@@ -548,62 +548,6 @@ async function telegram(env, method, payload) {
   return result;
 }
 
-async function fetchSpeech(spoken) {
-  try {
-    const ttsUrl = "https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=en&ttsspeed=0.5&q=" + encodeURIComponent(spoken);
-    const ttsResponse = await fetch(ttsUrl, {
-      headers: { "user-agent": "Mozilla/5.0 (compatible; CopticDictionaryBot/1.0)" },
-      signal: AbortSignal.timeout(6000),
-    });
-    const contentType = ttsResponse.headers.get("content-type") ?? "";
-    if (!ttsResponse.ok || !contentType.includes("audio")) {
-      console.error("TTS fetch failed", ttsResponse.status, contentType);
-      return null;
-    }
-    const audio = await ttsResponse.arrayBuffer();
-    return audio.byteLength ? audio : null;
-  } catch (error) {
-    console.error("Voice failed", error instanceof Error ? error.message : "unknown error");
-    return null;
-  }
-}
-
-function speechSpelling(record) {
-  // Prefer the sheet's IPA pronunciation, converted to an English-friendly
-  // phoneme spelling. Google Translate TTS does not parse IPA syntax itself.
-  const ipa = String(record?.pronunciation || "").trim();
-  // Never fall back to the English gloss: it makes Greek searches speak the
-  // translation instead of the Coptic headword. IPA is preferred; when the
-  // sheet has no IPA, use the Coptic spelling as the only remaining source.
-  const copticSpelling = String(record?.coptic || "").trim();
-  const sheetSpelling = String(record?.phonetic || "").trim();
-  const usesIpa = Boolean(ipa);
-  let word = (ipa || sheetSpelling || copticSpelling).trim();
-  word = word
-    .replaceAll("`", "")
-    .replaceAll("ü", "u")
-    .replaceAll("ï", "i")
-    .replaceAll("ō", "o")
-    .replaceAll("ā", "a")
-    .replaceAll("ē", "e")
-    .replace(/ɑʊ|iː|oː|eː|tʃ|ʃ|ʒ|kʰ|tʰ|pʰ|ŋ|ɣ|x|ɑ|ː/gu, (symbol) => {
-      if (!usesIpa) return symbol;
-      return { "ɑʊ": "au", "iː": "ee", "oː": "oh", "eː": "eh", tʃ: "tsch", "ʃ": "sh", "ʒ": "j", "kʰ": "kh", "tʰ": "th", "pʰ": "ph", "ŋ": "ng", "ɣ": "gh", x: "kh", "ɑ": "a", "ː": "" }[symbol] ?? symbol;
-    })
-    .replace(/^i(?=[aeiou])/u, "y")
-    .replace(/\s*\/\s*/gu, ", ")
-    .replace(/\s+/gu, " ")
-    .trim()
-    .slice(0, 120);
-  return word;
-}
-
-function spokenText(record) {
-  const word = speechSpelling(record);
-  // Generated speech is deliberately slow and repeated for pronunciation practice.
-  return word ? `${word}, ${word}, ${word}` : "";
-}
-
 // Caption under the voice sent to the user: "<meaning>. <Coptic word>. <origin>. <gender>."
 // The meaning is the one the user searched for (the whole meaning when they searched by Coptic/Latin text).
 function voiceCaption(record, partIndex = -1, searchedWord = "") {
@@ -655,10 +599,9 @@ function prepareWordVoice(env, record, media = null, { skipRecorded = false } = 
         console.error("Neural voice failed", error instanceof Error ? error.message : "unknown error");
       }
     }
-    const spoken = spokenText(record);
-    if (!spoken) return null;
-    const audio = await fetchSpeech(spoken);
-    return audio ? { audio, spoken } : null;
+    // No Google fallback: generated audio must come from the Polly Miguel
+    // files published by GitHub Actions.
+    return null;
   })();
 }
 
@@ -668,11 +611,9 @@ async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1, 
   if (voice.fileId) {
     const result = await telegram(env, "sendVoice", { chat_id: chatId, voice: voice.fileId });
     if (result?.ok) return;
-    // The saved recording could not be sent: fall back to the generated speech.
-    const spoken = spokenText(record);
-    const audio = spoken ? await fetchSpeech(spoken) : null;
-    if (!audio) return;
-    voice = { audio, spoken };
+    // Do not fall back to Google TTS. A missing generated file should remain a
+    // visible generation/deployment problem rather than changing the voice.
+    return;
   }
   try {
     const form = new FormData();
@@ -2131,7 +2072,7 @@ async function sendBroadcastStatus(env, chatId) {
 const INLINE_LIMIT = 20;
 const INLINE_CACHE_SECONDS = 300;
 
-function inlineArticle(index, normalizedQuery, fileId, audioUrl = "") {
+function inlineArticle(index, normalizedQuery, fileId, generatedAudioUrl = "") {
   const record = records[index];
   const part = matchedPartIndex(record, normalizedQuery);
   const parts = splitMeaning(record.meaning);
@@ -2149,12 +2090,12 @@ function inlineArticle(index, normalizedQuery, fileId, audioUrl = "") {
       parse_mode: "HTML",
     };
   }
-  if (audioUrl && spokenText(record) && text.length <= 1000) {
-    // No recording: Telegram fetches the generated speech (Google) from this Worker and sends it with the entry.
+  if (generatedAudioUrl && text.length <= 1000) {
+    // No recording: Telegram fetches the same Polly Miguel OGG published on GitHub.
     return {
       type: "audio",
       id,
-      audio_url: `${audioUrl}/tts/${index}.mp3`,
+      audio_url: generatedAudioUrl,
       title: `🔊 ${word}${meaning ? ` — ${meaning}` : ""}`.slice(0, 100),
       parse_mode: "HTML",
     };
@@ -2200,8 +2141,7 @@ async function answerInline(env, inlineQuery) {
   if (!indexes.length && short) indexes = findMatches(raw);
   indexes = indexes.slice(0, INLINE_LIMIT);
   const voices = await recordedVoices(env, indexes);
-  const audioBase = lastOrigin && (await speechAvailable()) ? lastOrigin : "";
-  const results = indexes.map((index) => inlineArticle(index, normalizedQuery, voices[records[index].id], audioBase));
+  const results = indexes.map((index) => inlineArticle(index, normalizedQuery, voices[records[index].id], audioUrl(env, records[index].id)));
   const response = await answer(results, INLINE_CACHE_SECONDS);
   if (response && response.ok === false && results.some((item) => item.type === "voice" || item.type === "audio")) {
     // A stored recording was rejected by Telegram: answer again with text only.
@@ -2209,39 +2149,26 @@ async function answerInline(env, inlineQuery) {
   }
 }
 
-let lastOrigin = "";
-const speechHealth = { ok: false, checkedAt: 0 };
-
-// Is Google's speech reachable from this Worker? Cached so inline answers do not probe every time.
-async function speechAvailable() {
-  const age = Date.now() - speechHealth.checkedAt;
-  if (speechHealth.checkedAt && age < (speechHealth.ok ? 30 * 60000 : 5 * 60000)) return speechHealth.ok;
-  speechHealth.ok = Boolean(await fetchSpeech("hello"));
-  speechHealth.checkedAt = Date.now();
-  return speechHealth.ok;
-}
-
-async function serveSpeech(request, ctx, index) {
-  const spoken = spokenText(records[index]);
-  if (!spoken) return new Response("Not found", { status: 404 });
+async function serveSpeech(request, ctx, env, index) {
+  const record = records[index];
+  if (!record?.id) return new Response("Not found", { status: 404 });
   const cache = globalThis.caches?.default;
   const cacheKey = new Request(new URL(request.url).toString(), { method: "GET" });
   const cached = cache ? await cache.match(cacheKey) : undefined;
   if (cached) return cached;
-  const audio = await fetchSpeech(spoken);
+  const audio = await fetchPrebuiltSpeech(env, record);
   if (!audio) return new Response("Speech unavailable", { status: 502 });
   const response = new Response(request.method === "HEAD" ? null : audio, {
-    headers: { "content-type": "audio/mpeg", "content-length": String(audio.byteLength), "cache-control": "public, max-age=2592000" },
+    headers: { "content-type": "audio/ogg", "content-length": String(audio.byteLength), "cache-control": "public, max-age=2592000" },
   });
   if (cache && request.method === "GET") await inBackground(ctx, cache.put(cacheKey, response.clone()));
   return response;
 }
 
 async function sendBotInfo(env, chatId) {
-  const [me, hook, speech] = await Promise.all([
+  const [me, hook] = await Promise.all([
     telegram(env, "getMe", {}),
     telegram(env, "getWebhookInfo", {}),
-    fetchSpeech("hello").then(Boolean),
   ]);
   const info = hook?.result ?? {};
   const allowed = info.allowed_updates ?? [];
@@ -2251,7 +2178,7 @@ async function sendBotInfo(env, chatId) {
     `الـ webhook يستقبل inline: ${allowed.includes("inline_query") ? "نعم ✅" : "لا ❌"}`,
     `طلبات معلّقة: ${info.pending_update_count ?? 0}`,
     `آخر خطأ في الـ webhook: ${info.last_error_message ? escapeHtml(info.last_error_message) : "لا يوجد"}`,
-    `صوت جوجل (TTS) من السيرفر: ${speech ? "يعمل ✅" : "لا يعمل ❌ (جوجل ترفض الطلب)"}`,
+    "الصوت: Amazon Polly — Miguel [US Spanish] — IPA ✅",
     "",
     "نص البلاس هولدر (التلميح داخل خانة الكتابة) يُضبط من @BotFather ← /setinline ولا يمكن قراءته أو تغييره من الكود.",
   ];
@@ -2731,10 +2658,9 @@ export default {
   async fetch(request, env, ctx) {
     countRequest(env, ctx);
     const url = new URL(request.url);
-    lastOrigin = url.origin;
-    const speech = /^\/tts\/(\d{1,6})\.mp3$/u.exec(url.pathname);
+    const speech = /^\/tts\/(\d{1,6})\.(?:mp3|ogg)$/u.exec(url.pathname);
     if (speech && (request.method === "GET" || request.method === "HEAD") && records[Number(speech[1])]) {
-      return serveSpeech(request, ctx, Number(speech[1]));
+      return serveSpeech(request, ctx, env, Number(speech[1]));
     }
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
       return new Response("Coptic dictionary bot is ready.", { status: 200 });

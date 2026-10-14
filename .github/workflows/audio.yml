@@ -1,4 +1,4 @@
-name: Build word audio (espeak-ng)
+name: Build word audio (Amazon Polly Miguel)
 
 on:
   workflow_dispatch:
@@ -8,6 +8,9 @@ on:
       - data/dictionary.json
       - src/neural-voice.js
       - scripts/gen_audio.mjs
+      - scripts/gen_audio_polly.mjs
+      - package.json
+      - package-lock.json
   schedule:
     - cron: "17 3 * * *"
 
@@ -32,8 +35,18 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install espeak-ng and ffmpeg
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq espeak-ng ffmpeg
+      - name: Configure Amazon Polly credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-west-2' }}
+
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - name: Install Node dependencies
+        run: npm ci
 
       - name: Get the existing audio branch (for incremental builds)
         env:
@@ -46,7 +59,14 @@ jobs:
           fi
 
       - name: Generate missing or changed words
-        run: node scripts/gen_audio.mjs audio-out
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION || 'us-west-2' }}
+          POLLY_VOICE: Miguel
+          POLLY_ENGINE: standard
+          POLLY_SAMPLE_RATE: "16000"
+          POLLY_REPEATS: "3"
+          POLLY_BREAK_MS: "700"
+        run: node scripts/gen_audio_polly.mjs audio-out
 
       - name: Publish the audio filename index to main
         run: |
