@@ -10,7 +10,8 @@
 2. شغّل `testSetup` مرة واحدة ووافق على صلاحيات Drive وSheets.
 3. Deploy → Manage deployments → Edit → **Version: New version** → Execute as **Me** وWho has access **Anyone**.
 4. ضع رابط `/exec` في GitHub Actions Secret باسم `APPS_SCRIPT_URL` أو أرسله للأدمن عبر `/setdrive <الرابط>`.
-5. استخدم `/drive` لفحص الاتصال، ثم `/syncdrive` لمصالحة Drive مع Sheet ورفع التسجيلات القديمة المعلقة.
+5. أنشئ Script Property باسم `GITHUB_AUDIO_SYNC_SECRET` بالقيمة نفسها التي ستضعها في GitHub Actions Secret باسم `AUDIO_SYNC_SECRET`. بعد نجاح Workflow الصوت، تُحدَّث روابط الصوت الفعلية في `dictionary!L`، مع إعطاء الأولوية لرابط الصوت البشري الموجود في `upload!C`.
+6. استخدم `/drive` لفحص الاتصال، ثم `/syncdrive` لمصالحة Drive مع Sheet ورفع التسجيلات القديمة المعلقة.
 
 ## المزامنة ثنائية الاتجاه
 

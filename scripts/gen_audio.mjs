@@ -115,6 +115,23 @@ const REPETITIONS = 3;
 const BITRATE =
   process.env.OPUS_BITRATE ?? "24k";
 
+function safeFilePart(value) {
+  return String(value ?? "")
+    .normalize("NFC")
+    .replace(/[\\/:*?"<>|\r\n]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .replace(/[. ]+$/gu, "")
+    .slice(0, 180);
+}
+
+function audioFileName(record, id) {
+  const meaning = safeFilePart(record?.meaning);
+  const coptic = safeFilePart(record?.coptic);
+  const label = [meaning, coptic].filter(Boolean).join(" - ");
+  return `${label || `voice-${id}`}.ogg`;
+}
+
 // Number of simultaneous generators.
 const WORKERS =
   Math.max(
@@ -191,13 +208,19 @@ function buildRepeatedSpeech(
 // Prepare jobs
 // -----------------------------------------------------------------------------
 
-const jobs = [];
+const firstRecordById = new Map();
 
 for (const record of records) {
   if (record?.id == null) {
     continue;
   }
 
+  if (!firstRecordById.has(String(record.id))) firstRecordById.set(String(record.id), record);
+}
+
+const jobs = [];
+
+for (const record of firstRecordById.values()) {
   const ipa =
     ipaForSpeech(
       record,
@@ -232,15 +255,11 @@ for (const record of records) {
       .digest("hex")
       .slice(0, 12);
 
-  const output =
-    path.join(
-      outDir,
-      `${record.id}.ogg`
-    );
+  const output = path.join(outDir, audioFileName(record, record.id));
 
   // Skip files that are already current.
   if (
-    manifest[record.id] === hash &&
+    manifest[record.id]?.hash === hash &&
     existsSync(output)
   ) {
     continue;
@@ -248,6 +267,8 @@ for (const record of records) {
 
   jobs.push({
     id: record.id,
+    record,
+    fileName: audioFileName(record, record.id),
     ipa,
     phonemes,
     hash,
@@ -293,6 +314,7 @@ console.log(
 
 async function build({
   id,
+  fileName,
   ipa,
   phonemes,
   hash,
@@ -303,11 +325,7 @@ async function build({
       `coptic-${id}-${process.pid}.wav`
     );
 
-  const output =
-    path.join(
-      outDir,
-      `${id}.ogg`
-    );
+  const output = path.join(outDir, fileName);
 
   const text =
     buildRepeatedSpeech(
@@ -391,7 +409,7 @@ async function build({
       }
     );
 
-    manifest[id] = hash;
+    manifest[id] = { hash, fileName };
   } catch (error) {
     console.error(
       `word ${id} failed:`,
@@ -453,6 +471,12 @@ await writeFile(
   "utf8"
 );
 
-console.log(
-  "done"
-);
+const audioIndex = {};
+for (const [id, record] of firstRecordById) {
+  const entry = manifest[id];
+  if (entry?.fileName) audioIndex[id] = entry.fileName;
+  else if (record) audioIndex[id] = audioFileName(record, id);
+}
+await writeFile(path.join(outDir, "audio-index.json"), JSON.stringify(audioIndex, null, 2) + "\n", "utf8");
+
+console.log("done");

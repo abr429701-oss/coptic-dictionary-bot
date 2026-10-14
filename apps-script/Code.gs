@@ -35,6 +35,7 @@ function doPost(e) {
   try {
     const body = JSON.parse((e && e.postData && e.postData.contents) || "{}");
     if (body.action === "ping") return json_(ping_());
+    if (body.action === "sync_github_audio") return json_(syncGithubAudio_(body));
     if (body.action === "dictionary_get" || body.action === "dictionary_update") {
       const dictionaryAdmin = body.by && body.by.id != null ? String(body.by.id) : "";
       if (dictionaryAdmin !== "813894692") return json_({ ok: false, error: "unauthorized" });
@@ -156,6 +157,56 @@ function dictionaryUpdate_(body) {
   return { ok: true, row: row, headers: sheet.getRange(1, 1, 1, columns).getValues()[0], values: values };
 }
 
+function normalizeAudioWord_(value) {
+  return String(value || "").normalize("NFC").replace(/`/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+// Updates dictionary!L. A human recording in upload!C always wins over GitHub.
+function syncGithubAudio_(body) {
+  const configured = PropertiesService.getScriptProperties().getProperty("GITHUB_AUDIO_SYNC_SECRET") || "";
+  if (!configured || String(body.secret || "") !== configured) return { ok: false, error: "unauthorized" };
+  if (!Array.isArray(body.audio)) return { ok: false, error: "audio must be an array" };
+
+  const spreadsheet = openSpreadsheet_();
+  const dictionary = dictionarySheet_();
+  const upload = spreadsheet.getSheetByName(CONFIG.BAN_TAB);
+  const github = {};
+  body.audio.forEach(function (item) {
+    const key = normalizeAudioWord_(item && item.coptic);
+    const url = String(item && item.url || "").trim();
+    if (key && /^https:\/\//i.test(url)) github[key] = url;
+  });
+
+  const human = {};
+  if (upload && upload.getLastRow() >= 2) {
+    const rows = upload.getRange(2, 1, upload.getLastRow() - 1, Math.max(3, upload.getLastColumn())).getValues();
+    rows.forEach(function (row) {
+      const key = normalizeAudioWord_(row[1]);
+      const url = String(row[2] || "").trim();
+      if (key && /^https:\/\//i.test(url)) human[key] = url;
+    });
+  }
+
+  const rowCount = Math.max(0, dictionary.getLastRow() - 1);
+  if (!rowCount) return { ok: true, updated: 0, human: 0, github: 0, empty: 0 };
+  const values = dictionary.getRange(2, 1, rowCount, Math.max(12, dictionary.getLastColumn())).getValues();
+  let humanCount = 0;
+  let githubCount = 0;
+  let emptyCount = 0;
+  const links = values.map(function (row) {
+    const key = normalizeAudioWord_(row[0]);
+    const link = human[key] || github[key] || "";
+    if (human[key]) humanCount += 1;
+    else if (github[key]) githubCount += 1;
+    else emptyCount += 1;
+    return [link];
+  });
+  dictionary.getRange(2, 12, links.length, 1).setValues(links);
+  dictionary.getRange(1, 12).setValue("audio_url");
+  SpreadsheetApp.flush();
+  return { ok: true, updated: links.length, human: humanCount, github: githubCount, empty: emptyCount };
+}
+
 // The dictionary sheet is A=Coptic, B=IPA, C=Arabic/full meaning.
 function dictionaryLabel_(word) {
   const sheet = openSpreadsheet_().getSheetByName(CONFIG.DICTIONARY_TAB);
@@ -174,6 +225,23 @@ function dictionaryLabel_(word) {
 function sanitizeFileName_(name) {
   return String(name).replace(/[\\/:*?"<>|\r\n]/g, " ").replace(/\s+/g, " ").trim().substring(0, 180) || "voice";
 }
+
+function setHumanDictionaryLink_(word, url) {
+  const wanted = normalizeAudioWord_(word);
+  if (!wanted || !url) return 0;
+  const sheet = dictionarySheet_();
+  const rowCount = Math.max(0, sheet.getLastRow() - 1);
+  if (!rowCount) return 0;
+  const values = sheet.getRange(2, 1, rowCount, Math.max(12, sheet.getLastColumn())).getValues();
+  const links = values.map(function (row) {
+    return [normalizeAudioWord_(row[0]) === wanted ? String(url) : String(row[11] || "")];
+  });
+  sheet.getRange(2, 12, links.length, 1).setValues(links);
+  sheet.getRange(1, 12).setValue("audio_url");
+  SpreadsheetApp.flush();
+  return links.filter(function (row) { return row[0] === String(url); }).length;
+}
+
 function upload_(body) {
   if (!body.audio_base64) return { ok: false, error: "audio_base64 is missing" };
   const id = body.id == null || body.id === "" ? "" : String(body.id);
@@ -196,6 +264,7 @@ function upload_(body) {
     if (CONFIG.SHARE_WITH_LINK) createdFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
     const url = driveLink_(createdFile.getId());
     recordInBan_(openSpreadsheet_(), { id: id, word: word, url: url, fileId: createdFile.getId(), fileName: fileName, body: body });
+    setHumanDictionaryLink_(word, url);
     rememberUpload_(id, createdFile.getId());
     return { ok: true, file_id: createdFile.getId(), url: url, file_name: fileName, folder_url: folder.getUrl() };
   } catch (error) {

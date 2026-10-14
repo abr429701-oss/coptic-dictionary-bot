@@ -10,6 +10,8 @@
 //
 // Audio is prebuilt by scripts/gen_audio.mjs.
 
+import audioManifest from "../data/audio-manifest.json" with { type: "json" };
+
 export const NEURAL_VOICE_VERSION = "v8";
 // Bump this whenever the external human-audio files are regenerated. This
 // prevents Telegram file_ids from an older voice build being reused forever.
@@ -313,11 +315,13 @@ export function ipaToEspeak(
 // Audio URL
 // -----------------------------------------------------------------------------
 
-export const audioUrl = (env, id) =>
-  `${(
+export const audioUrl = (env, id) => {
+  const fileName = audioManifest[String(id)] || `${id}.ogg`;
+  return `${(
     env?.AUDIO_BASE_URL ||
     "https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/audio"
-  ).replace(/\/+$/u, "")}/${encodeURIComponent(id)}.ogg`;
+  ).replace(/\/+$/u, "")}/${encodeURIComponent(fileName)}`;
+};
 
 // -----------------------------------------------------------------------------
 // Human-sounding audio (optional, built by scripts/gen_audio_fish.mjs into the

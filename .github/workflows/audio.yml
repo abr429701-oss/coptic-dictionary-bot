@@ -22,6 +22,9 @@ jobs:
   audio:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    env:
+      APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+      AUDIO_SYNC_SECRET: ${{ secrets.AUDIO_SYNC_SECRET }}
     steps:
       - uses: actions/checkout@v4
 
@@ -45,6 +48,19 @@ jobs:
       - name: Generate missing or changed words
         run: node scripts/gen_audio.mjs audio-out
 
+      - name: Publish the audio filename index to main
+        run: |
+          cp audio-out/audio-index.json data/audio-manifest.json
+          if git diff --quiet -- data/audio-manifest.json; then
+            echo "Audio filename index unchanged."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add data/audio-manifest.json
+            git commit -m "Update generated audio filename index"
+            git push
+          fi
+
       - name: Publish to the audio branch (single commit, no history growth)
         env:
           REMOTE: https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git
@@ -58,3 +74,11 @@ jobs:
           git add -A
           git commit -q -m "Rebuild word audio"
           git push -q -f "$REMOTE" audio
+
+      - name: Update effective audio links in dictionary!L
+        if: ${{ env.APPS_SCRIPT_URL != '' && env.AUDIO_SYNC_SECRET != '' }}
+        env:
+          APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+          AUDIO_SYNC_SECRET: ${{ secrets.AUDIO_SYNC_SECRET }}
+          AUDIO_BASE_URL: https://raw.githubusercontent.com/${{ github.repository }}/audio
+        run: node scripts/sync_audio_sheet.mjs data/audio-manifest.json
