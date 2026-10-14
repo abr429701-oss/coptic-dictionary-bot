@@ -54,7 +54,7 @@ function lazy(build) {
 const SEARCH_FIELDS = ["coptic", "pronunciation", "english", "phonetic", "translation_en", "translation_fr", "translation_de"];
 
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
-import { audioUrl, fetchHumanSpeech, fetchPrebuiltSpeech, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
+import { audioUrl, fetchHumanSpeech, fetchPrebuiltSpeech, isSingleWordOgg, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 const VOICE_PREFIX = "voiceid:";
 const neuralKey = (id) => `ttsid:${NEURAL_VOICE_VERSION}:${id}`;
 const humanKey = (id) => `ttsid:human:${HUMAN_AUDIO_VERSION}:${id}`;
@@ -594,7 +594,8 @@ function prepareWordVoice(env, record, media = null, { skipRecorded = false } = 
         const cached = env.USERS ? (await storeCall(env, { op: "get", key: neuralKey(record.id) })).value : null;
         if (cached?.fileId) return { fileId: cached.fileId, neural: true };
         const neural = await fetchPrebuiltSpeech(env, record);
-        if (neural) return { audio: neural, neural: true, wordId: record.id };
+        // Only the new single-word files are remembered by Telegram file_id; older files are never cached.
+        if (neural) return { audio: neural, neural: true, wordId: record.id, cacheable: isSingleWordOgg(neural) };
       } catch (error) {
         console.error("Neural voice failed", error instanceof Error ? error.message : "unknown error");
       }
@@ -625,7 +626,7 @@ async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1, 
       console.error("Telegram sendVoice failed", response.status);
       if (response.status === 403) await markUserBlocked(env, chatId, "sendVoice 403");
     }
-    else if (voice.neural && voice.wordId != null && env.USERS) {
+    else if (voice.neural && voice.cacheable !== false && voice.wordId != null && env.USERS) {
       // Remember Telegram's file_id so this word is synthesized only once.
       const sent = await response.json().catch(() => null);
       const fileId = sent?.result?.voice?.file_id;

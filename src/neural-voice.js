@@ -10,10 +10,11 @@
 //
 // Audio is prebuilt by scripts/gen_audio_ipa_reader.mjs using Miguel [US Spanish].
 
-import { repeatSingleWordOgg } from "./ogg-repeat.js";
+import { isSingleWordOgg, repeatSingleWordOgg } from "./ogg-repeat.js";
+export { isSingleWordOgg };
 import audioManifest from "../data/audio-manifest.json" with { type: "json" };
 
-export const NEURAL_VOICE_VERSION = "polly-miguel-v1";
+export const NEURAL_VOICE_VERSION = "ipa-miguel-once-v1";
 // Bump this whenever the external human-audio files are regenerated. This
 // prevents Telegram file_ids from an older voice build being reused forever.
 export const HUMAN_AUDIO_VERSION = "ipa-reader-joanna-v1";

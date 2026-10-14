@@ -158,3 +158,13 @@ export function repeatSingleWordOgg(input, { times = 3, pauseMs = 700 } = {}) {
   }
   return result.buffer;
 }
+
+// True when the file was built by the single-word generator (new voice), false for older files.
+export function isSingleWordOgg(input) {
+  try {
+    const pages = parseOggPages(input);
+    return pages.length > 2 && includesAscii(pages[1].data, SINGLE_WORD_MARKER);
+  } catch {
+    return false;
+  }
+}
