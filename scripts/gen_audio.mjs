@@ -129,7 +129,8 @@ function audioFileName(record, id) {
   const meaning = safeFilePart(record?.meaning);
   const coptic = safeFilePart(record?.coptic);
   const label = [meaning, coptic].filter(Boolean).join(" - ");
-  return `${label || `voice-${id}`}.ogg`;
+  const trimmed = (label || `voice-${id}`).slice(0, 240).replace(/[. ]+$/gu, "");
+  return `${trimmed}.ogg`;
 }
 
 // Number of simultaneous generators.

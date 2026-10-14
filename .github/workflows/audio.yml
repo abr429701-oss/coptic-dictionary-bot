@@ -50,6 +50,7 @@ jobs:
 
       - name: Publish the audio filename index to main
         run: |
+          git pull --rebase origin main
           cp audio-out/audio-index.json data/audio-manifest.json
           if git diff --quiet -- data/audio-manifest.json; then
             echo "Audio filename index unchanged."
