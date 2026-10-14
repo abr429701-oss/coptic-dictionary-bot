@@ -10,6 +10,7 @@
 //
 // Audio is prebuilt by scripts/gen_audio_ipa_reader.mjs using Miguel [US Spanish].
 
+import { repeatSingleWordOgg } from "./ogg-repeat.js";
 import audioManifest from "../data/audio-manifest.json" with { type: "json" };
 
 export const NEURAL_VOICE_VERSION = "polly-miguel-v1";
@@ -397,9 +398,17 @@ export async function fetchPrebuiltSpeech(
         )
       );
 
-    return magic === "OggS"
-      ? audio
-      : null;
+    if (magic !== "OggS") return null;
+
+    // Files on GitHub hold the word once; the bot plays it several times in one voice message.
+    try {
+      return repeatSingleWordOgg(audio, {
+        times: Number(env?.VOICE_REPEATS ?? 3),
+        pauseMs: Number(env?.VOICE_REPEAT_PAUSE_MS ?? 700),
+      });
+    } catch {
+      return audio;
+    }
   } catch (error) {
     console.error(
       "Prebuilt voice error:",

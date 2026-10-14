@@ -58,7 +58,7 @@ jobs:
         env:
           IPA_VOICE: Miguel
           IPA_SLOW_FACTOR: "0.75"
-          IPA_REPEATS: "3"
+          IPA_REPEATS: "1"
           IPA_BREAK_MS: "700"
           IPA_WORKERS: "1"
           APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}

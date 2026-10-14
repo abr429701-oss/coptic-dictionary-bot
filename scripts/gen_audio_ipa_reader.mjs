@@ -13,6 +13,7 @@ import path from "node:path";
 import { chromium } from "playwright";
 import records from "../data/dictionary.json" with { type: "json" };
 import { ipaForSpeech } from "../src/neural-voice.js";
+import { SINGLE_WORD_MARKER } from "../src/ogg-repeat.js";
 
 const run = promisify(execFile);
 const SITE = "https://ipa-reader.com/";
@@ -86,7 +87,7 @@ async function toTelegramOgg(mp3, id) {
       pauseCount ? `anullsrc=r=24000:cl=mono:d=${BREAK_MS / 1000},asplit=${pauseCount}${silenceLabels}` : "",
       `${sequence}concat=n=${REPEATS * 2 - 1}:v=0:a=1[out]`,
     ].filter(Boolean).join(";");
-    await run("ffmpeg", ["-loglevel", "error", "-y", "-i", input, "-filter_complex", filter, "-map", "[out]", "-ac", "1", "-ar", "24000", "-c:a", "libopus", "-b:a", "32k", output], { maxBuffer: 1024 * 1024 });
+    await run("ffmpeg", ["-loglevel", "error", "-y", "-i", input, "-filter_complex", filter, "-map", "[out]", "-ac", "1", "-ar", "24000", "-c:a", "libopus", "-b:a", "32k", ...(REPEATS === 1 ? ["-metadata", `comment=${SINGLE_WORD_MARKER}`] : []), output], { maxBuffer: 1024 * 1024 });
     return new Uint8Array(await readFile(output));
   } finally {
     await rm(input, { force: true });
