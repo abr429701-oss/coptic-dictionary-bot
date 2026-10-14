@@ -227,19 +227,23 @@ function sanitizeFileName_(name) {
 }
 
 function setHumanDictionaryLink_(word, url) {
-  const wanted = normalizeAudioWord_(word);
-  if (!wanted || !url) return 0;
-  const sheet = dictionarySheet_();
-  const rowCount = Math.max(0, sheet.getLastRow() - 1);
-  if (!rowCount) return 0;
-  const values = sheet.getRange(2, 1, rowCount, Math.max(12, sheet.getLastColumn())).getValues();
-  const links = values.map(function (row) {
-    return [normalizeAudioWord_(row[0]) === wanted ? String(url) : String(row[11] || "")];
-  });
-  sheet.getRange(2, 12, links.length, 1).setValues(links);
-  sheet.getRange(1, 12).setValue("audio_url");
-  SpreadsheetApp.flush();
-  return links.filter(function (row) { return row[0] === String(url); }).length;
+  try {
+    const wanted = normalizeAudioWord_(word);
+    if (!wanted || !url) return 0;
+    const sheet = dictionarySheet_();
+    const rowCount = Math.max(0, sheet.getLastRow() - 1);
+    if (!rowCount) return 0;
+    const values = sheet.getRange(2, 1, rowCount, Math.max(12, sheet.getLastColumn())).getValues();
+    const links = values.map(function (row) {
+      return [normalizeAudioWord_(row[0]) === wanted ? String(url) : String(row[11] || "")];
+    });
+    sheet.getRange(2, 12, links.length, 1).setValues(links);
+    sheet.getRange(1, 12).setValue("audio_url");
+    SpreadsheetApp.flush();
+    return links.filter(function (row) { return row[0] === String(url); }).length;
+  } catch (ignored) {
+    return 0;
+  }
 }
 
 function upload_(body) {
