@@ -54,14 +54,45 @@ jobs:
             mkdir audio-out
           fi
 
-      - name: Generate missing or changed words from IPA Reader
+      - name: Generate, publish and sync to the sheet in batches
         env:
           IPA_VOICE: Miguel
           IPA_SLOW_FACTOR: "0.75"
           IPA_REPEATS: "3"
           IPA_BREAK_MS: "700"
           IPA_WORKERS: "1"
-        run: node scripts/gen_audio_ipa_reader.mjs audio-out 1500
+          APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+          AUDIO_SYNC_SECRET: ${{ secrets.AUDIO_SYNC_SECRET }}
+          AUDIO_BASE_URL: https://raw.githubusercontent.com/${{ github.repository }}/audio
+          REMOTE: https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git
+          BATCH: "50"
+          BUDGET_MIN: "150"
+        run: |
+          set -eo pipefail
+          if [ -z "$APPS_SCRIPT_URL" ] || [ -z "$AUDIO_SYNC_SECRET" ]; then
+            echo "::error::APPS_SCRIPT_URL or AUDIO_SYNC_SECRET is missing"; exit 1
+          fi
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ ! -d audio-out/.git ]; then
+            git -C audio-out init -q -b audio
+            git -C audio-out remote add origin "$REMOTE"
+          fi
+          END=$(( $(date +%s) + BUDGET_MIN * 60 ))
+          while [ "$(date +%s)" -lt "$END" ]; do
+            FATAL=0
+            node scripts/gen_audio_ipa_reader.mjs audio-out "$BATCH" 2>&1 | tee gen.log || FATAL=1
+            TOTAL=$(grep -oE '^[0-9]+ pending \(of [0-9]+\)' gen.log | head -1 | sed -E 's/.*\(of ([0-9]+)\)/\1/' || true)
+            TOTAL=${TOTAL:-0}
+            if [ -n "$(git -C audio-out status --porcelain)" ]; then
+              git -C audio-out add -A
+              git -C audio-out commit -q -m "Add word audio batch"
+              git -C audio-out push -q "$REMOTE" HEAD:refs/heads/audio
+            fi
+            node scripts/sync_audio_sheet.mjs audio-out/audio-index.json
+            if [ "$FATAL" = "1" ]; then echo "::error::generator stopped on a fatal error"; exit 1; fi
+            if [ "$TOTAL" -le "$BATCH" ]; then echo "All words are done."; break; fi
+          done
 
       - name: Publish the audio filename index to main
         run: |
