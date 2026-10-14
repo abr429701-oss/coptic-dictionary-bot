@@ -1133,7 +1133,7 @@ async function inline(query, id = "q1") {
   return calls.find((call) => call.url.endsWith("/answerInlineQuery"))?.payload;
 }
 
-test("inline: a word returns Polly audio with the entry as the message to send", async () => {
+test("inline: a word returns IPA Reader audio with the entry as the message to send", async () => {
   const answer = await inline("غراب");
   assert.equal(answer.inline_query_id, "q1");
   assert.ok(answer.results.length >= 1 && answer.results.length <= 20);
@@ -1222,7 +1222,7 @@ test("inline: if Telegram rejects a stored recording, the answer is repeated as 
   assert.ok(answers[1].payload.results.every((item) => item.type === "article"));
 });
 
-test("inline: words without a recording become Polly audio results", async () => {
+test("inline: words without a recording become IPA Reader audio results", async () => {
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
     const payload = typeof options.body === "string" ? JSON.parse(options.body) : null;
@@ -1274,7 +1274,7 @@ test("TTS uses the sheet IPA pronunciation for precise Coptic pronunciation", as
   }
 });
 
-test("/botinfo (admin) reports inline support, webhook updates and Polly speech", async () => {
+test("/botinfo (admin) reports inline support, webhook updates and IPA Reader speech", async () => {
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
     const payload = typeof options.body === "string" ? JSON.parse(options.body) : null;

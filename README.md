@@ -35,21 +35,15 @@
 5. الرابط الذي يُدخل عبر `/setdrive <الرابط>` يتقدّم على سرّ Worker. استخدم `/setdrive reset` لحذف هذا التجاوز والعودة إلى `APPS_SCRIPT_URL`.
 6. سيُنشر Worker تلقائيًا عند كل Push إلى `main` بعد نجاح الاختبارات، ولا يحتاج إلى تشغيل يدوي أو متغير تفعيل إضافي.
 
-### توليد صوت Miguel عبر GitHub Actions
+### توليد صوت Miguel من IPA Reader عبر GitHub Actions
 
-يستخدم workflow باسم **Build word audio (Amazon Polly Miguel)** Amazon Polly مباشرة، وليس موقعًا وسيطًا أو Google TTS. وهو يرسل IPA داخل وسم Polly التالي:
+يستخدم workflow باسم **Build word audio (IPA Reader Miguel)** موقع `ipa-reader.com` نفسه: يفتح الصفحة بمتصفح Chromium، يختار `Miguel [US Spanish]`، يرسل IPA، ثم ينزّل ملف الصوت الذي يعيده الموقع. لا يحتاج هذا المسار إلى AWS credentials أو Google TTS أو مفتاح مدفوع من حسابك.
 
 ```xml
 <phoneme alphabet="ipa" ph="..."></phoneme>
 ```
 
-أضف إلى GitHub Actions Secrets:
-
-- `AWS_ACCESS_KEY_ID` — مفتاح AWS محدود الصلاحية.
-- `AWS_SECRET_ACCESS_KEY` — المفتاح السري المقابل.
-- `AWS_REGION` — اختياري، والافتراضي `us-west-2`.
-
-امنح مستخدم AWS صلاحية `polly:SynthesizeSpeech` فقط. ينتج workflow ملفات OGG/Opus في فرع `audio`، ويحدّث `data/audio-manifest.json` ثم يرسل الروابط إلى `dictionary!L` مع أولوية التسجيل البشري الموجود في `upload!C`.
+ينتج workflow ملفات OGG/Opus في فرع `audio`، ويحدّث `data/audio-manifest.json` ثم يرسل الروابط إلى `dictionary!L` مع أولوية التسجيل البشري الموجود في `upload!C`. يرسل الطلبات بتشغيل متسلسل وفاصل زمني لتقليل الضغط على IPA Reader؛ وقد يفرض الموقع حدًا أو يمنع الطلبات الكثيفة، لأن الخدمة المجانية ليست API مضمونًا للتوليد الجماعي.
 
 أسرار GitHub مشفّرة ولا تظهر لي. لا ترسل التوكنات في المحادثة ولا تضعها في الملفات. عنوان Worker وسرّ webhook يُنشآن تلقائيًا.
 

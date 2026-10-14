@@ -8,7 +8,7 @@
 // Target:
 // Modern Greco-Bohairic pronunciation.
 //
-// Audio is prebuilt by scripts/gen_audio_polly.mjs using Miguel [US Spanish].
+// Audio is prebuilt by scripts/gen_audio_ipa_reader.mjs using Miguel [US Spanish].
 
 import audioManifest from "../data/audio-manifest.json" with { type: "json" };
 

@@ -1,7 +1,7 @@
-// Generate dictionary audio by driving https://ipa-reader.com/ with Playwright.
-// The site sends the IPA to Amazon Polly and returns an MP3 URL. We download that
-// result, slow it down, repeat it three times with a short pause, and save Ogg/Opus
-// files ready for Telegram.
+// Generate dictionary audio by using ipa-reader.com itself.
+// The site selects Amazon Polly anonymously, with VoiceId Miguel and IPA input.
+// No AWS account, AWS keys, or paid API credentials are needed in this workflow.
+// Usage: node scripts/gen_audio_ipa_reader.mjs <outDir> [limit]
 
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
@@ -12,58 +12,53 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { chromium } from "playwright";
 import records from "../data/dictionary.json" with { type: "json" };
+import { ipaForSpeech } from "../src/neural-voice.js";
 
 const run = promisify(execFile);
 const SITE = "https://ipa-reader.com/";
-const VOICE = process.env.IPA_VOICE ?? "Joanna";
+const VOICE = process.env.IPA_VOICE ?? "Miguel";
 const RATE = Number(process.env.IPA_SLOW_FACTOR ?? 0.75);
 const REPEATS = Math.max(1, Number(process.env.IPA_REPEATS ?? 3));
 const BREAK_MS = Math.max(0, Number(process.env.IPA_BREAK_MS ?? 700));
-const WORKERS = Math.max(1, Number(process.env.IPA_WORKERS ?? 2));
+const WORKERS = Math.max(1, Number(process.env.IPA_WORKERS ?? 1));
 const limit = Number(process.argv[3] ?? 0) || Infinity;
 const outDir = path.resolve(process.argv[2] ?? "audio-out");
-
 if (!(RATE >= 0.5 && RATE <= 2)) throw new Error("IPA_SLOW_FACTOR must be between 0.5 and 2");
+
+function safeFilePart(value) {
+  return String(value ?? "").normalize("NFC")
+    .replace(/[\\/:*?"<>|\r\n]/gu, " ").replace(/\s+/gu, " ").trim()
+    .replace(/[. ]+$/gu, "").slice(0, 180);
+}
+function audioFileName(record, id) {
+  const label = [safeFilePart(record?.meaning), safeFilePart(record?.coptic)].filter(Boolean).join(" - ");
+  return `${(label || `voice-${id}`).slice(0, 240).replace(/[. ]+$/gu, "")}.ogg`;
+}
+function makeHash(ipa, fileName) {
+  return createHash("sha1").update(JSON.stringify({ site: SITE, voice: VOICE, rate: RATE, repeats: REPEATS, breakMs: BREAK_MS, ipa, fileName })).digest("hex").slice(0, 12);
+}
 
 await mkdir(outDir, { recursive: true });
 const manifestPath = path.join(outDir, "manifest.json");
-const manifest = existsSync(manifestPath)
-  ? JSON.parse(await readFile(manifestPath, "utf8"))
-  : {};
-
-function makeHash(record, ipa) {
-  return createHash("sha1")
-    .update(JSON.stringify({ site: SITE, voice: VOICE, rate: RATE, repeats: REPEATS, breakMs: BREAK_MS, ipa }))
-    .digest("hex")
-    .slice(0, 12);
-}
-
+const manifest = existsSync(manifestPath) ? JSON.parse(await readFile(manifestPath, "utf8")) : {};
 const jobsById = new Map();
 for (const record of records) {
-  if (record?.id == null) continue;
-  // `pronunciation` is the IPA column imported from the sheet. Do not use the
-  // English phonetic/transliteration column here.
-  const ipa = String(record.pronunciation ?? "").trim();
+  if (record?.id == null || jobsById.has(String(record.id))) continue;
+  const ipa = ipaForSpeech(record, { liturgical: true, preserveJinkim: true });
   if (!ipa) continue;
-  const hash = makeHash(record, ipa);
-  const output = path.join(outDir, `${record.id}.ogg`);
-  if (manifest[record.id] === hash && existsSync(output)) continue;
-  // Several dictionary rows can share one permanent word id because they
-  // represent different meanings. Generate one audio file per word id.
-  if (!jobsById.has(String(record.id))) {
-    jobsById.set(String(record.id), { id: record.id, ipa, hash });
-  }
+  const fileName = audioFileName(record, record.id);
+  const hash = makeHash(ipa, fileName);
+  const old = manifest[record.id];
+  if (old?.hash === hash && old?.fileName === fileName && existsSync(path.join(outDir, fileName))) continue;
+  jobsById.set(String(record.id), { id: record.id, ipa, fileName, hash });
 }
-
 const jobs = [...jobsById.values()];
 const todo = jobs.slice(0, limit);
-console.log(`${todo.length} pending (of ${jobs.length}); site=${SITE}; voice=${VOICE}; slow=${RATE}; repeats=${REPEATS}; pause=${BREAK_MS}ms`);
+console.log(`${todo.length} pending (of ${jobs.length}); site=${SITE}; voice=${VOICE}; slow=${RATE}; repeats=${REPEATS}; pause=${BREAK_MS}ms; workers=${WORKERS}`);
 
 async function downloadFromReader(page, ipa) {
   await page.goto(SITE, { waitUntil: "domcontentloaded", timeout: 60000 });
   await page.locator(`#polly-voice option[value="${VOICE}"]`).waitFor({ state: "attached", timeout: 60000 });
-  // IPA Reader hides the native select and creates a custom visible menu.
-  // Click the visible menu so its own change handler updates the real value.
   await page.locator(".select-styled").click();
   await page.locator(`li[rel="${VOICE}"]`).click();
   await page.fill("#ipa-text", ipa);
@@ -72,8 +67,6 @@ async function downloadFromReader(page, ipa) {
   await audio.waitFor({ state: "attached", timeout: 60000 });
   const url = await audio.locator("source").getAttribute("src");
   if (!url) throw new Error("IPA Reader returned no audio URL");
-  // The presigned Polly URL requires the same browser context/Referer as the
-  // page; plain Node fetch can receive HTTP 403 from the signed endpoint.
   const response = await page.request.get(url, { headers: { Referer: SITE } });
   if (!response.ok()) throw new Error(`Audio download failed: HTTP ${response.status()}`);
   return new Uint8Array(await response.body());
@@ -93,11 +86,7 @@ async function toTelegramOgg(mp3, id) {
       pauseCount ? `anullsrc=r=24000:cl=mono:d=${BREAK_MS / 1000},asplit=${pauseCount}${silenceLabels}` : "",
       `${sequence}concat=n=${REPEATS * 2 - 1}:v=0:a=1[out]`,
     ].filter(Boolean).join(";");
-    await run("ffmpeg", [
-      "-loglevel", "error", "-y", "-i", input,
-      "-filter_complex", filter, "-map", "[out]",
-      "-ac", "1", "-ar", "24000", "-c:a", "libopus", "-b:a", "32k", output,
-    ], { maxBuffer: 1024 * 1024 });
+    await run("ffmpeg", ["-loglevel", "error", "-y", "-i", input, "-filter_complex", filter, "-map", "[out]", "-ac", "1", "-ar", "24000", "-c:a", "libopus", "-b:a", "32k", output], { maxBuffer: 1024 * 1024 });
     return new Uint8Array(await readFile(output));
   } finally {
     await rm(input, { force: true });
@@ -108,33 +97,42 @@ async function toTelegramOgg(mp3, id) {
 let next = 0;
 let done = 0;
 let failed = 0;
-
+let fatal = null;
 async function worker() {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
   try {
-    while (true) {
+    while (!fatal) {
       const job = todo[next++];
       if (!job) break;
       try {
         console.log(`Generating ${job.id}: ${job.ipa}`);
         const mp3 = await downloadFromReader(page, job.ipa);
         const ogg = await toTelegramOgg(mp3, job.id);
-        await writeFile(path.join(outDir, `${job.id}.ogg`), ogg);
-        manifest[job.id] = job.hash;
+        await writeFile(path.join(outDir, job.fileName), ogg);
+        manifest[job.id] = { hash: job.hash, fileName: job.fileName };
         done++;
         if (done % 10 === 0) await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
       } catch (error) {
         failed++;
-        console.error(`word ${job.id} failed: ${String(error?.message ?? error).split("\n")[0]}`);
+        const message = String(error?.message ?? error).split("\n")[0];
+        console.error(`word ${job.id} failed: ${message}`);
+        if (/blocked|forbidden|429|too many|captcha/iu.test(message)) fatal = error;
       }
-      await new Promise((resolve) => setTimeout(resolve, 800));
+      await new Promise((resolve) => setTimeout(resolve, 1200));
     }
   } finally {
     await browser.close();
   }
 }
-
 await Promise.all(Array.from({ length: Math.min(WORKERS, Math.max(1, todo.length)) }, worker));
 await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+const audioIndex = {};
+for (const record of records) {
+  const entry = manifest[record.id];
+  if (entry?.fileName) audioIndex[record.id] = entry.fileName;
+}
+await writeFile(path.join(outDir, "audio-index.json"), `${JSON.stringify(audioIndex, null, 2)}\n`);
+if (fatal) throw fatal;
+if (failed && done === 0) throw new Error(`All IPA Reader jobs failed (${failed})`);
 console.log(`done: ${done} generated, ${failed} failed`);
