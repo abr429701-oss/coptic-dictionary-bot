@@ -45,3 +45,9 @@ test("files without the single-word marker or non-Ogg input are not touched", { 
   assert.equal(repeatSingleWordOgg(marked, { times: 1 }), marked);
   assert.throws(() => repeatSingleWordOgg(new Uint8Array([1, 2, 3, 4, 5, 6]).buffer, { times: 3 }));
 });
+
+test("a recording without the marker is repeated when requireMarker is off (admin voice recordings)", { skip: !hasFfmpeg }, () => {
+  const source = makeOpus([]);
+  const out = repeatSingleWordOgg(source, { times: 3, pauseMs: 700, requireMarker: false });
+  assert.ok(out.byteLength > source.byteLength * 2.5);
+});

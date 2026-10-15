@@ -55,10 +55,12 @@ const SEARCH_FIELDS = ["coptic", "pronunciation", "english", "phonetic", "transl
 
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
 import { audioUrl, fetchHumanSpeech, fetchPrebuiltSpeech, isSingleWordOgg, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
+import { repeatSingleWordOgg } from "./ogg-repeat.js";
 const VOICE_PREFIX = "voiceid:";
 const neuralKey = (id) => `ttsid:${NEURAL_VOICE_VERSION}:${id}`;
 const humanKey = (id) => `ttsid:human:${HUMAN_AUDIO_VERSION}:${id}`;
 const voiceKey = (id) => `${VOICE_PREFIX}${id}`;
+const repeatedRecordingKey = (fileId) => `rep3:${fileId}`;
 const CARD_DISABLED_PREFIX = "card-disabled:";
 const cardDisabledKey = (id) => `${CARD_DISABLED_PREFIX}${id}`;
 const recordIndexById = lazy(() => {
@@ -567,6 +569,31 @@ function voiceCaption(record, partIndex = -1, searchedWord = "") {
     .slice(0, 1000);
 }
 
+// Admin recordings are made once; users get them repeated (same count and pause as the generated voice).
+// The repeated version is uploaded once, then Telegram's file_id is remembered per recording.
+async function repeatedRecording(env, fileId) {
+  const times = Number(env?.VOICE_REPEATS ?? 3);
+  if (!(times > 1)) return { fileId };
+  try {
+    if (env.USERS) {
+      const cached = (await storeCall(env, { op: "get", key: repeatedRecordingKey(fileId) })).value;
+      if (cached?.fileId) return { fileId: cached.fileId };
+    }
+    const info = await telegram(env, "getFile", { file_id: fileId });
+    const filePath = info?.ok ? info.result?.file_path : null;
+    if (!filePath) return { fileId };
+    const response = await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${filePath}`, { signal: AbortSignal.timeout(8000) });
+    if (!response.ok) return { fileId };
+    const original = await response.arrayBuffer();
+    const repeated = repeatSingleWordOgg(original, { times, pauseMs: Number(env?.VOICE_REPEAT_PAUSE_MS ?? 700), requireMarker: false });
+    if (repeated === original) return { fileId };
+    return { audio: repeated, neural: true, repeatFor: fileId };
+  } catch (error) {
+    console.error("Repeating the recorded voice failed", error instanceof Error ? error.message : "unknown error");
+    return { fileId };
+  }
+}
+
 // Starts the lookup (admin recording) or speech generation right away, so it is ready when the text is sent.
 // Generated Matthew audio from the audio-human branch is the default voice.
 function prepareWordVoice(env, record, media = null, { skipRecorded = false } = {}) {
@@ -574,7 +601,7 @@ function prepareWordVoice(env, record, media = null, { skipRecorded = false } = 
     if (!skipRecorded && env.USERS && record?.id != null) {
       try {
         const saved = media ? { value: (await media).voice } : await storeCall(env, { op: "get", key: voiceKey(record.id) });
-        if (saved?.value?.fileId) return { fileId: saved.value.fileId };
+        if (saved?.value?.fileId) return await repeatedRecording(env, saved.value.fileId);
       } catch (error) {
         console.error("Recorded voice lookup failed", error instanceof Error ? error.message : "unknown error");
       }
@@ -633,6 +660,11 @@ async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1, 
     if (!response.ok) {
       console.error("Telegram sendVoice failed", response.status);
       if (response.status === 403) await markUserBlocked(env, chatId, "sendVoice 403");
+    }
+    else if (voice.repeatFor && env.USERS) {
+      const sent = await response.json().catch(() => null);
+      const repeatedId = sent?.result?.voice?.file_id;
+      if (repeatedId) await storeCall(env, { op: "put", key: repeatedRecordingKey(voice.repeatFor), value: { fileId: repeatedId } }).catch(() => {});
     }
     else if (voice.neural && voice.cacheable !== false && voice.wordId != null && env.USERS) {
       // Remember Telegram's file_id so this word is synthesized only once.

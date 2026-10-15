@@ -111,7 +111,7 @@ function includesAscii(bytes, text) {
   return false;
 }
 
-export function repeatSingleWordOgg(input, { times = 3, pauseMs = 700 } = {}) {
+export function repeatSingleWordOgg(input, { times = 3, pauseMs = 700, requireMarker = true } = {}) {
   if (!(times > 1)) return input;
   const pages = parseOggPages(input);
   if (pages.length < 3) return input;
@@ -120,7 +120,7 @@ export function repeatSingleWordOgg(input, { times = 3, pauseMs = 700 } = {}) {
   const headText = new TextDecoder().decode(head.data.subarray(0, 8));
   const tagsText = new TextDecoder().decode(tags.data.subarray(0, 8));
   if (headText !== "OpusHead" || tagsText !== "OpusTags" || head.data[9] !== 1) return input; // mono only
-  if (!includesAscii(tags.data, SINGLE_WORD_MARKER)) return input; // not a single-word file
+  if (requireMarker && !includesAscii(tags.data, SINGLE_WORD_MARKER)) return input; // not a single-word file
   if (audio.some((page) => page.serial !== head.serial)) return input;
 
   const copySamples = totalPacketSamples(audio);
