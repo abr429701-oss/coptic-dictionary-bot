@@ -16,6 +16,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: audio
@@ -55,6 +56,7 @@ jobs:
           fi
 
       - name: Generate, publish and sync to the sheet in batches
+        id: gen
         env:
           IPA_VOICE: Miguel
           IPA_SLOW_FACTOR: "0.75"
@@ -78,6 +80,7 @@ jobs:
             git -C audio-out init -q -b audio
             git -C audio-out remote add origin "$REMOTE"
           fi
+          FINISHED=0
           END=$(( $(date +%s) + BUDGET_MIN * 60 ))
           while [ "$(date +%s)" -lt "$END" ]; do
             FATAL=0
@@ -91,8 +94,9 @@ jobs:
             fi
             node scripts/sync_audio_sheet.mjs audio-out/audio-index.json
             if [ "$FATAL" = "1" ]; then echo "::error::generator stopped on a fatal error"; exit 1; fi
-            if [ "$TOTAL" -le "$BATCH" ]; then echo "All words are done."; break; fi
+            if [ "$TOTAL" -le "$BATCH" ]; then echo "All words are done."; FINISHED=1; break; fi
           done
+          if [ "$FINISHED" = "1" ]; then echo "more=false" >> "$GITHUB_OUTPUT"; else echo "more=true" >> "$GITHUB_OUTPUT"; fi
 
       - name: Publish the audio filename index to main
         run: |
@@ -133,3 +137,9 @@ jobs:
             echo "::error::APPS_SCRIPT_URL or AUDIO_SYNC_SECRET is missing"; exit 1
           fi
           node scripts/sync_audio_sheet.mjs data/audio-manifest.json
+
+      - name: Continue with the remaining words
+        if: ${{ !cancelled() && steps.gen.outputs.more == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run audio.yml --ref main
