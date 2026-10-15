@@ -5,12 +5,15 @@
  *   1. Project Settings > Script Properties > Add: GITHUB_DISPATCH_TOKEN = a fine-grained GitHub token for the
  *      repo abr429701-oss/coptic-dictionary-bot only, with "Contents: Read and write".
  *   2. Run setupSheetChangeTriggers() once from the editor and accept the permissions.
- *   3. Optional check: run testSheetChangeNotification() - a "Sync" run should appear in GitHub Actions.
+ *   3. Optional check: run testSheetChangeNotification() - a "Deploy Coptic Dictionary Bot" run should appear in GitHub Actions.
  *
- * Any edited cell in a row of the "dictionary" tab counts (Coptic, IPA, meaning, translations...). Edits are
- * grouped: the notice is sent one minute after the LAST edit (at most five minutes after the first one).
- * Edits made by scripts (like the audio link column) do not fire onEdit, so they never loop back.
- * Deleting or inserting whole rows is not an edit event; the 30-minute sync on GitHub catches those.
+ * What counts as a change in the "dictionary" tab:
+ *   - any edited, pasted, cleared or filled cell (onEdit);
+ *   - any inserted or deleted row/column (onChange) - confirmed by comparing a fingerprint of the tab, so
+ *     rows added to other tabs (like recordings) never trigger anything.
+ * The audio link column (L) is ignored: the audio sync writes it, so it must never loop back.
+ * Changes are grouped: the notice is sent one minute after the LAST change (at most five minutes after the first).
+ * Only the changed words are rebuilt on GitHub; every unchanged word keeps its data, voice and saved Telegram copy.
  */
 const NOTIFY = {
   REPO: "abr429701-oss/coptic-dictionary-bot",
@@ -19,9 +22,12 @@ const NOTIFY = {
   AUDIO_LINK_COLUMN: 12, // column L (audio_url) is written by the audio sync
   FIRST_KEY: "DICT_DIRTY_FIRST",
   LAST_KEY: "DICT_DIRTY_LAST",
+  STRUCT_KEY: "DICT_STRUCTURE_CHECK",
+  FINGERPRINT_KEY: "DICT_FINGERPRINT",
+  STRUCTURE_TYPES: ["INSERT_ROW", "REMOVE_ROW", "INSERT_COLUMN", "REMOVE_COLUMN", "OTHER"],
 };
 
-// Installable onEdit trigger.
+// Installable onEdit trigger: a cell was typed, pasted, cleared or filled.
 function notifyDictionaryEdit(e) {
   const range = e && e.range;
   if (!range) return;
@@ -29,6 +35,12 @@ function notifyDictionaryEdit(e) {
   if (range.getLastRow() < 2) return; // header row
   if (range.getColumn() === NOTIFY.AUDIO_LINK_COLUMN && range.getLastColumn() === NOTIFY.AUDIO_LINK_COLUMN) return;
   markDictionaryDirty_();
+}
+
+// Installable onChange trigger: rows or columns were inserted or deleted (in any tab - checked later).
+function notifyDictionaryStructureChange(e) {
+  if (!e || NOTIFY.STRUCTURE_TYPES.indexOf(e.changeType) === -1) return;
+  PropertiesService.getScriptProperties().setProperty(NOTIFY.STRUCT_KEY, "1");
 }
 
 function markDictionaryDirty_() {
@@ -44,9 +56,35 @@ function markDictionaryDirty_() {
   }
 }
 
-// Time-driven trigger (every minute): sends the notice once the edits have stopped.
+// Everything in the dictionary tab except the audio link column, reduced to a short text.
+function dictionaryFingerprint_() {
+  const sheet = SpreadsheetApp.openById(CONFIG.SHEET_ID).getSheetByName(CONFIG.DICTIONARY_TAB);
+  if (!sheet) return "";
+  const rows = sheet.getDataRange().getValues().map(function (row) {
+    return row.filter(function (_cell, index) { return index !== NOTIFY.AUDIO_LINK_COLUMN - 1; });
+  });
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, JSON.stringify(rows));
+  return bytes.map(function (b) { return ((b < 0 ? b + 256 : b)).toString(16).padStart(2, "0"); }).join("");
+}
+
+// Time-driven trigger (every minute).
 function flushDictionaryChanges() {
   const props = PropertiesService.getScriptProperties();
+
+  if (props.getProperty(NOTIFY.STRUCT_KEY)) {
+    props.deleteProperty(NOTIFY.STRUCT_KEY);
+    try {
+      const fingerprint = dictionaryFingerprint_();
+      if (fingerprint && fingerprint !== props.getProperty(NOTIFY.FINGERPRINT_KEY)) {
+        props.setProperty(NOTIFY.FINGERPRINT_KEY, fingerprint);
+        markDictionaryDirty_();
+      }
+    } catch (error) {
+      props.setProperty(NOTIFY.STRUCT_KEY, "1"); // try again next minute
+      console.error("Fingerprint check failed: " + error);
+    }
+  }
+
   const first = Number(props.getProperty(NOTIFY.FIRST_KEY));
   const last = Number(props.getProperty(NOTIFY.LAST_KEY));
   if (!first || !last) return;
@@ -61,10 +99,15 @@ function flushDictionaryChanges() {
       props.deleteProperty(NOTIFY.FIRST_KEY);
       props.deleteProperty(NOTIFY.LAST_KEY);
     } else {
-      props.setProperty(NOTIFY.FIRST_KEY, props.getProperty(NOTIFY.LAST_KEY)); // edited again while sending
+      props.setProperty(NOTIFY.FIRST_KEY, props.getProperty(NOTIFY.LAST_KEY)); // changed again while sending
     }
   } finally {
     lock.releaseLock();
+  }
+  try {
+    props.setProperty(NOTIFY.FINGERPRINT_KEY, dictionaryFingerprint_());
+  } catch (error) {
+    console.error("Could not refresh the fingerprint: " + error);
   }
 }
 
@@ -92,12 +135,14 @@ function sendSheetChanged_() {
 
 // Run once.
 function setupSheetChangeTriggers() {
+  const ours = ["notifyDictionaryEdit", "notifyDictionaryStructureChange", "flushDictionaryChanges"];
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
-    const name = trigger.getHandlerFunction();
-    if (name === "notifyDictionaryEdit" || name === "flushDictionaryChanges") ScriptApp.deleteTrigger(trigger);
+    if (ours.indexOf(trigger.getHandlerFunction()) !== -1) ScriptApp.deleteTrigger(trigger);
   });
   ScriptApp.newTrigger("notifyDictionaryEdit").forSpreadsheet(CONFIG.SHEET_ID).onEdit().create();
+  ScriptApp.newTrigger("notifyDictionaryStructureChange").forSpreadsheet(CONFIG.SHEET_ID).onChange().create();
   ScriptApp.newTrigger("flushDictionaryChanges").timeBased().everyMinutes(1).create();
+  PropertiesService.getScriptProperties().setProperty(NOTIFY.FINGERPRINT_KEY, dictionaryFingerprint_());
   console.log("Triggers are ready.");
 }
 
