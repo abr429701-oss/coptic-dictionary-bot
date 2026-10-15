@@ -579,6 +579,24 @@ function prepareWordVoice(env, record, media = null, { skipRecorded = false } = 
         console.error("Recorded voice lookup failed", error instanceof Error ? error.message : "unknown error");
       }
     }
+    // New single-word Miguel files win over everything else; words without one yet fall back to the older voices.
+    let fallbackVoice = null;
+    if (record?.id != null) {
+      try {
+        const cached = env.USERS ? (await storeCall(env, { op: "get", key: neuralKey(record.id) })).value : null;
+        if (cached?.fileId) return { fileId: cached.fileId, neural: true };
+        const neural = await fetchPrebuiltSpeech(env, record);
+        if (neural) {
+          // Only the new single-word files are remembered by Telegram file_id; older files are never cached.
+          const fresh = isSingleWordOgg(neural);
+          const voice = { audio: neural, neural: true, wordId: record.id, cacheable: fresh };
+          if (fresh) return voice;
+          fallbackVoice = voice;
+        }
+      } catch (error) {
+        console.error("Neural voice failed", error instanceof Error ? error.message : "unknown error");
+      }
+    }
     if (record?.id != null) {
       try {
         const cachedHuman = env.USERS ? (await storeCall(env, { op: "get", key: humanKey(record.id) })).value : null;
@@ -589,17 +607,7 @@ function prepareWordVoice(env, record, media = null, { skipRecorded = false } = 
         console.error("Human voice failed", error instanceof Error ? error.message : "unknown error");
       }
     }
-    if (record?.id != null) {
-      try {
-        const cached = env.USERS ? (await storeCall(env, { op: "get", key: neuralKey(record.id) })).value : null;
-        if (cached?.fileId) return { fileId: cached.fileId, neural: true };
-        const neural = await fetchPrebuiltSpeech(env, record);
-        // Only the new single-word files are remembered by Telegram file_id; older files are never cached.
-        if (neural) return { audio: neural, neural: true, wordId: record.id, cacheable: isSingleWordOgg(neural) };
-      } catch (error) {
-        console.error("Neural voice failed", error instanceof Error ? error.message : "unknown error");
-      }
-    }
+    if (fallbackVoice) return fallbackVoice;
     // No Google fallback: generated audio must come from the Polly Miguel
     // files published by GitHub Actions.
     return null;
