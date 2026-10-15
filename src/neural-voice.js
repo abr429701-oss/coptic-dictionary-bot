@@ -13,6 +13,7 @@
 import { isSingleWordOgg, repeatSingleWordOgg } from "./ogg-repeat.js";
 export { isSingleWordOgg };
 import audioManifest from "../data/audio-manifest.json" with { type: "json" };
+import audioVersions from "../data/audio-versions.json" with { type: "json" };
 
 export const NEURAL_VOICE_VERSION = "ipa-miguel-once-v1";
 // Bump this whenever the external human-audio files are regenerated. This
@@ -317,12 +318,16 @@ export function ipaToEspeak(
 // Audio URL
 // -----------------------------------------------------------------------------
 
-export const audioUrl = (env, id) => {
+// Hash of the voice a word was last built from (changes when its IPA, spelling or meaning changes).
+export const audioVersion = (id) => String(audioVersions[String(id)] ?? "");
+
+// With { bust: true } the URL carries the voice hash, so a rebuilt word is never served from a stale cache.
+export const audioUrl = (env, id, { bust = false } = {}) => {
   const fileName = audioManifest[String(id)] || `${id}.ogg`;
   return `${(
     env?.AUDIO_BASE_URL ||
     "https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/audio"
-  ).replace(/\/+$/u, "")}/${encodeURIComponent(fileName)}`;
+  ).replace(/\/+$/u, "")}/${encodeURIComponent(fileName)}${bust && audioVersion(id) ? `?v=${audioVersion(id)}` : ""}`;
 };
 
 // -----------------------------------------------------------------------------
@@ -374,7 +379,7 @@ export async function fetchPrebuiltSpeech(
         : {};
 
     const response = await fetch(
-      audioUrl(env, record.id),
+      audioUrl(env, record.id, { bust: true }),
       {
         headers,
         signal: AbortSignal.timeout(3000),

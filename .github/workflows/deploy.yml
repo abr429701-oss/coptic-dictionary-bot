@@ -5,6 +5,9 @@ on:
     branches: [main]
   schedule:
     - cron: "*/30 * * * *"
+  # Sent by the Apps Script in the Google Sheet a minute after the last edit.
+  repository_dispatch:
+    types: [sheet-changed]
   workflow_dispatch:
     inputs:
       setup_webhook:
@@ -13,6 +16,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: deploy
@@ -57,10 +61,17 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Rebuild the word voices that changed (a dictionary commit made here cannot start them by itself)
+        if: ${{ steps.commit.outputs.changed == 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run audio.yml --ref main
+
       - name: Decide whether to deploy
         id: decide
         run: |
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ steps.commit.outputs.changed }}" != "true" ]; then
+          if { [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "repository_dispatch" ]; } && [ "${{ steps.commit.outputs.changed }}" != "true" ]; then
             echo "deploy=false" >> "$GITHUB_OUTPUT"
             echo "Sheet unchanged; nothing to deploy."
           else

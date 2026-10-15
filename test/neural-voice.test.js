@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ipaForSpeech, ipaToEspeak, audioUrl, fetchPrebuiltSpeech, fetchHumanSpeech, humanAudioUrl } from "../src/neural-voice.js";
+import { ipaForSpeech, ipaToEspeak, audioUrl, audioVersion, fetchPrebuiltSpeech, fetchHumanSpeech, humanAudioUrl } from "../src/neural-voice.js";
 
 test("IPA is cleaned for the engine", () => {
   assert.equal(ipaForSpeech({ pronunciation: "ref-tshoːl" }), "ref tʃoːl");
@@ -17,7 +17,7 @@ test("IPA converts to espeak phonemes", () => {
 });
 
 test("prebuilt audio is fetched by word id", async () => {
-  assert.match(audioUrl({}, 7), /\/audio\/.*\.ogg$/u);
+  assert.match(audioUrl({}, 7), /\/audio\/.*\.ogg(\?v=[0-9a-f]+)?$/u);
   const original = globalThis.fetch;
   let fetchCount = 0;
   globalThis.fetch = async () => (++fetchCount === 1 ? new Response(new Uint8Array([0x4f, 0x67, 0x67, 0x53, 1, 2])) : new Response("", { status: 404 }));
@@ -47,4 +47,14 @@ test("human audio is opt-in and read from the audio-human branch", async () => {
   } finally {
     globalThis.fetch = original;
   }
+});
+
+test("the audio URL carries the voice hash so a rebuilt word is never served from a stale cache", async () => {
+  const { default: versions } = await import("../data/audio-versions.json", { with: { type: "json" } });
+  const [id, hash] = Object.entries(versions)[0];
+  assert.equal(audioVersion(id), hash);
+  assert.ok(audioUrl({}, id, { bust: true }).endsWith(`?v=${hash}`));
+  assert.ok(!audioUrl({}, id).includes("?v="), "inline results keep the plain URL");
+  assert.equal(audioVersion("no-such-word"), "");
+  assert.ok(!audioUrl({}, "no-such-word", { bust: true }).includes("?v="));
 });

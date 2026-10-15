@@ -54,10 +54,11 @@ function lazy(build) {
 const SEARCH_FIELDS = ["coptic", "pronunciation", "english", "phonetic", "translation_en", "translation_fr", "translation_de"];
 
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
-import { audioUrl, fetchHumanSpeech, fetchPrebuiltSpeech, isSingleWordOgg, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
+import { audioUrl, audioVersion, fetchHumanSpeech, fetchPrebuiltSpeech, isSingleWordOgg, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 import { repeatSingleWordOgg } from "./ogg-repeat.js";
 const VOICE_PREFIX = "voiceid:";
-const neuralKey = (id) => `ttsid:${NEURAL_VOICE_VERSION}:${id}`;
+// The voice hash is part of the key, so a word whose voice was rebuilt is fetched and remembered again.
+const neuralKey = (id) => `ttsid:${NEURAL_VOICE_VERSION}:${id}:${audioVersion(id)}`;
 const humanKey = (id) => `ttsid:human:${HUMAN_AUDIO_VERSION}:${id}`;
 const voiceKey = (id) => `${VOICE_PREFIX}${id}`;
 const repeatedRecordingKey = (fileId) => `rep3:${fileId}`;

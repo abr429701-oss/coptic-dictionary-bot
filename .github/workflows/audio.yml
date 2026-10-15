@@ -98,18 +98,23 @@ jobs:
           done
           if [ "$FINISHED" = "1" ]; then echo "more=false" >> "$GITHUB_OUTPUT"; else echo "more=true" >> "$GITHUB_OUTPUT"; fi
 
-      - name: Publish the audio filename index to main
+      - name: Publish the audio filename index and versions to main
+        id: index
         run: |
           git pull --rebase origin main
           cp audio-out/audio-index.json data/audio-manifest.json
-          if git diff --quiet -- data/audio-manifest.json; then
-            echo "Audio filename index unchanged."
+          # id -> hash of the voice it was built from: the bot uses it to drop its cached copy when a word's voice changes
+          node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('audio-out/manifest.json','utf8'));const i=JSON.parse(fs.readFileSync('audio-out/audio-index.json','utf8'));const o={};for(const k of Object.keys(i)){const e=m[k];if(e&&typeof e==='object'&&e.hash)o[k]=e.hash}fs.writeFileSync('data/audio-versions.json',JSON.stringify(o))"
+          git add data/audio-manifest.json data/audio-versions.json
+          if git diff --cached --quiet; then
+            echo "Audio index unchanged."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add data/audio-manifest.json
             git commit -m "Update generated audio filename index"
             git push
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Publish to the audio branch (single commit, no history growth)
@@ -143,3 +148,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run audio.yml --ref main
+
+      - name: Deploy the bot with the new audio index (a push made here cannot start the deploy by itself)
+        if: ${{ !cancelled() && steps.index.outputs.changed == 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run deploy.yml --ref main -f setup_webhook=false
