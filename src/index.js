@@ -803,7 +803,45 @@ async function inBackground(ctx, work) {
   await work;
 }
 
+// New recordings are compressed by a GitHub Action (ffmpeg) before they reach Drive; the Action reports back to
+// /voice-drive. Without the two secrets, or if GitHub refuses, the recording is uploaded directly as before.
+const GITHUB_REPO = "abr429701-oss/coptic-dictionary-bot";
+
+async function dispatchVoiceCompression(env, { id, record, fileId, duration, by, mimeType }) {
+  if (!env.GITHUB_DISPATCH_TOKEN || !env.CALLBACK_SECRET) return false;
+  try {
+    if (!(await driveConfig(env))) return false;
+    const response = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO || GITHUB_REPO}/dispatches`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${env.GITHUB_DISPATCH_TOKEN}`,
+        accept: "application/vnd.github+json",
+        "content-type": "application/json",
+        "user-agent": "coptic-dictionary-bot",
+        "x-github-api-version": "2022-11-28",
+      },
+      body: JSON.stringify({
+        event_type: "voice-recorded",
+        client_payload: { id, word: record?.coptic ?? "", fileId, duration: duration ?? null, by: by ?? null, mimeType: mimeType || "audio/ogg" },
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+    return response.status === 204;
+  } catch {
+    return false;
+  }
+}
+
+function sameSecret(a, b) {
+  const left = new TextEncoder().encode(String(a));
+  const right = new TextEncoder().encode(String(b));
+  let diff = left.length ^ right.length;
+  for (let i = 0; i < Math.max(left.length, right.length); i++) diff |= (left[i] ?? 0) ^ (right[i] ?? 0);
+  return diff === 0;
+}
+
 async function archiveAndReport(env, chatId, job) {
+  if (await dispatchVoiceCompression(env, job)) return;
   const outcome = await uploadVoiceToDrive(env, job);
   if (outcome.ok || outcome.error === "not configured") return;
   await telegram(env, "sendMessage", {
@@ -2705,6 +2743,24 @@ export default {
     }
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
       return new Response("Coptic dictionary bot is ready.", { status: 200 });
+    }
+
+    if (request.method === "POST" && url.pathname === "/voice-drive") {
+      // The compress-voice Action reports the Drive link of a compressed recording.
+      if (!env.CALLBACK_SECRET || !sameSecret(request.headers.get("x-callback-secret") ?? "", env.CALLBACK_SECRET)) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      const body = await request.json().catch(() => null);
+      const id = Number(body?.id);
+      const fileId = String(body?.fileId ?? "");
+      if (!Number.isInteger(id) || !fileId || !body?.drive) return new Response("Bad request", { status: 400 });
+      const result = await storeCall(env, {
+        op: "voicedrive",
+        id,
+        fileId,
+        drive: { url: body.drive.url ?? null, fileId: body.drive.fileId ?? null, at: new Date().toISOString() },
+      });
+      return Response.json(result ?? { ok: true });
     }
 
     if (request.method === "POST" && url.pathname === "/__setup") {

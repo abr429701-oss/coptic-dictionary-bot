@@ -1,0 +1,36 @@
+name: Compress voice recording
+
+# The bot starts this workflow (repository_dispatch) right after an admin records a word.
+on:
+  repository_dispatch:
+    types: [voice-recorded]
+
+# A newer recording of the same word replaces an older one that is still being processed.
+concurrency:
+  group: voice-${{ github.event.client_payload.id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  compress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/compress_voice.mjs
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install ffmpeg
+        run: command -v ffmpeg >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
+      - name: Compress, upload to Drive and tell the bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+          CALLBACK_SECRET: ${{ secrets.CALLBACK_SECRET }}
+          WORKER_URL: https://coptic-dictionary-bot.abr429701.workers.dev
+        run: node scripts/compress_voice.mjs

@@ -983,6 +983,73 @@ test("a recording is uploaded to Drive with its permanent id and the link is rem
   assert.deepEqual(kvEnv.USERS.store.get(`voiceid:${id}`).drive.url, `https://drive.example/${id}`);
 });
 
+function withGithub(status) {
+  const inner = globalThis.fetch;
+  const github = [];
+  globalThis.fetch = async (url, options = {}) => {
+    if (String(url).startsWith("https://api.github.com/")) {
+      github.push({ url: String(url), headers: options.headers, payload: JSON.parse(options.body) });
+      return new Response(null, { status });
+    }
+    return inner(url, options);
+  };
+  return github;
+}
+
+test("with the GitHub secrets a new recording is handed to the compress workflow instead of a direct upload", async () => {
+  const kvEnv = driveEnv({ GITHUB_DISPATCH_TOKEN: "ghp_test", CALLBACK_SECRET: "cb-secret" });
+  const { calls } = driveWorld();
+  const github = withGithub(204);
+  await adminSay(kvEnv, { text: "/record" });
+  const id = kvEnv.USERS.store.get(`user:${ADMIN}`).voiceRec.id;
+  await adminSay(kvEnv, { voice: { file_id: "TG-GH", duration: 3 } });
+  assert.equal(github.length, 1);
+  assert.match(github[0].url, /\/repos\/[^/]+\/[^/]+\/dispatches$/u);
+  assert.equal(github[0].headers.authorization, "Bearer ghp_test");
+  assert.equal(github[0].payload.event_type, "voice-recorded");
+  assert.equal(github[0].payload.client_payload.id, id);
+  assert.equal(github[0].payload.client_payload.fileId, "TG-GH");
+  assert.equal(github[0].payload.client_payload.by.id, String(ADMIN));
+  assert.ok(!calls.some((call) => call.url === SCRIPT_URL), "no direct upload while the workflow handles it");
+});
+
+test("if GitHub refuses the dispatch the recording is uploaded directly as before", async () => {
+  const kvEnv = driveEnv({ GITHUB_DISPATCH_TOKEN: "ghp_test", CALLBACK_SECRET: "cb-secret" });
+  const { calls } = driveWorld();
+  withGithub(401);
+  await adminSay(kvEnv, { text: "/record" });
+  await adminSay(kvEnv, { voice: { file_id: "TG-GH2", duration: 3 } });
+  assert.ok(calls.some((call) => call.url === SCRIPT_URL && call.payload.action === "upload"));
+  const key = [...kvEnv.USERS.store.keys()].find((item) => item.startsWith("voiceid:"));
+  assert.ok(kvEnv.USERS.store.get(key).drive.url);
+});
+
+test("/voice-drive stores the Drive link of the compressed recording and needs the shared secret", async () => {
+  const kvEnv = driveEnv({ GITHUB_DISPATCH_TOKEN: "ghp_test", CALLBACK_SECRET: "cb-secret" });
+  driveWorld();
+  withGithub(204);
+  await adminSay(kvEnv, { text: "/record" });
+  const id = kvEnv.USERS.store.get(`user:${ADMIN}`).voiceRec.id;
+  await adminSay(kvEnv, { voice: { file_id: "TG-CB", duration: 3 } });
+  const key = `voiceid:${id}`;
+  assert.equal(kvEnv.USERS.store.get(key).drive, undefined);
+
+  const callback = (secret, extra = {}) => worker.fetch(new Request("https://bot.example/voice-drive", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...(secret ? { "x-callback-secret": secret } : {}) },
+    body: JSON.stringify({ id, fileId: "TG-CB", drive: { url: "https://drive.example/new", fileId: "drive-new" }, ...extra }),
+  }), kvEnv);
+  assert.equal((await callback(null)).status, 403);
+  assert.equal((await callback("wrong")).status, 403);
+  assert.equal(kvEnv.USERS.store.get(key).drive, undefined);
+  assert.equal((await callback("cb-secret", { fileId: "" })).status, 400);
+  assert.equal((await callback("cb-secret")).status, 200);
+  assert.equal(kvEnv.USERS.store.get(key).drive.url, "https://drive.example/new");
+  // A link for an older recording must not overwrite the current one.
+  await callback("cb-secret", { fileId: "TG-OLD", drive: { url: "https://drive.example/stale", fileId: "x" } });
+  assert.equal(kvEnv.USERS.store.get(key).drive.url, "https://drive.example/new");
+});
+
 test("uploading runs after the reply when the platform provides waitUntil", async () => {
   const kvEnv = driveEnv();
   const { calls } = driveWorld();
