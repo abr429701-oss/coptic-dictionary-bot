@@ -43,8 +43,10 @@ await mkdir(outDir, { recursive: true });
 const manifestPath = path.join(outDir, "manifest.json");
 const manifest = existsSync(manifestPath) ? JSON.parse(await readFile(manifestPath, "utf8")) : {};
 const jobsById = new Map();
+const seenIds = new Set(); // one file per id: only the FIRST record of an id counts, even when it is already done
 for (const record of records) {
-  if (record?.id == null || jobsById.has(String(record.id))) continue;
+  if (record?.id == null || seenIds.has(String(record.id))) continue;
+  seenIds.add(String(record.id));
   const ipa = ipaForSpeech(record, { liturgical: true, preserveJinkim: true });
   if (!ipa) continue;
   const fileName = audioFileName(record, record.id);
