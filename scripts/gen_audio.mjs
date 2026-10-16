@@ -125,12 +125,28 @@ function safeFilePart(value) {
     .slice(0, 180);
 }
 
+function truncateUtf8(value, maxBytes) {
+  let result = "";
+  let bytes = 0;
+  for (const character of value) {
+    const size = Buffer.byteLength(character, "utf8");
+    if (bytes + size > maxBytes) break;
+    result += character;
+    bytes += size;
+  }
+  return result;
+}
+
 function audioFileName(record, id) {
-  const meaning = safeFilePart(record?.meaning);
+  const firstArabicWord = safeFilePart(record?.meaning)
+    .split(" ")[0]
+    .replace(/[،,;؛:.!?]+$/u, "");
   const coptic = safeFilePart(record?.coptic);
-  const label = [meaning, coptic].filter(Boolean).join(" - ");
-  const trimmed = (label || `voice-${id}`).slice(0, 240).replace(/[. ]+$/gu, "");
-  return `${trimmed}.ogg`;
+  const arabic = truncateUtf8(firstArabicWord || "voice", 64);
+  const copticPart = truncateUtf8(coptic || "word", 96);
+  // Keep the filename descriptive while the id guarantees uniqueness.
+  // Byte limits matter here: Arabic/Coptic characters use multiple UTF-8 bytes.
+  return `${arabic}-${copticPart}-${id}.ogg`;
 }
 
 // Number of simultaneous generators.
