@@ -272,20 +272,29 @@ for (const record of firstRecordById.values()) {
       .digest("hex")
       .slice(0, 12);
 
-  const output = path.join(outDir, audioFileName(record, record.id));
+  const previousFileName = manifest[record.id]?.fileName;
+  const previousOutput = previousFileName
+    ? path.join(outDir, previousFileName)
+    : null;
 
-  // Skip files that are already current.
+  // Preserve existing audio files and their filenames whenever they are
+  // present. The shorter naming convention applies only to newly created files.
   if (
     manifest[record.id]?.hash === hash &&
-    existsSync(output)
+    previousOutput &&
+    existsSync(previousOutput)
   ) {
     continue;
   }
 
+  const fileName = previousOutput && existsSync(previousOutput)
+    ? previousFileName
+    : audioFileName(record, record.id);
+
   jobs.push({
     id: record.id,
     record,
-    fileName: audioFileName(record, record.id),
+    fileName,
     ipa,
     phonemes,
     hash,
