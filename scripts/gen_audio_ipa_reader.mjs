@@ -12,7 +12,6 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { chromium } from "playwright";
 import records from "../data/dictionary.json" with { type: "json" };
-import { ipaForSpeech } from "../src/neural-voice.js";
 import { SINGLE_WORD_MARKER } from "../src/ogg-repeat.js";
 
 const run = promisify(execFile);
@@ -74,8 +73,10 @@ const seenIds = new Set(); // one file per id: only the FIRST record of an id co
 for (const record of records) {
   if (record?.id == null || seenIds.has(String(record.id))) continue;
   seenIds.add(String(record.id));
-  const ipa = ipaForSpeech(record, { liturgical: true, preserveJinkim: true });
-  if (!ipa) continue;
+  // The pronunciation column is authored for IPA Reader. Preserve every
+  // character (including [ ], slashes, dots, and combining marks) exactly.
+  const ipa = String(record?.pronunciation ?? "");
+  if (!ipa.trim()) continue;
   const old = manifest[record.id];
   const oldOutput = old?.fileName ? path.join(outDir, old.fileName) : null;
   // Do not rename/rebuild existing audio just because the naming convention changed.
