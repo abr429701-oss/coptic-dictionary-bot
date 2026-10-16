@@ -31,9 +31,23 @@ function safeFilePart(value) {
     .replace(/[\\/:*?"<>|\r\n]/gu, " ").replace(/\s+/gu, " ").trim()
     .replace(/[. ]+$/gu, "").slice(0, 180);
 }
+function truncateUtf8(value, maxBytes) {
+  let result = "";
+  let bytes = 0;
+  for (const character of value) {
+    const size = Buffer.byteLength(character, "utf8");
+    if (bytes + size > maxBytes) break;
+    result += character;
+    bytes += size;
+  }
+  return result;
+}
 function audioFileName(record, id) {
-  const label = [safeFilePart(record?.meaning), safeFilePart(record?.coptic)].filter(Boolean).join(" - ");
-  return `${(label || `voice-${id}`).slice(0, 240).replace(/[. ]+$/gu, "")}.ogg`;
+  const firstArabicWord = safeFilePart(record?.meaning).split(" ")[0]
+    .replace(/^[()[\]{}،,;؛:.!?]+|[()[\]{}،,;؛:.!?]+$/gu, "");
+  const arabic = truncateUtf8(firstArabicWord || "voice", 64);
+  const coptic = truncateUtf8(safeFilePart(record?.coptic) || "word", 96);
+  return `${arabic}-${coptic}-${id}.ogg`;
 }
 function makeHash(ipa, fileName) {
   return createHash("sha1").update(JSON.stringify({ site: SITE, voice: VOICE, rate: RATE, repeats: REPEATS, breakMs: BREAK_MS, ipa, fileName })).digest("hex").slice(0, 12);
@@ -49,9 +63,13 @@ for (const record of records) {
   seenIds.add(String(record.id));
   const ipa = ipaForSpeech(record, { liturgical: true, preserveJinkim: true });
   if (!ipa) continue;
-  const fileName = audioFileName(record, record.id);
-  const hash = makeHash(ipa, fileName);
   const old = manifest[record.id];
+  const oldOutput = old?.fileName ? path.join(outDir, old.fileName) : null;
+  // Do not rename/rebuild existing audio just because the naming convention changed.
+  const fileName = oldOutput && existsSync(oldOutput)
+    ? old.fileName
+    : audioFileName(record, record.id);
+  const hash = makeHash(ipa, fileName);
   if (old?.hash === hash && old?.fileName === fileName && existsSync(path.join(outDir, fileName))) continue;
   jobsById.set(String(record.id), { id: record.id, ipa, fileName, hash });
 }
