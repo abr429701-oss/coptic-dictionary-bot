@@ -21,6 +21,10 @@ const VOICE = process.env.IPA_VOICE ?? "Miguel";
 const RATE = Number(process.env.IPA_SLOW_FACTOR ?? 0.75);
 const REPEATS = Math.max(1, Number(process.env.IPA_REPEATS ?? 3));
 const BREAK_MS = Math.max(0, Number(process.env.IPA_BREAK_MS ?? 700));
+const OUTPUT_SAMPLE_RATE = 16000;
+const OUTPUT_BITRATE = "16k";
+const OPUS_APPLICATION = "voip";
+const OPUS_FRAME_DURATION = 60;
 const WORKERS = Math.max(1, Number(process.env.IPA_WORKERS ?? 1));
 const limit = Number(process.argv[3] ?? 0) || Infinity;
 const outDir = path.resolve(process.argv[2] ?? "audio-out");
@@ -50,7 +54,16 @@ function audioFileName(record, id) {
   return `${arabic}-${coptic}-${id}.ogg`;
 }
 function makeHash(ipa, fileName) {
-  return createHash("sha1").update(JSON.stringify({ site: SITE, voice: VOICE, rate: RATE, repeats: REPEATS, breakMs: BREAK_MS, ipa, fileName })).digest("hex").slice(0, 12);
+  return createHash("sha1").update(JSON.stringify({
+    site: SITE,
+    voice: VOICE,
+    rate: RATE,
+    repeats: REPEATS,
+    breakMs: BREAK_MS,
+    ipa,
+    fileName,
+    output: { codec: "libopus", sampleRate: OUTPUT_SAMPLE_RATE, channels: 1, bitrate: OUTPUT_BITRATE, application: OPUS_APPLICATION, frameDuration: OPUS_FRAME_DURATION },
+  })).digest("hex").slice(0, 12);
 }
 
 await mkdir(outDir, { recursive: true });
@@ -103,11 +116,11 @@ async function toTelegramOgg(mp3, id) {
     const silenceLabels = Array.from({ length: pauseCount }, (_, index) => `[s${index}]`).join("");
     const sequence = Array.from({ length: REPEATS * 2 - 1 }, (_, index) => index % 2 === 0 ? `[a${index / 2}]` : `[s${(index - 1) / 2}]`).join("");
     const filter = [
-      `[0:a]atempo=${RATE},aformat=sample_rates=24000:channel_layouts=mono,asplit=${REPEATS}${audioLabels}`,
-      pauseCount ? `anullsrc=r=24000:cl=mono:d=${BREAK_MS / 1000},asplit=${pauseCount}${silenceLabels}` : "",
+      `[0:a]atempo=${RATE},aformat=sample_rates=${OUTPUT_SAMPLE_RATE}:channel_layouts=mono,asplit=${REPEATS}${audioLabels}`,
+      pauseCount ? `anullsrc=r=${OUTPUT_SAMPLE_RATE}:cl=mono:d=${BREAK_MS / 1000},asplit=${pauseCount}${silenceLabels}` : "",
       `${sequence}concat=n=${REPEATS * 2 - 1}:v=0:a=1[out]`,
     ].filter(Boolean).join(";");
-    await run("ffmpeg", ["-loglevel", "error", "-y", "-i", input, "-filter_complex", filter, "-map", "[out]", "-ac", "1", "-ar", "24000", "-c:a", "libopus", "-b:a", "32k", ...(REPEATS === 1 ? ["-metadata", `comment=${SINGLE_WORD_MARKER}`] : []), output], { maxBuffer: 1024 * 1024 });
+    await run("ffmpeg", ["-loglevel", "error", "-y", "-i", input, "-filter_complex", filter, "-map", "[out]", "-ac", "1", "-ar", String(OUTPUT_SAMPLE_RATE), "-c:a", "libopus", "-application", OPUS_APPLICATION, "-vbr", "on", "-compression_level", "10", "-b:a", OUTPUT_BITRATE, "-frame_duration", String(OPUS_FRAME_DURATION), ...(REPEATS === 1 ? ["-metadata", `comment=${SINGLE_WORD_MARKER}`] : []), output], { maxBuffer: 1024 * 1024 });
     return new Uint8Array(await readFile(output));
   } finally {
     await rm(input, { force: true });
