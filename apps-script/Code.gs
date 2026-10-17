@@ -161,6 +161,47 @@ function normalizeAudioWord_(value) {
   return String(value || "").normalize("NFC").replace(/`/g, "").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
+// Drops upload rows whose Drive file was deleted or trashed by hand, so a dead Drive link no longer beats the
+// GitHub link in dictionary!L. It removes nothing when Drive cannot be listed or answers with an error other
+// than "not found", and it never touches rows whose file id cannot be read.
+function dropDeadUploads_(sheet) {
+  if (!sheet || sheet.getLastRow() < 2) return [];
+  const alive = {};
+  try {
+    const files = getFolder_().getFiles();
+    while (files.hasNext()) alive[files.next().getId()] = true;
+  } catch (error) {
+    return [];
+  }
+  const lock = LockService.getScriptLock(); lock.waitLock(30000);
+  try {
+    const columns = Math.max(BAN_HEADER.length, sheet.getLastColumn());
+    const range = sheet.getRange(2, 1, sheet.getLastRow() - 1, columns);
+    const rows = range.getValues();
+    const keep = [];
+    const dropped = [];
+    rows.forEach(function (row) {
+      const id = String(row[0] || "");
+      const fileId = String(row[3] || extractFileId_(row[2]) || "");
+      let ok = true;
+      if (/^\d+$/.test(id) && fileId && !alive[fileId]) ok = driveFileExists_(fileId);
+      if (ok) keep.push(row); else dropped.push(id);
+    });
+    if (dropped.length) {
+      range.clearContent();
+      if (keep.length) sheet.getRange(2, 1, keep.length, columns).setValues(keep);
+      const manifest = manifest_();
+      dropped.forEach(function (id) { delete manifest[id]; });
+      saveManifest_(manifest);
+    }
+    return dropped;
+  } finally { lock.releaseLock(); }
+}
+function driveFileExists_(fileId) {
+  try { return !DriveApp.getFileById(fileId).isTrashed(); }
+  catch (error) { return !/No item with the given ID|could not be found/i.test(String(error && error.message || error)); }
+}
+
 // Updates dictionary!L. A human recording in upload!C always wins over GitHub.
 function syncGithubAudio_(body) {
   const configured = PropertiesService.getScriptProperties().getProperty("GITHUB_AUDIO_SYNC_SECRET") || "";
@@ -170,6 +211,7 @@ function syncGithubAudio_(body) {
   const spreadsheet = openSpreadsheet_();
   const dictionary = dictionarySheet_();
   const upload = spreadsheet.getSheetByName(CONFIG.BAN_TAB);
+  const droppedUploads = upload ? dropDeadUploads_(upload) : [];
   const github = {};
   body.audio.forEach(function (item) {
     const key = normalizeAudioWord_(item && item.coptic);
@@ -188,7 +230,7 @@ function syncGithubAudio_(body) {
   }
 
   const rowCount = Math.max(0, dictionary.getLastRow() - 1);
-  if (!rowCount) return { ok: true, updated: 0, human: 0, github: 0, empty: 0 };
+  if (!rowCount) return { ok: true, updated: 0, human: 0, github: 0, empty: 0, dropped_dead_uploads: droppedUploads.length };
   const values = dictionary.getRange(2, 1, rowCount, Math.max(12, dictionary.getLastColumn())).getValues();
   let humanCount = 0;
   let githubCount = 0;
@@ -204,7 +246,7 @@ function syncGithubAudio_(body) {
   dictionary.getRange(2, 12, links.length, 1).setValues(links);
   dictionary.getRange(1, 12).setValue("audio_url");
   SpreadsheetApp.flush();
-  return { ok: true, updated: links.length, human: humanCount, github: githubCount, empty: emptyCount };
+  return { ok: true, updated: links.length, human: humanCount, github: githubCount, empty: emptyCount, dropped_dead_uploads: droppedUploads.length };
 }
 
 // The dictionary sheet is A=Coptic, B=IPA, C=Arabic/full meaning.
