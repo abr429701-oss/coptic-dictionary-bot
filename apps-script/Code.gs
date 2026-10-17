@@ -190,9 +190,8 @@ function dropDeadUploads_(sheet) {
     if (dropped.length) {
       range.clearContent();
       if (keep.length) sheet.getRange(2, 1, keep.length, columns).setValues(keep);
-      const manifest = manifest_();
-      dropped.forEach(function (id) { delete manifest[id]; });
-      saveManifest_(manifest);
+      // The manifest keeps these ids on purpose: the next reconcile ("/syncdrive" in the bot) reports them as
+      // deleted, and that is what removes the matching saved recordings from the bot.
     }
     return dropped;
   } finally { lock.releaseLock(); }
