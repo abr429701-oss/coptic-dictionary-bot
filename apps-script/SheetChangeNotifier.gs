@@ -7,6 +7,9 @@
  *   2. Run setupSheetChangeTriggers() once from the editor and accept the permissions.
  *   3. Optional check: run testSheetChangeNotification() - a "Deploy Coptic Dictionary Bot" run should appear in GitHub Actions.
  *
+ * Links in column L repair themselves: deleting a row in "upload", or clearing a link in column L, rebuilds the
+ * column from the human recordings plus the GitHub links stored in the hidden "github_audio" tab (about a minute).
+ *
  * What counts as a change in the "dictionary" tab:
  *   - any edited, pasted, cleared or filled cell (onEdit);
  *   - any inserted or deleted row/column (onChange) - confirmed by comparing a fingerprint of the tab, so
@@ -23,6 +26,8 @@ const NOTIFY = {
   FIRST_KEY: "DICT_DIRTY_FIRST",
   LAST_KEY: "DICT_DIRTY_LAST",
   STRUCT_KEY: "DICT_STRUCTURE_CHECK",
+  LINKS_KEY: "AUDIO_LINKS_DIRTY_AT",
+  LINKS_QUIET_SECONDS: 15, // rebuild column L this long after the last edit of a link or of the upload tab
   FINGERPRINT_KEY: "DICT_FINGERPRINT",
   STRUCTURE_TYPES: ["INSERT_ROW", "REMOVE_ROW", "INSERT_COLUMN", "REMOVE_COLUMN", "OTHER"],
 };
@@ -31,16 +36,28 @@ const NOTIFY = {
 function notifyDictionaryEdit(e) {
   const range = e && e.range;
   if (!range) return;
-  if (range.getSheet().getName() !== CONFIG.DICTIONARY_TAB) return;
+  const tab = range.getSheet().getName();
+  if (tab === CONFIG.BAN_TAB) { // a recording row of "upload" was edited or cleared
+    markLinksDirty_();
+    return;
+  }
+  if (tab !== CONFIG.DICTIONARY_TAB) return;
   if (range.getLastRow() < 2) return; // header row
-  if (range.getColumn() === NOTIFY.AUDIO_LINK_COLUMN && range.getLastColumn() === NOTIFY.AUDIO_LINK_COLUMN) return;
+  const link = NOTIFY.AUDIO_LINK_COLUMN;
+  if (range.getColumn() <= link && range.getLastColumn() >= link) markLinksDirty_(); // a link was edited or cleared
+  if (range.getColumn() === link && range.getLastColumn() === link) return; // only the link column: nothing for GitHub
   markDictionaryDirty_();
+}
+
+function markLinksDirty_() {
+  PropertiesService.getScriptProperties().setProperty(NOTIFY.LINKS_KEY, String(Date.now()));
 }
 
 // Installable onChange trigger: rows or columns were inserted or deleted (in any tab - checked later).
 function notifyDictionaryStructureChange(e) {
   if (!e || NOTIFY.STRUCTURE_TYPES.indexOf(e.changeType) === -1) return;
   PropertiesService.getScriptProperties().setProperty(NOTIFY.STRUCT_KEY, "1");
+  markLinksDirty_(); // a deleted row in "upload" must not leave its link in column L
 }
 
 function markDictionaryDirty_() {
@@ -70,6 +87,17 @@ function dictionaryFingerprint_() {
 // Time-driven trigger (every minute).
 function flushDictionaryChanges() {
   const props = PropertiesService.getScriptProperties();
+
+  const linksAt = Number(props.getProperty(NOTIFY.LINKS_KEY));
+  if (linksAt && Date.now() - linksAt >= NOTIFY.LINKS_QUIET_SECONDS * 1000) {
+    props.deleteProperty(NOTIFY.LINKS_KEY);
+    try {
+      refreshAudioLinks_();
+    } catch (error) {
+      props.setProperty(NOTIFY.LINKS_KEY, String(Date.now())); // try again next minute
+      console.error("Rebuilding the audio links failed: " + error);
+    }
+  }
 
   if (props.getProperty(NOTIFY.STRUCT_KEY)) {
     props.deleteProperty(NOTIFY.STRUCT_KEY);

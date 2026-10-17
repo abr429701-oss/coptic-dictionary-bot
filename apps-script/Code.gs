@@ -201,23 +201,17 @@ function driveFileExists_(fileId) {
   catch (error) { return !/No item with the given ID|could not be found/i.test(String(error && error.message || error)); }
 }
 
-// Updates dictionary!L. A human recording in upload!C always wins over GitHub.
-function syncGithubAudio_(body) {
-  const configured = PropertiesService.getScriptProperties().getProperty("GITHUB_AUDIO_SYNC_SECRET") || "";
-  if (!configured || String(body.secret || "") !== configured) return { ok: false, error: "unauthorized" };
-  if (!Array.isArray(body.audio)) return { ok: false, error: "audio must be an array" };
+// dictionary!L (audio_url) is always: the human recording in upload!C if there is one, else the GitHub voice link,
+// else empty. The GitHub links are kept in the hidden tab below so the sheet can rebuild column L by itself
+// whenever someone deletes a row in "upload" or clears a cell in column L (see SheetChangeNotifier.gs).
+const GITHUB_LINKS_TAB = "github_audio";
 
-  const spreadsheet = openSpreadsheet_();
-  const dictionary = dictionarySheet_();
-  const upload = spreadsheet.getSheetByName(CONFIG.BAN_TAB);
-  const droppedUploads = upload ? dropDeadUploads_(upload) : [];
-  const github = {};
-  body.audio.forEach(function (item) {
-    const key = normalizeAudioWord_(item && item.coptic);
-    const url = String(item && item.url || "").trim();
-    if (key && /^https:\/\//i.test(url)) github[key] = url;
-  });
+function withScriptLock_(fn) {
+  const lock = LockService.getScriptLock(); lock.waitLock(30000);
+  try { return fn(); } finally { lock.releaseLock(); }
+}
 
+function readHumanLinks_(upload) {
   const human = {};
   if (upload && upload.getLastRow() >= 2) {
     const rows = upload.getRange(2, 1, upload.getLastRow() - 1, Math.max(3, upload.getLastColumn())).getValues();
@@ -227,25 +221,93 @@ function syncGithubAudio_(body) {
       if (key && /^https:\/\//i.test(url)) human[key] = url;
     });
   }
+  return human;
+}
 
-  const rowCount = Math.max(0, dictionary.getLastRow() - 1);
-  if (!rowCount) return { ok: true, updated: 0, human: 0, github: 0, empty: 0, dropped_dead_uploads: droppedUploads.length };
-  const values = dictionary.getRange(2, 1, rowCount, Math.max(12, dictionary.getLastColumn())).getValues();
-  let humanCount = 0;
-  let githubCount = 0;
-  let emptyCount = 0;
-  const links = values.map(function (row) {
-    const key = normalizeAudioWord_(row[0]);
-    const link = human[key] || github[key] || "";
-    if (human[key]) humanCount += 1;
-    else if (github[key]) githubCount += 1;
-    else emptyCount += 1;
-    return [link];
+function saveGithubLinks_(spreadsheet, github) {
+  const rows = Object.keys(github).sort().map(function (key) { return [key, github[key]]; });
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, JSON.stringify(rows));
+  const digest = bytes.map(function (b) { return (b < 0 ? b + 256 : b).toString(16).padStart(2, "0"); }).join("");
+  const props = PropertiesService.getScriptProperties();
+  let sheet = spreadsheet.getSheetByName(GITHUB_LINKS_TAB);
+  if (sheet && props.getProperty("GITHUB_LINKS_DIGEST") === digest) return false;
+  if (!sheet) sheet = spreadsheet.insertSheet(GITHUB_LINKS_TAB);
+  sheet.clearContents();
+  sheet.getRange(1, 1, 1, 2).setValues([["key", "url"]]);
+  if (rows.length) sheet.getRange(2, 1, rows.length, 2).setValues(rows);
+  try { sheet.hideSheet(); } catch (ignored) {}
+  props.setProperty("GITHUB_LINKS_DIGEST", digest);
+  return true;
+}
+
+function loadGithubLinks_(spreadsheet) {
+  const sheet = spreadsheet.getSheetByName(GITHUB_LINKS_TAB);
+  if (!sheet || sheet.getLastRow() < 2) return null;
+  const github = {};
+  sheet.getRange(2, 1, sheet.getLastRow() - 1, 2).getValues().forEach(function (row) {
+    const key = String(row[0] || ""), url = String(row[1] || "").trim();
+    if (key && /^https:\/\//i.test(url)) github[key] = url;
   });
-  dictionary.getRange(2, 12, links.length, 1).setValues(links);
-  dictionary.getRange(1, 12).setValue("audio_url");
-  SpreadsheetApp.flush();
-  return { ok: true, updated: links.length, human: humanCount, github: githubCount, empty: emptyCount, dropped_dead_uploads: droppedUploads.length };
+  return Object.keys(github).length ? github : null;
+}
+
+function writeAudioLinks_(spreadsheet, github) {
+  return withScriptLock_(function () {
+    const dictionary = dictionarySheet_();
+    const human = readHumanLinks_(spreadsheet.getSheetByName(CONFIG.BAN_TAB));
+    const rowCount = Math.max(0, dictionary.getLastRow() - 1);
+    if (!rowCount) return { ok: true, updated: 0, human: 0, github: 0, empty: 0 };
+    const values = dictionary.getRange(2, 1, rowCount, Math.max(12, dictionary.getLastColumn())).getValues();
+    let humanCount = 0;
+    let githubCount = 0;
+    let emptyCount = 0;
+    const links = values.map(function (row) {
+      const key = normalizeAudioWord_(row[0]);
+      const link = human[key] || github[key] || "";
+      if (human[key]) humanCount += 1;
+      else if (github[key]) githubCount += 1;
+      else emptyCount += 1;
+      return [link];
+    });
+    dictionary.getRange(2, 12, links.length, 1).setValues(links);
+    dictionary.getRange(1, 12).setValue("audio_url");
+    SpreadsheetApp.flush();
+    return { ok: true, updated: links.length, human: humanCount, github: githubCount, empty: emptyCount };
+  });
+}
+
+// Called by the GitHub audio workflow after each batch: remembers the GitHub links and rebuilds column L.
+function syncGithubAudio_(body) {
+  const configured = PropertiesService.getScriptProperties().getProperty("GITHUB_AUDIO_SYNC_SECRET") || "";
+  if (!configured || String(body.secret || "") !== configured) return { ok: false, error: "unauthorized" };
+  if (!Array.isArray(body.audio)) return { ok: false, error: "audio must be an array" };
+
+  const spreadsheet = openSpreadsheet_();
+  const upload = spreadsheet.getSheetByName(CONFIG.BAN_TAB);
+  const droppedUploads = upload ? dropDeadUploads_(upload) : [];
+  const github = {};
+  body.audio.forEach(function (item) {
+    const key = normalizeAudioWord_(item && item.coptic);
+    const url = String(item && item.url || "").trim();
+    if (key && /^https:\/\//i.test(url)) github[key] = url;
+  });
+  saveGithubLinks_(spreadsheet, github);
+  const result = writeAudioLinks_(spreadsheet, github);
+  result.dropped_dead_uploads = droppedUploads.length;
+  return result;
+}
+
+// Rebuilds column L from the stored GitHub links and the upload tab, without waiting for GitHub. Used when a row of
+// "upload" is deleted, a link in column L is cleared, or a Drive recording disappears.
+function refreshAudioLinks_() {
+  const spreadsheet = openSpreadsheet_();
+  const github = loadGithubLinks_(spreadsheet);
+  if (!github) return { ok: true, skipped: true, reason: "no GitHub links stored yet; the next audio sync stores them" };
+  const upload = spreadsheet.getSheetByName(CONFIG.BAN_TAB);
+  const dropped = upload ? dropDeadUploads_(upload) : [];
+  const result = writeAudioLinks_(spreadsheet, github);
+  result.dropped_dead_uploads = dropped.length;
+  return result;
 }
 
 // The dictionary sheet is A=Coptic, B=IPA, C=Arabic/full meaning.
