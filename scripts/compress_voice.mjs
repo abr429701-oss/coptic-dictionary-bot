@@ -56,7 +56,26 @@ if (size !== null && size < 300) size = compress(false); // the trim removed (al
 if (size !== null && size >= 300 && size < original.length) audio = readFileSync(output);
 console.log(`Recording ${job.id}: ${original.length} -> ${audio.length} bytes`);
 
-const uploaded = await callAppsScript({
+// Several recordings sent at once make Apps Script's upload queue behind its script lock (30 s), and the late ones are
+// refused with a lock/rate error. Nothing was created in that case, so trying again is safe (an upload replaces the
+// word's previous file). Permanent errors (bad id, not the admin...) are not retried.
+const RETRY_BASE_MS = Number(process.env.RETRY_BASE_MS ?? 8000);
+const TRANSIENT = /lock|timeout|timed out|too many|rate|quota|temporar|try again|unavailable|not JSON|failed: (429|5\d\d)|ECONNRESET|fetch failed/i;
+async function uploadWithRetry(payload, attempts = 5) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await callAppsScript(payload);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt >= attempts || !TRANSIENT.test(message)) throw error;
+      const wait = RETRY_BASE_MS * 2 ** (attempt - 1) * (1 + Math.random() * 0.5);
+      console.log(`Upload attempt ${attempt} failed (${message.slice(0, 120)}); trying again in ${Math.round(wait / 1000)} s`);
+      await new Promise((resolve) => setTimeout(resolve, wait));
+    }
+  }
+}
+
+const uploaded = await uploadWithRetry({
   action: "upload",
   id: job.id,
   word: job.word ?? "",
