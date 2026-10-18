@@ -301,8 +301,10 @@ function syncGithubAudio_(body) {
 // "upload" is deleted, a link in column L is cleared, or a Drive recording disappears.
 function refreshAudioLinks_() {
   const spreadsheet = openSpreadsheet_();
-  const github = loadGithubLinks_(spreadsheet);
-  if (!github) return { ok: true, skipped: true, reason: "no GitHub links stored yet; the next audio sync stores them" };
+  // Use stored GitHub links when available; fall back to {} so column L is always rebuilt
+  // even before the first audio sync. Without this fallback the early return leaves deleted
+  // Drive links in place and words without human recordings with no link at all.
+  const github = loadGithubLinks_(spreadsheet) || {};
   const upload = spreadsheet.getSheetByName(CONFIG.BAN_TAB);
   const dropped = upload ? dropDeadUploads_(upload) : [];
   const result = writeAudioLinks_(spreadsheet, github);
@@ -477,6 +479,7 @@ function deleteUpload_(body) {
 
 // Reconciles changes made manually in Drive or the upload tab.
 function reconcile_() {
+  let result;
   const lock = LockService.getScriptLock(); lock.waitLock(30000);
   try {
     const sheet = banSheet_(openSpreadsheet_());
@@ -499,8 +502,12 @@ function reconcile_() {
       if (!current[id]) { trashFile_(previous[id]); deleted.push(id); }
     });
     saveManifest_(current);
-    return { ok: true, active_ids: Object.keys(current), deleted_ids: Array.from(new Set(deleted)), checked: Object.keys(current).length };
+    result = { ok: true, active_ids: Object.keys(current), deleted_ids: Array.from(new Set(deleted)), checked: Object.keys(current).length };
   } finally { lock.releaseLock(); }
+  if (result && result.deleted_ids && result.deleted_ids.length) {
+    try { refreshAudioLinks_(); } catch (ignored) {}
+  }
+  return result;
 }
 function extractFileId_(url) { const match = String(url || "").match(/\/d\/([^/]+)/); return match ? match[1] : ""; }
 
