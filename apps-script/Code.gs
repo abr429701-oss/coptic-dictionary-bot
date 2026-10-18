@@ -404,6 +404,7 @@ function trashFile_(fileId) { if (!fileId) return false; try { DriveApp.getFileB
 function deleteUploads_(ids) {
   const wanted = Array.from(new Set((Array.isArray(ids) ? ids : []).map(String).filter(function (id) { return /^\d+$/.test(id); })));
   if (!wanted.length) return { ok: true, deleted: 0 };
+  let result;
   const lock = LockService.getScriptLock(); lock.waitLock(30000);
   try {
     const sheet = banSheet_(openSpreadsheet_());
@@ -422,10 +423,14 @@ function deleteUploads_(ids) {
     }
     Object.keys(fileIds).forEach(trashFile_);
     saveManifest_(manifest);
-    return { ok: true, deleted: wanted.length, trashed: Object.keys(fileIds).length };
+    result = { ok: true, deleted: wanted.length, trashed: Object.keys(fileIds).length };
   } finally { lock.releaseLock(); }
+  // sheet.deleteRow() does not fire the onChange trigger, so rebuild column L manually.
+  try { refreshAudioLinks_(); } catch (ignored) {}
+  return result;
 }
 function deleteAllUploads_() {
+  let result;
   const lock = LockService.getScriptLock(); lock.waitLock(30000);
   try {
     const sheet = banSheet_(openSpreadsheet_());
@@ -444,12 +449,16 @@ function deleteAllUploads_() {
     Object.keys(fileIds).forEach(trashFile_);
     for (let row = sheet.getLastRow(); row >= 2; row--) sheet.deleteRow(row);
     saveManifest_({});
-    return { ok: true, deleted: Object.keys(fileIds).length, folder_cleared: true };
+    result = { ok: true, deleted: Object.keys(fileIds).length, folder_cleared: true };
   } finally { lock.releaseLock(); }
+  // sheet.deleteRow() does not fire the onChange trigger, so rebuild column L manually.
+  try { refreshAudioLinks_(); } catch (ignored) {}
+  return result;
 }
 function deleteUpload_(body) {
   const id = String(body.id == null ? "" : body.id);
   if (!/^\d+$/.test(id)) return { ok: false, error: "id must be a number" };
+  let result;
   const lock = LockService.getScriptLock(); lock.waitLock(30000);
   try {
     const sheet = banSheet_(openSpreadsheet_());
@@ -459,8 +468,11 @@ function deleteUpload_(body) {
     const trashed = trashFile_(fileId);
     if (row && sheet.deleteRow) sheet.deleteRow(row);
     removeManifest_(id);
-    return { ok: true, id: id, file_id: fileId || null, trashed: trashed };
+    result = { ok: true, id: id, file_id: fileId || null, trashed: trashed };
   } finally { lock.releaseLock(); }
+  // sheet.deleteRow() does not fire the onChange trigger, so rebuild column L manually.
+  try { refreshAudioLinks_(); } catch (ignored) {}
+  return result;
 }
 
 // Reconciles changes made manually in Drive or the upload tab.
