@@ -518,7 +518,6 @@ function findMatches(query) {
   return exact.concat(partial);
 }
 
-const TYPING_DELAY_MS = 0; // Telegram displays its native localized “typing…” indicator.
 const USER_COMMANDS = [
   { command: "start", description: "بدء استخدام القاموس" },
 ];
@@ -926,11 +925,6 @@ async function setDriveConfig(env, message, argument) {
   await storeCall(env, { op: "put", key: DRIVE_CONFIG_KEY, value: { url } });
   await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "تم حفظ رابط درايف. جارٍ الاختبار…" });
   await telegram(env, "sendMessage", { chat_id: message.chat.id, text: await driveStatusText(env), parse_mode: "HTML", disable_web_page_preview: true });
-}
-
-async function showTyping(env, chatId, delayMs = TYPING_DELAY_MS) {
-  await telegram(env, "sendChatAction", { chat_id: chatId, action: "typing" });
-  if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 // ---- Word cards (images drawn in GitHub Actions; see scripts/render_cards.mjs) ----
@@ -2729,7 +2723,6 @@ async function handleUpdate(update, env, ctx) {
       }
       return;
     }
-    await showTyping(env, message.chat.id);
     await sendSearch(env, message.chat.id, text, 0, undefined, ctx);
   }
 }
