@@ -3,9 +3,13 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build:search-index": "node scripts/build-search-index.mjs",
+    "predev": "npm run build:search-index",
     "dev": "wrangler dev",
+    "predeploy": "npm run build:search-index",
     "deploy": "wrangler deploy",
     "setup:webhook": "node scripts/setup-webhook.mjs",
+    "pretest": "npm run build:search-index",
     "test": "node --test"
   },
   "devDependencies": {

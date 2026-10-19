@@ -1,6 +1,7 @@
 .env
 .dev.vars
 node_modules/
+data/search-index.json*
 .wrangler/
 .venv/
 __pycache__/

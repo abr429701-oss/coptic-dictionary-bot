@@ -1,4 +1,5 @@
 import records from "../data/dictionary.json" with { type: "json" };
+import searchIndex from "../data/search-index.json" with { type: "json" };
 import { translateFieldValue } from "./field-translations.js";
 import cardManifest from "../data/cards.json" with { type: "json" };
 import welcomeImageBase64 from "./welcome-image.js";
@@ -49,9 +50,6 @@ function lazy(build) {
     return value;
   };
 }
-
-// Search only the sheet's own text; never derived/generated fields.
-const SEARCH_FIELDS = ["coptic", "pronunciation", "english", "phonetic", "translation_en", "translation_fr", "translation_de"];
 
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
 import { audioUrl, audioVersion, fetchHumanSpeech, fetchPrebuiltSpeech, isSingleWordOgg, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
@@ -126,74 +124,13 @@ function splitMeaning(value) {
   return String(value ?? "").split(/\s*[،,]\s*/u).map((part) => part.trim()).filter(Boolean);
 }
 
-// Normalized text, tokenized meanings and "word starts" per record, built once per isolate on first search.
-const searchIndex = lazy(() => {
-  const meaning = [];
-  const prefix = [];
-  const prefixFirst = new Map();
-  const prefixFirstTwo = new Map();
-  const termTokens = [];
-  const textExact = new Map();
-  const textFirst = new Map();
-  const meaningExact = new Map();
-  const meaningFirst = new Map();
-  const addRow = (map, key, row) => {
-    if (!key) return;
-    const rows = map.get(key);
-    if (!rows) map.set(key, [row]);
-    else if (rows[rows.length - 1] !== row) rows.push(row);
-  };
-  records.forEach((record, row) => {
-    const terms = SEARCH_FIELDS.flatMap((field) => splitMeaning(record[field]).map(normalize))
-      .filter(Boolean).map((value) => ({ value, tokens: toTokens(value) })).filter((term) => term.tokens);
-    termTokens.push(terms.map((term) => term.tokens));
-    const firstTerms = new Set();
-    for (const term of terms) {
-      addRow(textExact, term.value, row);
-      const first = term.tokens.split(" ", 1)[0];
-      if (first) firstTerms.add(first);
-    }
-    for (const first of firstTerms) addRow(textFirst, first, row);
-    const parts = splitMeaning(record.meaning).map(normalize);
-    const partTokens = parts.map(toTokens);
-    meaning.push(partTokens);
-    const firstParts = new Set();
-    for (let i = 0; i < parts.length; i += 1) {
-      addRow(meaningExact, partTokens[i], row);
-      const first = partTokens[i]?.split(" ", 1)[0];
-      if (first) firstParts.add(first);
-    }
-    for (const first of firstParts) addRow(meaningFirst, first, row);
-    const keys = [record.coptic, record.english, record.phonetic].map(normalize);
-    const prefixKeys = keys.concat(parts).filter(Boolean);
-    prefix.push(prefixKeys);
-    for (const key of prefixKeys) {
-      const chars = Array.from(key);
-      if (chars.length) addRow(prefixFirst, chars[0], row);
-      if (chars.length > 1) addRow(prefixFirstTwo, chars.slice(0, 2).join(""), row);
-    }
-  });
-  return { meaning, prefix, prefixFirst, prefixFirstTwo, termTokens, textExact, textFirst, meaningExact, meaningFirst };
-});
+const indexedRows = (map, key) => Object.hasOwn(map, key) ? map[key] : [];
 
 function findPrefixMatches(normalizedQuery) {
   const chars = Array.from(normalizedQuery);
-  const indexed = searchIndex();
-  if (chars.length === 1) return indexed.prefixFirst.get(chars[0]) ?? [];
-  if (chars.length === 2) return indexed.prefixFirstTwo.get(chars.join("")) ?? [];
-
-  const matches = [];
-  const { prefix } = indexed;
-  for (let index = 0; index < prefix.length; index += 1) {
-    const keys = prefix[index];
-    for (let k = 0; k < keys.length; k += 1) {
-      if (keys[k].startsWith(normalizedQuery)) {
-        matches.push(index);
-        break;
-      }
-    }
-  }
-  return matches;
+  if (chars.length === 1) return indexedRows(searchIndex.prefixFirst, chars[0]);
+  if (chars.length === 2) return indexedRows(searchIndex.prefixFirstTwo, chars.join(""));
+  return [];
 }
 
 // Index of the meaning part the query refers to (Arabic searches only); -1 means "show everything".
@@ -505,27 +442,27 @@ function renderWordSuggestions(query, words, requestedPage) {
 function findMatches(query) {
   const normalizedQuery = normalize(query);
   if (!normalizedQuery) return [];
-  const index = searchIndex();
+  const index = searchIndex;
   if (ARABIC_LETTER.test(normalizedQuery)) {
     // Arabic: match the sheet's meanings only, as whole words/phrases (never inside a longer word).
     const needle = tokens(normalizedQuery);
     if (!needle) return [];
-    const exact = index.meaningExact.get(needle) ?? [];
+    const exact = indexedRows(index.meaningExact, needle);
     const exactRows = new Set(exact);
     const matches = [];
     const first = needle.split(" ", 1)[0];
-    for (const row of index.meaningFirst.get(first) ?? []) {
+    for (const row of indexedRows(index.meaningFirst, first)) {
       if (!exactRows.has(row) && index.meaning[row].some((item) => hasWholeWords(item, needle))) matches.push(row);
     }
     return exact.concat(matches);
   }
   const needle = toTokens(normalizedQuery);
   if (!needle) return [];
-  const exact = index.textExact.get(normalizedQuery) ?? [];
+  const exact = indexedRows(index.textExact, normalizedQuery);
   const exactRows = new Set(exact);
   const partial = [];
   const first = needle.split(" ", 1)[0];
-  for (const row of index.textFirst.get(first) ?? []) {
+  for (const row of indexedRows(index.textFirst, first)) {
     if (!exactRows.has(row) && index.termTokens[row].some((field) => hasWholeWords(field, needle))) partial.push(row);
   }
   return exact.concat(partial);
