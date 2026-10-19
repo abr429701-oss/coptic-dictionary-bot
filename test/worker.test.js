@@ -569,6 +569,28 @@ test("every current type and origin value has English, French and German transla
   assert.doesNotMatch(translateFieldValue("فعل ، صيغة مصدرية مضافة حديثًا", "fr"), /[\u0600-\u06ff]/u);
 });
 
+test("short inline prefixes preserve the full-scan result order", async () => {
+  const foldMap = { أ: "ا", إ: "ا", آ: "ا", ٱ: "ا", ى: "ي", ة: "ه", ὲ: "ⲉ", έ: "ⲉ", ὶ: "ⲓ", ί: "ⲓ", ὸ: "ⲟ", ό: "ⲟ", ὼ: "ⲱ", ώ: "ⲱ", ὴ: "ⲏ", ή: "ⲏ", ὰ: "ⲁ", ά: "ⲁ", ὺ: "ⲩ", ύ: "ⲩ", "`": "" };
+  const normalizeForPrefixTest = (value) => String(value ?? "").normalize("NFKC").toLowerCase()
+    .replace(/[\u0300-\u036f\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06edـ]/gu, "")
+    .replace(/[أإآٱىةὲέὶίὸόὼώὴήὰάὺύ`]/gu, (char) => foldMap[char] ?? "")
+    .replace(/\s+/gu, " ").trim();
+  const split = (value) => String(value ?? "").split(/\s*[،,]\s*/u).map((part) => part.trim()).filter(Boolean);
+
+  for (const query of ["ⲁ", "ⲁⲛ"]) {
+    const expected = records.flatMap((record, row) => {
+      const keys = [record.coptic, record.english, record.phonetic, ...split(record.meaning)];
+      return keys.some((key) => normalizeForPrefixTest(key).startsWith(query)) ? [String(row)] : [];
+    }).slice(0, 20);
+    const calls = [];
+    fakeTelegramApi(calls);
+    await worker.fetch(updateRequest({ inline_query: { id: `short-prefix-${query}`, query, from: { id: 151 } } }), env);
+    const results = calls.find((call) => call.url.endsWith("/answerInlineQuery"))?.payload?.results;
+    assert.ok(results);
+    assert.deepEqual(results.map((result) => result.id), expected, `unexpected matches for ${query}`);
+  }
+});
+
 test("Greek search is disabled", async () => {
   const record = records.find((item) => String(item.greek ?? "").trim());
   assert.ok(record?.greek, "dictionary fixture must contain a Greek value");
@@ -629,7 +651,9 @@ test("Admin can search for a specific word and record it without changing user s
   assert.equal(kvEnv.USERS.store.get(`user:${ADMIN}`).voicePick, true);
 });
 
-test("typing plain ⲉ finds headwords written with accented ὲ, and backticks are ignored", async () => {
+test("typing plain ⲉ finds headwords written with accented ὲ, and backticks are ignored", {
+  skip: !records.some((record) => /ὲ/u.test(record.coptic ?? "")),
+}, async () => {
   const withGrave = records.find((record) => /ὲ/u.test(record.coptic ?? ""));
   assert.ok(withGrave);
   const typed = withGrave.coptic.replace(/ὲ/gu, "ⲉ").replaceAll("`", "");

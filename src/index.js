@@ -130,6 +130,8 @@ function splitMeaning(value) {
 const searchIndex = lazy(() => {
   const meaning = [];
   const prefix = [];
+  const prefixFirst = new Map();
+  const prefixFirstTwo = new Map();
   const termTokens = [];
   const textExact = new Map();
   const textFirst = new Map();
@@ -163,14 +165,25 @@ const searchIndex = lazy(() => {
     }
     for (const first of firstParts) addRow(meaningFirst, first, row);
     const keys = [record.coptic, record.english, record.phonetic].map(normalize);
-    prefix.push(keys.concat(parts).filter(Boolean));
+    const prefixKeys = keys.concat(parts).filter(Boolean);
+    prefix.push(prefixKeys);
+    for (const key of prefixKeys) {
+      const chars = Array.from(key);
+      if (chars.length) addRow(prefixFirst, chars[0], row);
+      if (chars.length > 1) addRow(prefixFirstTwo, chars.slice(0, 2).join(""), row);
+    }
   });
-  return { meaning, prefix, termTokens, textExact, textFirst, meaningExact, meaningFirst };
+  return { meaning, prefix, prefixFirst, prefixFirstTwo, termTokens, textExact, textFirst, meaningExact, meaningFirst };
 });
 
 function findPrefixMatches(normalizedQuery) {
+  const chars = Array.from(normalizedQuery);
+  const indexed = searchIndex();
+  if (chars.length === 1) return indexed.prefixFirst.get(chars[0]) ?? [];
+  if (chars.length === 2) return indexed.prefixFirstTwo.get(chars.join("")) ?? [];
+
   const matches = [];
-  const { prefix } = searchIndex();
+  const { prefix } = indexed;
   for (let index = 0; index < prefix.length; index += 1) {
     const keys = prefix[index];
     for (let k = 0; k < keys.length; k += 1) {
