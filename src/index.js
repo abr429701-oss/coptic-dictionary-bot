@@ -1,5 +1,4 @@
 import records from "../data/dictionary.json" with { type: "json" };
-import searchIndex from "../data/search-index.json" with { type: "json" };
 import { translateFieldValue } from "./field-translations.js";
 import cardManifest from "../data/cards.json" with { type: "json" };
 import welcomeImageBase64 from "./welcome-image.js";
@@ -124,13 +123,63 @@ function splitMeaning(value) {
   return String(value ?? "").split(/\s*[،,]\s*/u).map((part) => part.trim()).filter(Boolean);
 }
 
-const indexedRows = (map, key) => Object.hasOwn(map, key) ? map[key] : [];
+// Search data is generated in CI and split into small static assets so neither startup nor
+// an individual request has to parse/build the full dictionary index.
+const SEARCH_FIELDS = ["coptic", "pronunciation", "english", "phonetic", "translation_en", "translation_fr", "translation_de"];
+const SEARCH_INDEX_BUCKET_COUNT = 256;
+const SEARCH_INDEX_ENCODER = new TextEncoder();
+const SEARCH_INDEX_CACHE = new Map();
+const EMPTY_INDEX_BUCKET = { textExact: {}, textFirst: {}, meaningExact: {}, meaningFirst: {} };
+const MAX_CACHED_INDEX_ASSETS = 48;
 
-function findPrefixMatches(normalizedQuery) {
+function searchIndexBucket(key) {
+  let hash = 0x811c9dc5;
+  for (const byte of SEARCH_INDEX_ENCODER.encode(key)) hash = Math.imul(hash ^ byte, 0x01000193) >>> 0;
+  return hash & (SEARCH_INDEX_BUCKET_COUNT - 1);
+}
+
+function cacheIndexAsset(cacheKey, promise) {
+  SEARCH_INDEX_CACHE.delete(cacheKey);
+  SEARCH_INDEX_CACHE.set(cacheKey, promise);
+  while (SEARCH_INDEX_CACHE.size > MAX_CACHED_INDEX_ASSETS) {
+    SEARCH_INDEX_CACHE.delete(SEARCH_INDEX_CACHE.keys().next().value);
+  }
+  promise.catch(() => {
+    if (SEARCH_INDEX_CACHE.get(cacheKey) === promise) SEARCH_INDEX_CACHE.delete(cacheKey);
+  });
+  return promise;
+}
+
+async function loadIndexAsset(env, cacheKey, path, fallback, missingIsEmpty = false) {
+  if (!env?.ASSETS) return fallback;
+  const cached = SEARCH_INDEX_CACHE.get(cacheKey);
+  if (cached) {
+    SEARCH_INDEX_CACHE.delete(cacheKey);
+    SEARCH_INDEX_CACHE.set(cacheKey, cached);
+    return cached;
+  }
+  const pending = (async () => {
+    const response = await env.ASSETS.fetch(`https://assets.local${path}`);
+    if (response.status === 404 && missingIsEmpty) return fallback;
+    if (!response.ok) throw new Error(`Search index asset failed (${response.status}): ${path}`);
+    return response.json();
+  })();
+  return cacheIndexAsset(cacheKey, pending);
+}
+
+async function indexedRows(env, mapName, key) {
+  const bucket = searchIndexBucket(key).toString(16).padStart(2, "0");
+  const data = await loadIndexAsset(env, `terms:${bucket}`, `/search-index/terms/${bucket}.json`, EMPTY_INDEX_BUCKET);
+  const map = data[mapName];
+  return map && Object.hasOwn(map, key) ? map[key] : [];
+}
+
+async function findPrefixMatches(env, normalizedQuery) {
   const chars = Array.from(normalizedQuery);
-  if (chars.length === 1) return indexedRows(searchIndex.prefixFirst, chars[0]);
-  if (chars.length === 2) return indexedRows(searchIndex.prefixFirstTwo, chars.join(""));
-  return [];
+  const key = chars.length === 1 ? chars[0] : chars.length === 2 ? chars.join("") : "";
+  if (!key) return [];
+  const assetKey = [...SEARCH_INDEX_ENCODER.encode(key)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return loadIndexAsset(env, `prefix:${assetKey}`, `/search-index/prefix/${assetKey}.json`, [], true);
 }
 
 // Index of the meaning part the query refers to (Arabic searches only); -1 means "show everything".
@@ -439,31 +488,44 @@ function renderWordSuggestions(query, words, requestedPage) {
   return { text: ui.choose, reply_markup: { inline_keyboard: keyboard } };
 }
 
-function findMatches(query) {
+function recordHasWholeWords(record, fields, needle) {
+  if (!record) return false;
+  for (const field of fields) {
+    for (const value of splitMeaning(record[field])) {
+      if (hasWholeWords(tokens(value), needle)) return true;
+    }
+  }
+  return false;
+}
+
+async function findMatches(query, env) {
   const normalizedQuery = normalize(query);
   if (!normalizedQuery) return [];
-  const index = searchIndex;
   if (ARABIC_LETTER.test(normalizedQuery)) {
     // Arabic: match the sheet's meanings only, as whole words/phrases (never inside a longer word).
     const needle = tokens(normalizedQuery);
     if (!needle) return [];
-    const exact = indexedRows(index.meaningExact, needle);
+    const [exact, candidates] = await Promise.all([
+      indexedRows(env, "meaningExact", needle),
+      indexedRows(env, "meaningFirst", needle.split(" ", 1)[0]),
+    ]);
     const exactRows = new Set(exact);
     const matches = [];
-    const first = needle.split(" ", 1)[0];
-    for (const row of indexedRows(index.meaningFirst, first)) {
-      if (!exactRows.has(row) && index.meaning[row].some((item) => hasWholeWords(item, needle))) matches.push(row);
+    for (const row of candidates) {
+      if (!exactRows.has(row) && recordHasWholeWords(records[row], ["meaning"], needle)) matches.push(row);
     }
     return exact.concat(matches);
   }
   const needle = toTokens(normalizedQuery);
   if (!needle) return [];
-  const exact = indexedRows(index.textExact, normalizedQuery);
+  const [exact, candidates] = await Promise.all([
+    indexedRows(env, "textExact", normalizedQuery),
+    indexedRows(env, "textFirst", needle.split(" ", 1)[0]),
+  ]);
   const exactRows = new Set(exact);
   const partial = [];
-  const first = needle.split(" ", 1)[0];
-  for (const row of indexedRows(index.textFirst, first)) {
-    if (!exactRows.has(row) && index.termTokens[row].some((field) => hasWholeWords(field, needle))) partial.push(row);
+  for (const row of candidates) {
+    if (!exactRows.has(row) && recordHasWholeWords(records[row], SEARCH_FIELDS, needle)) partial.push(row);
   }
   return exact.concat(partial);
 }
@@ -904,17 +966,15 @@ async function sendCardEntry(env, chatId, record, text, media, replyMarkup = und
   return false;
 }
 
-function cardRecord(query) {
+async function cardRecord(query, env) {
   const clean = String(query ?? "").trim();
   if (!clean) return null;
-  const normalized = normalize(clean);
-  const exact = records.find((record) => [record.coptic, record.english, record.pronunciation]
-    .some((value) => normalize(value) === normalized));
-  return exact ?? records[findMatches(clean)[0]] ?? null;
+  const matches = await findMatches(clean, env);
+  return records[matches[0]] ?? null;
 }
 
 async function setCardVisibility(env, chatId, query, visible) {
-  const record = cardRecord(query);
+  const record = await cardRecord(query, env);
   if (record?.id == null || !cardHash(record)) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: "لم أجد بطاقة لهذه الكلمة. أرسل الكلمة كما هي أو تأكد أن لها بطاقة." });
     return;
@@ -955,7 +1015,7 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined, c
       return deliver({ text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup });
     }
   }
-  const matches = findMatches(cleanQuery);
+  const matches = await findMatches(cleanQuery, env);
   if (!matches.length) {
     return deliver({ text: uiTextFor(cleanQuery).noResult });
   }
@@ -1465,12 +1525,12 @@ function voicePrompt(item) {
   return lines.join("\n");
 }
 
-function renderVoiceWordSuggestions(query) {
+async function renderVoiceWordSuggestions(query, env) {
   const clean = String(query ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, 160);
   const normalized = normalize(clean);
   const candidates = [];
   if (ARABIC_LETTER.test(normalized)) {
-    for (const index of findMatches(clean)) candidates.push(index);
+    for (const index of await findMatches(clean, env)) candidates.push(index);
   } else {
     const kind = scriptKind(normalized);
     for (const item of prefixWords(kind, normalized, 20)) candidates.push(...item.rows);
@@ -1686,7 +1746,7 @@ async function askDeleteVoice(env, chatId, query) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: "🗑️ لحذف تسجيلك لكلمة وإرجاعها للصوت الآلي أرسل:\n/voice_delete الكلمة" });
     return;
   }
-  const record = cardRecord(clean);
+  const record = await cardRecord(clean, env);
   if (record?.id == null) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: "لم أجد هذه الكلمة. أرسلها كما هي في القاموس." });
     return;
@@ -1712,7 +1772,8 @@ async function askDeleteManyVoices(env, chatId, userId, user, argument, all = fa
     const page = await storeCall(env, { op: "voiceIds" });
     ids = page.ids ?? [];
   } else {
-    ids = String(argument ?? "").split(/[|،,\n]+/u).map((item) => cardRecord(item.trim())?.id).filter((id) => id != null);
+    const selected = await Promise.all(String(argument ?? "").split(/[|،,\n]+/u).map((item) => cardRecord(item.trim(), env)));
+    ids = selected.map((record) => record?.id).filter((id) => id != null);
   }
   ids = [...new Set(ids.map(Number))].slice(0, 100);
   if (!ids.length && !all) {
@@ -2161,8 +2222,8 @@ async function answerInline(env, inlineQuery) {
     return;
   }
   const short = Array.from(normalizedQuery).length <= SHORT_QUERY_MAX;
-  let indexes = short ? findPrefixMatches(normalizedQuery) : findMatches(raw);
-  if (!indexes.length && short) indexes = findMatches(raw);
+  let indexes = short ? await findPrefixMatches(env, normalizedQuery) : await findMatches(raw, env);
+  if (!indexes.length && short) indexes = await findMatches(raw, env);
   indexes = indexes.slice(0, INLINE_LIMIT);
   const voices = await recordedVoices(env, indexes);
   const results = indexes.map((index) => inlineArticle(index, normalizedQuery, voices[records[index].id], audioUrl(env, records[index].id)));
@@ -2612,7 +2673,7 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     if (admin?.voicePick && text && !text.startsWith("/")) {
-      const view = renderVoiceWordSuggestions(text);
+      const view = await renderVoiceWordSuggestions(text, env);
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: view.text, ...(view.reply_markup ? { reply_markup: view.reply_markup } : {}) });
       return;
     }

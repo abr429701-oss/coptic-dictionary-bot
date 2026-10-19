@@ -1,12 +1,13 @@
 #!/usr/bin/env node
-import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const INPUT = resolve(ROOT, "data/dictionary.json");
-const OUTPUT = resolve(ROOT, "data/search-index.json");
+const OUTPUT = resolve(ROOT, "public/search-index");
 const SEARCH_FIELDS = ["coptic", "pronunciation", "english", "phonetic", "translation_en", "translation_fr", "translation_de"];
+const BUCKET_COUNT = 256;
 const PLAIN_ASCII = /^[\x20-\x5f\x61-\x7e]*$/u;
 const MARK_CHARS = /[\u0300-\u036f\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06edـ]/u;
 const MARK_CHARS_ALL = /[\u0300-\u036f\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06edـ]/gu;
@@ -18,6 +19,7 @@ const FOLD_MAP = {
   ὼ: "ⲱ", ώ: "ⲱ", ὴ: "ⲏ", ή: "ⲏ", ὰ: "ⲁ", ά: "ⲁ",
   ὺ: "ⲩ", ύ: "ⲩ", "`": "",
 };
+const encoder = new TextEncoder();
 
 function normalize(value) {
   const text = String(value ?? "");
@@ -47,65 +49,87 @@ function addRow(map, key, row) {
   else if (rows[rows.length - 1] !== row) rows.push(row);
 }
 
+function addMapRow(map, key, row) {
+  if (!key) return;
+  const rows = map.get(key) ?? [];
+  if (rows.at(-1) !== row) rows.push(row);
+  map.set(key, rows);
+}
+
+function bucketFor(key) {
+  let hash = 0x811c9dc5;
+  for (const byte of encoder.encode(key)) hash = Math.imul(hash ^ byte, 0x01000193) >>> 0;
+  return hash & (BUCKET_COUNT - 1);
+}
+
+function hexKey(value) {
+  return [...encoder.encode(value)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 const records = JSON.parse(readFileSync(INPUT, "utf8"));
 if (!Array.isArray(records) || records.length < 1000) {
   throw new Error(`Unexpected dictionary content: ${records?.length ?? "not an array"} records`);
 }
 
-const index = {
-  meaning: [],
-  prefixFirst: emptyMap(),
-  prefixFirstTwo: emptyMap(),
-  termTokens: [],
+rmSync(OUTPUT, { recursive: true, force: true });
+const termDirectory = resolve(OUTPUT, "terms");
+const prefixDirectory = resolve(OUTPUT, "prefix");
+mkdirSync(termDirectory, { recursive: true });
+mkdirSync(prefixDirectory, { recursive: true });
+
+const buckets = Array.from({ length: BUCKET_COUNT }, () => ({
   textExact: emptyMap(),
   textFirst: emptyMap(),
   meaningExact: emptyMap(),
   meaningFirst: emptyMap(),
-};
-let postings = 0;
+}));
+const prefixFirst = new Map();
+const prefixFirstTwo = new Map();
+const addIndexedRow = (name, key, row) => addRow(buckets[bucketFor(key)][name], key, row);
 
 records.forEach((record, row) => {
   const terms = SEARCH_FIELDS.flatMap((field) => splitMeaning(record[field]).map(normalize))
     .filter(Boolean)
     .map((value) => ({ value, tokens: toTokens(value) }))
     .filter((term) => term.tokens);
-  index.termTokens.push(terms.map((term) => term.tokens));
   const firstTerms = new Set();
   for (const term of terms) {
-    addRow(index.textExact, term.value, row);
+    addIndexedRow("textExact", term.value, row);
     const first = term.tokens.split(" ", 1)[0];
     if (first) firstTerms.add(first);
   }
-  for (const first of firstTerms) addRow(index.textFirst, first, row);
+  for (const first of firstTerms) addIndexedRow("textFirst", first, row);
 
   const parts = splitMeaning(record.meaning).map(normalize);
-  const partTokens = parts.map(toTokens);
-  index.meaning.push(partTokens);
   const firstParts = new Set();
-  for (let i = 0; i < parts.length; i += 1) {
-    addRow(index.meaningExact, partTokens[i], row);
-    const first = partTokens[i]?.split(" ", 1)[0];
+  for (const part of parts) {
+    const tokens = toTokens(part);
+    addIndexedRow("meaningExact", tokens, row);
+    const first = tokens.split(" ", 1)[0];
     if (first) firstParts.add(first);
   }
-  for (const first of firstParts) addRow(index.meaningFirst, first, row);
+  for (const first of firstParts) addIndexedRow("meaningFirst", first, row);
 
   const prefixKeys = [record.coptic, record.english, record.phonetic].map(normalize).concat(parts).filter(Boolean);
   for (const key of prefixKeys) {
     const chars = Array.from(key);
-    if (chars.length) addRow(index.prefixFirst, chars[0], row);
-    if (chars.length > 1) addRow(index.prefixFirstTwo, chars.slice(0, 2).join(""), row);
+    if (chars.length) addMapRow(prefixFirst, chars[0], row);
+    if (chars.length > 1) addMapRow(prefixFirstTwo, chars.slice(0, 2).join(""), row);
   }
 });
 
-postings = Object.values(index.textExact).reduce((sum, rows) => sum + rows.length, postings);
-postings = Object.values(index.textFirst).reduce((sum, rows) => sum + rows.length, postings);
-postings = Object.values(index.meaningExact).reduce((sum, rows) => sum + rows.length, postings);
-postings = Object.values(index.meaningFirst).reduce((sum, rows) => sum + rows.length, postings);
-postings = Object.values(index.prefixFirst).reduce((sum, rows) => sum + rows.length, postings);
-postings = Object.values(index.prefixFirstTwo).reduce((sum, rows) => sum + rows.length, postings);
+let maxBucketBytes = 0;
+for (let bucket = 0; bucket < BUCKET_COUNT; bucket += 1) {
+  const filename = resolve(termDirectory, `${bucket.toString(16).padStart(2, "0")}.json`);
+  const content = `${JSON.stringify(buckets[bucket])}\n`;
+  writeFileSync(filename, content, "utf8");
+  maxBucketBytes = Math.max(maxBucketBytes, Buffer.byteLength(content));
+}
+for (const [key, rows] of prefixFirst) writeFileSync(resolve(prefixDirectory, `${hexKey(key)}.json`), `${JSON.stringify(rows)}\n`, "utf8");
+for (const [key, rows] of prefixFirstTwo) writeFileSync(resolve(prefixDirectory, `${hexKey(key)}.json`), `${JSON.stringify(rows)}\n`, "utf8");
 
-const temp = `${OUTPUT}.tmp`;
-const json = `${JSON.stringify(index)}\n`;
-writeFileSync(temp, json, "utf8");
-renameSync(temp, OUTPUT);
-console.log(`Built search index for ${records.length.toLocaleString("en-US")} records; ${postings.toLocaleString("en-US")} postings; ${(Buffer.byteLength(json) / 1024 / 1024).toFixed(2)} MiB.`);
+let totalBytes = 0;
+for (const directory of [termDirectory, prefixDirectory]) {
+  for (const name of readdirSync(directory)) totalBytes += Buffer.byteLength(readFileSync(resolve(directory, name)));
+}
+console.log(`Built search shards for ${records.length.toLocaleString("en-US")} records: ${BUCKET_COUNT} term buckets, ${prefixFirst.size + prefixFirstTwo.size} prefix files, max term bucket ${(maxBucketBytes / 1024).toFixed(1)} KiB, ${(totalBytes / 1024 / 1024).toFixed(2)} MiB total.`);

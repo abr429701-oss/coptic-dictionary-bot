@@ -1,6 +1,9 @@
 import cardManifest from "../data/cards.json" with { type: "json" };
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import worker, { UserStore } from "../src/index.js";
 import { translateFieldValue, VALUE_TRANSLATIONS } from "../src/field-translations.js";
 import records from "../data/dictionary.json" with { type: "json" };
@@ -10,7 +13,20 @@ for (const key of Object.keys(cardManifest)) delete cardManifest[key];
 
 const token = "test-token";
 const secret = "test-secret-should-be-long-enough";
-const env = { TELEGRAM_BOT_TOKEN: token, WEBHOOK_SECRET: secret };
+const testRoot = fileURLToPath(new URL("..", import.meta.url));
+const fakeAssets = {
+  fetch: async (url) => {
+    const pathname = new URL(url).pathname;
+    if (!pathname.startsWith("/search-index/")) return new Response("Not found", { status: 404 });
+    try {
+      const bytes = readFileSync(resolve(testRoot, "public", pathname.slice(1)));
+      return new Response(bytes, { headers: { "content-type": "application/json" } });
+    } catch {
+      return new Response("Not found", { status: 404 });
+    }
+  },
+};
+const env = { TELEGRAM_BOT_TOKEN: token, WEBHOOK_SECRET: secret, ASSETS: fakeAssets };
 const fakeOgg = () => new Response(new Uint8Array([79, 103, 103, 83, 1, 2, 3]), { headers: { "content-type": "audio/ogg" } });
 const isGeneratedAudio = (url) => String(url).includes("raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/audio/");
 const firstMeaning = (value) => String(value ?? "").split(/[،,]/u)[0].trim();
