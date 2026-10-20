@@ -125,11 +125,21 @@ function splitMeaning(value) {
 
 // Search data is generated in CI and split into small static assets so neither startup nor
 // an individual request has to parse/build the full dictionary index.
-const SEARCH_FIELDS = ["coptic", "pronunciation", "english", "phonetic", "translation_en", "translation_fr", "translation_de"];
+const SEARCH_FIELDS = ["coptic", "pronunciation", "english", "translation_fr", "translation_de"];
+const WORD_FIELDS = {
+  cop: ["coptic"],
+  el: [],
+  en: ["english"],
+  fr: ["translation_fr"],
+  de: ["translation_de"],
+  ar: ["meaning"],
+  other: ["pronunciation"],
+};
 const SEARCH_INDEX_BUCKET_COUNT = 256;
 const SEARCH_INDEX_ENCODER = new TextEncoder();
 const SEARCH_INDEX_CACHE = new Map();
-const EMPTY_INDEX_BUCKET = { textExact: {}, textFirst: {}, meaningExact: {}, meaningFirst: {} };
+const SCRIPT_KIND_CACHE = new Map();
+const EMPTY_INDEX_BUCKET = { textExact: {}, textFirst: {}, textTwoGram: {}, meaningExact: {}, meaningFirst: {}, meaningTwoGram: {} };
 const MAX_CACHED_INDEX_ASSETS = 48;
 
 function searchIndexBucket(key) {
@@ -182,6 +192,76 @@ async function findPrefixMatches(env, normalizedQuery) {
   return loadIndexAsset(env, `prefix:${assetKey}`, `/search-index/prefix/${assetKey}.json`, [], true);
 }
 
+async function wordEntries(env, kind, key) {
+  const chars = Array.from(key);
+  if (!chars.length) return [];
+  const level = chars.length === 1 ? "one" : "two";
+  const prefix = chars.slice(0, level === "one" ? 1 : 2).join("");
+  const assetKey = [...SEARCH_INDEX_ENCODER.encode(prefix)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  if (level === "two") {
+    return loadIndexAsset(env, `words:two:${kind}:${assetKey}`, `/search-index/words/two/${kind}/${assetKey}.json`, [], true);
+  }
+  const cacheKey = `words:one-built:${kind}:${assetKey}`;
+  const cached = SEARCH_INDEX_CACHE.get(cacheKey);
+  if (cached) {
+    SEARCH_INDEX_CACHE.delete(cacheKey);
+    SEARCH_INDEX_CACHE.set(cacheKey, cached);
+    return cached;
+  }
+  const pending = (async () => {
+    const rows = await loadIndexAsset(env, `words:rows-one:${kind}:${assetKey}`, `/search-index/words/rows-one/${kind}/${assetKey}.json`, [], true);
+    const entries = new Map();
+    for (const row of rows) {
+      const record = records[row];
+      const values = kind === "ar" ? splitMeaning(record?.meaning) : (WORD_FIELDS[kind] ?? []).flatMap((field) => splitMeaning(record?.[field]));
+      for (const value of values) {
+        const label = String(value ?? "").replaceAll("`", "").trim();
+        const wordKey = normalize(label);
+        if (!wordKey || !wordKey.startsWith(prefix)) continue;
+        const entry = entries.get(wordKey);
+        if (!entry) entries.set(wordKey, { key: wordKey, label, rows: [row] });
+        else if (entry.rows[entry.rows.length - 1] !== row) entry.rows.push(row);
+      }
+    }
+    return [...entries.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  })();
+  return cacheIndexAsset(cacheKey, pending);
+}
+
+function cacheScriptKind(normalized, kind) {
+  SCRIPT_KIND_CACHE.delete(normalized);
+  SCRIPT_KIND_CACHE.set(normalized, kind);
+  while (SCRIPT_KIND_CACHE.size > 512) SCRIPT_KIND_CACHE.delete(SCRIPT_KIND_CACHE.keys().next().value);
+  return kind;
+}
+
+async function detectScriptKind(env, key) {
+  const normalized = normalize(key);
+  if (ARABIC_LETTER.test(normalized)) return "ar";
+  if (COPTIC_LETTER.test(normalized)) return "cop";
+  if (GREEK_LETTER.test(normalized)) return "el";
+  if (!LATIN_LETTER.test(normalized)) return "other";
+  const cached = SCRIPT_KIND_CACHE.get(normalized);
+  if (cached) return cached;
+  const kinds = ["fr", "de", "en"];
+  const chars = Array.from(normalized);
+  let found = "en";
+  if (chars.length === 1) {
+    const available = await Promise.all(kinds.map(async (kind) => {
+      const initials = await loadIndexAsset(env, `word-initials:${kind}`, `/search-index/words/${kind}-initials.json`, [], true);
+      return initials.includes(chars[0]);
+    }));
+    found = kinds.find((_, index) => available[index]) ?? "en";
+  } else {
+    const matches = await Promise.all(kinds.map(async (kind) => {
+      const entries = await wordEntries(env, kind, normalized);
+      return entries.some((entry) => entry.key === normalized || entry.key.startsWith(normalized));
+    }));
+    found = kinds.find((_, index) => matches[index]) ?? "en";
+  }
+  return cacheScriptKind(normalized, found);
+}
+
 // Index of the meaning part the query refers to (Arabic searches only); -1 means "show everything".
 function matchedPartIndex(record, normalizedQuery) {
   if (!ARABIC_LETTER.test(normalizedQuery)) return -1;
@@ -210,7 +290,7 @@ function suggestionLabel(record, normalizedQuery) {
   if (kind === "el") return String(record.greek ?? "").replaceAll("`", "").trim().slice(0, 48) || "—";
   if (kind === "fr") return String(record.translation_fr ?? "").trim().slice(0, 48) || "—";
   if (kind === "de") return String(record.translation_de ?? "").trim().slice(0, 48) || "—";
-  if (kind === "en") return String(record.translation_en ?? record.english ?? "").trim().slice(0, 48) || String(record.phonetic ?? "").trim().slice(0, 48) || "—";
+  if (kind === "en") return String(record.english ?? "").trim().slice(0, 48) || "—";
   return String(record.greek ?? record.coptic ?? record.english ?? "—").replaceAll("`", "").trim().slice(0, 48);
 }
 
@@ -294,9 +374,9 @@ function formatRecord(record, partIndex = -1, searchedWord = "") {
   return lines.join("\n");
 }
 
-const SAME_WORD_FIELDS = ["coptic", "english", "phonetic", "translation_en", "translation_fr", "translation_de"];
+const SAME_WORD_FIELDS = ["coptic", "english", "translation_fr", "translation_de"];
 
-// Rows sharing a normalized coptic/greek/english/phonetic value, built once (instead of scanning every row per lookup).
+// Rows sharing a normalized Coptic or translation value, built once instead of scanning every row per lookup.
 const sameWordRows = lazy(() => {
   const map = new Map();
   records.forEach((record, row) => {
@@ -367,51 +447,14 @@ function scriptKind(key) {
   if (GREEK_LETTER.test(key)) return "el";
   if (LATIN_LETTER.test(key)) {
     const normalized = normalize(key);
-    for (const kind of ["fr", "de", "en"]) {
-      if (wordIndex(kind).map.has(normalized) || prefixWords(kind, normalized, 1).length) return kind;
-    }
-    return "en";
+    return SCRIPT_KIND_CACHE.get(normalized) ?? "en";
   }
   return "other";
 }
 
-const WORD_FIELDS = {
-  cop: ["coptic"],
-  el: [], // Greek search is intentionally disabled; the Greek column remains display-only data.
-  en: ["english", "phonetic", "translation_en"],
-  fr: ["translation_fr"],
-  de: ["translation_de"],
-  other: ["pronunciation"],
-};
-const wordIndexes = {};
-
-// Built lazily per script, so an Arabic search never pays for the Coptic/Latin words.
-function wordIndex(kind) {
-  if (wordIndexes[kind]) return wordIndexes[kind];
-  const map = new Map();
-  const add = (text, row) => {
-    const label = String(text ?? "").replaceAll("`", "").trim();
-    const key = normalize(label);
-    if (!key) return;
-    const entry = map.get(key);
-    if (!entry) map.set(key, { key, label, rows: [row] });
-    else if (entry.rows[entry.rows.length - 1] !== row) entry.rows.push(row);
-  };
-  records.forEach((record, row) => {
-    if (kind === "ar") {
-      for (const part of splitMeaning(record.meaning)) add(part, row);
-    } else {
-      for (const field of WORD_FIELDS[kind]) for (const part of splitMeaning(record[field])) add(part, row);
-    }
-  });
-  const sorted = [...map.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  wordIndexes[kind] = { map, sorted };
-  return wordIndexes[kind];
-}
-
 // Unique words starting with `key`, in sheet order.
-function prefixWords(kind, key, limit = 5000) {
-  const { sorted } = wordIndex(kind);
+async function prefixWords(env, kind, key, limit = 5000) {
+  const sorted = await wordEntries(env, kind, key);
   let low = 0;
   let high = sorted.length;
   while (low < high) {
@@ -425,8 +468,8 @@ function prefixWords(kind, key, limit = 5000) {
 }
 
 // Every meaning to show for an exact word, once each, in order.
-function exactChain(kind, key) {
-  const entry = wordIndex(kind).map.get(key);
+async function exactChain(env, kind, key) {
+  const entry = (await wordEntries(env, kind, key)).find((item) => item.key === key);
   if (!entry) return [];
   const options = [];
   const seen = new Set();
@@ -505,27 +548,39 @@ async function findMatches(query, env) {
     // Arabic: match the sheet's meanings only, as whole words/phrases (never inside a longer word).
     const needle = tokens(normalizedQuery);
     if (!needle) return [];
-    const [exact, candidates] = await Promise.all([
+    const words = needle.split(" ");
+    const candidateKey = words.slice(0, 2).join(" ");
+    const [exact, candidates, phraseRows] = await Promise.all([
       indexedRows(env, "meaningExact", needle),
-      indexedRows(env, "meaningFirst", needle.split(" ", 1)[0]),
+      indexedRows(env, "meaningFirst", words[0]),
+      words.length > 1 ? indexedRows(env, "meaningTwoGram", candidateKey) : Promise.resolve(null),
     ]);
     const exactRows = new Set(exact);
+    const phraseSet = phraseRows ? new Set(phraseRows) : null;
     const matches = [];
     for (const row of candidates) {
-      if (!exactRows.has(row) && recordHasWholeWords(records[row], ["meaning"], needle)) matches.push(row);
+      if (exactRows.has(row)) continue;
+      if (phraseSet && !phraseSet.has(row)) continue;
+      if (words.length <= 2 || recordHasWholeWords(records[row], ["meaning"], needle)) matches.push(row);
     }
     return exact.concat(matches);
   }
   const needle = toTokens(normalizedQuery);
   if (!needle) return [];
-  const [exact, candidates] = await Promise.all([
+  const words = needle.split(" ");
+  const candidateKey = words.slice(0, 2).join(" ");
+  const [exact, candidates, phraseRows] = await Promise.all([
     indexedRows(env, "textExact", normalizedQuery),
-    indexedRows(env, "textFirst", needle.split(" ", 1)[0]),
+    indexedRows(env, "textFirst", words[0]),
+    words.length > 1 ? indexedRows(env, "textTwoGram", candidateKey) : Promise.resolve(null),
   ]);
   const exactRows = new Set(exact);
+  const phraseSet = phraseRows ? new Set(phraseRows) : null;
   const partial = [];
   for (const row of candidates) {
-    if (!exactRows.has(row) && recordHasWholeWords(records[row], SEARCH_FIELDS, needle)) partial.push(row);
+    if (exactRows.has(row)) continue;
+    if (phraseSet && !phraseSet.has(row)) continue;
+    if (words.length <= 2 || recordHasWholeWords(records[row], SEARCH_FIELDS, needle)) partial.push(row);
   }
   return exact.concat(partial);
 }
@@ -1003,13 +1058,13 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined, c
     : telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, ...payload });
 
   if (normalizedQuery) {
-    const kind = scriptKind(normalizedQuery);
+    const kind = await detectScriptKind(env, normalizedQuery);
     const isShortQuery = [...normalizedQuery.replace(/\s+/gu, "")].length <= SHORT_QUERY_MAX;
     if (messageId === undefined && !isShortQuery) {
-      const chain = exactChain(kind, normalizedQuery);
+      const chain = await exactChain(env, kind, normalizedQuery);
       if (chain.length) return sendOption(env, chatId, chain, chain[0].index, 0, undefined, chainCallback(cleanQuery), cleanQuery, true, ctx);
     }
-    const words = prefixWords(kind, normalizedQuery);
+    const words = await prefixWords(env, kind, normalizedQuery);
     if (words.length) {
       const view = renderWordSuggestions(cleanQuery, words, page);
       return deliver({ text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup });
@@ -1044,6 +1099,7 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined, c
 }
 
 async function sendRecord(env, chatId, index, partIndex = -1, searchKey = "") {
+  if (searchKey) await detectScriptKind(env, searchKey);
   const options = searchKey && scriptKind(normalize(searchKey)) !== "cop"
     ? [{ key: String(index), index, part: -1 }]
     : meaningOptions(index, "", partIndex);
@@ -1057,6 +1113,7 @@ async function sendMeaningStep(env, chatId, baseIndex, firstPart, step) {
   await sendOption(env, chatId, options, baseIndex, step, undefined, undefined, "", false);
 }
 async function sendOption(env, chatId, options, baseIndex, step, fallback = undefined, callbackFor = undefined, searchKey = "", sendVoice = true, ctx = undefined) {
+  if (searchKey) await detectScriptKind(env, searchKey);
   const selected = options[step] ?? fallback;
   const record = records[selected?.index];
   if (!record) return;
@@ -1528,12 +1585,12 @@ function voicePrompt(item) {
 async function renderVoiceWordSuggestions(query, env) {
   const clean = String(query ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, 160);
   const normalized = normalize(clean);
+  const kind = await detectScriptKind(env, normalized);
   const candidates = [];
   if (ARABIC_LETTER.test(normalized)) {
     for (const index of await findMatches(clean, env)) candidates.push(index);
   } else {
-    const kind = scriptKind(normalized);
-    for (const item of prefixWords(kind, normalized, 20)) candidates.push(...item.rows);
+    for (const item of await prefixWords(env, kind, normalized, 20)) candidates.push(...item.rows);
   }
   const seen = new Set();
   const keyboard = candidates.filter((index) => {
@@ -2221,6 +2278,7 @@ async function answerInline(env, inlineQuery) {
     await answer([], 3600);
     return;
   }
+  await detectScriptKind(env, normalizedQuery);
   const short = Array.from(normalizedQuery).length <= SHORT_QUERY_MAX;
   let indexes = short ? await findPrefixMatches(env, normalizedQuery) : await findMatches(raw, env);
   if (!indexes.length && short) indexes = await findMatches(raw, env);
@@ -2270,7 +2328,7 @@ async function sendBotInfo(env, chatId) {
   await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML" });
 }
 
-const DICTIONARY_LOCAL_FIELDS = ["coptic", "pronunciation", "meaning", "translation_en", "translation_fr", "translation_de", "greek", null, null, "origin", "kind"];
+const DICTIONARY_LOCAL_FIELDS = ["coptic", "pronunciation", "meaning", "english", "translation_fr", "translation_de", "greek", null, null, "origin", "kind"];
 const DICTIONARY_LOCAL_HEADERS = ["coptic", "ipa", "meaning", "english", "french", "german", "greek", "unused_h", "unused_i", "origin", "kind"];
 function localDictionaryLookup(word) {
   const wanted = normalize(word);
@@ -2515,7 +2573,8 @@ async function handleUpdate(update, env, ctx) {
     if (chainPick) {
       const chainQuery = chainPick[2];
       const normalizedChainQuery = normalize(chainQuery);
-      const chain = exactChain(scriptKind(normalizedChainQuery), normalizedChainQuery);
+      const kind = await detectScriptKind(env, normalizedChainQuery);
+      const chain = await exactChain(env, kind, normalizedChainQuery);
       const step = Number(chainPick[1]);
       if (chatForPick && chain[step]) {
         const sendVoice = ARABIC_LETTER.test(normalizedChainQuery);
@@ -2527,14 +2586,14 @@ async function handleUpdate(update, env, ctx) {
     if (wordPick) {
       if (chatForPick) {
         let key = wordPick[1];
-        const kind = scriptKind(key);
-        let chain = exactChain(kind, key);
+        const kind = await detectScriptKind(env, key);
+        let chain = await exactChain(env, kind, key);
         if (!chain.length) {
           // The button text was cut to fit Telegram's limit: take the first word that starts with it.
-          const [first] = prefixWords(kind, key, 1);
+          const [first] = await prefixWords(env, kind, key, 1);
           if (first) {
             key = first.key;
-            chain = exactChain(kind, key);
+            chain = await exactChain(env, kind, key);
           }
         }
         if (chain.length) {

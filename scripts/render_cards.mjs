@@ -94,7 +94,7 @@ export function cardData(group, voiceLink, language = "ar") {
     : language === "fr" ? (pick("translation_fr") || String(first.coptic ?? "").trim())
       : language === "de" ? (pick("translation_de") || String(first.coptic ?? "").trim())
         : String(first.coptic ?? "").trim();
-  const meaning = language === "en" ? (String(first.coptic ?? "").trim() || pick("translation_en"))
+  const meaning = language === "en" ? (String(first.coptic ?? "").trim() || pick("english"))
     : language === "fr" ? (String(first.coptic ?? "").trim() || pick("translation_fr"))
       : language === "de" ? (String(first.coptic ?? "").trim() || pick("translation_de"))
         : meanings.join("، ");

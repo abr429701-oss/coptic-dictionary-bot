@@ -31,13 +31,13 @@ const fakeOgg = () => new Response(new Uint8Array([79, 103, 103, 83, 1, 2, 3]), 
 const isGeneratedAudio = (url) => String(url).includes("raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/audio/");
 const firstMeaning = (value) => String(value ?? "").split(/[،,]/u)[0].trim();
 const TEST_RECORD = records.find((record) => {
-  const query = firstMeaning(record.translation_en);
+  const query = firstMeaning(record.english);
   if (!query || query.length < 3) return false;
-  const englishMatches = records.filter((other) => firstMeaning(other.translation_en) === query).length;
+  const englishMatches = records.filter((other) => firstMeaning(other.english) === query).length;
   const foreignMatch = records.some((other) => firstMeaning(other.translation_fr) === query || firstMeaning(other.translation_de) === query);
   return englishMatches === 1 && !foreignMatch;
-}) ?? records.find((record) => record.translation_en);
-const TEST_QUERY = String(TEST_RECORD?.translation_en ?? "see").split(/[،,]/u)[0].trim();
+}) ?? records.find((record) => record.english);
+const TEST_QUERY = String(TEST_RECORD?.english ?? "see").split(/[،,]/u)[0].trim();
 const TEST_COPTIC = String(TEST_RECORD?.coptic ?? "ⲁⲛⲁⲩ");
 const JINKIM_RECORD = records.find((record) => String(record.coptic ?? "").includes("\u0300"));
 const JINKIM_WORD = String(JINKIM_RECORD?.coptic ?? "ⲁⲧⲥ̀ϧⲁⲓ");
@@ -534,7 +534,7 @@ const edits = (calls) => calls.filter((call) => call.url.endsWith("/editMessageT
 const sent = (calls) => calls.filter((call) => call.url.endsWith("/sendMessage")).map((call) => call.payload);
 
 test("English, French and German translations search to the Coptic counterpart", async () => {
-  for (const field of ["translation_en", "translation_fr", "translation_de"]) {
+  for (const field of ["english", "translation_fr", "translation_de"]) {
     const record = records.find((item) => String(item[field] ?? "").trim());
     assert.ok(record?.[field], `missing ${field}`);
     const calls = [];
@@ -542,17 +542,50 @@ test("English, French and German translations search to the Coptic counterpart",
     await worker.fetch(updateRequest({ message: { text: record[field], chat: { id: 151 } } }), env);
     const message = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload;
     assert.ok(message);
-    const labels = field === "translation_en" ? ["Word", "Meaning"] : field === "translation_fr" ? ["Mot", "Sens"] : ["Wort", "Bedeutung"];
+    const labels = field === "english" ? ["Word", "Meaning"] : field === "translation_fr" ? ["Mot", "Sens"] : ["Wort", "Bedeutung"];
     assert.ok(message.text.includes(`<b>${labels[0]}:</b> ${record[field]}`));
     assert.ok(message.text.includes(`<b>${labels[1]}:</b> ${record.coptic}`));
-    assert.doesNotMatch(message.text, new RegExp(`<b>${field === "translation_en" ? "Part of speech" : field === "translation_fr" ? "Nature" : "Wortart"}:<\\/b> ${escapeRegex(record.kind)}`, "u"));
-    assert.doesNotMatch(message.text, new RegExp(`<b>${field === "translation_en" ? "Origin" : field === "translation_fr" ? "Origine" : "Herkunft"}:<\\/b> ${escapeRegex(record.origin)}`, "u"));
+    assert.doesNotMatch(message.text, new RegExp(`<b>${field === "english" ? "Part of speech" : field === "translation_fr" ? "Nature" : "Wortart"}:<\\/b> ${escapeRegex(record.kind)}`, "u"));
+    assert.doesNotMatch(message.text, new RegExp(`<b>${field === "english" ? "Origin" : field === "translation_fr" ? "Origine" : "Herkunft"}:<\\/b> ${escapeRegex(record.origin)}`, "u"));
   }
+});
+
+test("single-character Coptic, Arabic and Latin message searches still return word suggestions", async () => {
+  for (const query of ["ⲁ", "م", "a"]) {
+    const calls = [];
+    fakeTelegramApi(calls);
+    await worker.fetch(updateRequest({ message: { text: query, chat: { id: 153 } } }), env);
+    const message = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload;
+    assert.ok(message?.reply_markup?.inline_keyboard?.[0]?.[0]?.text, `no suggestions for ${query}`);
+  }
+});
+
+test("two-token inline searches retain the matching dictionary row", async () => {
+  const fields = ["english", "translation_fr", "translation_de"];
+  let sample;
+  let query;
+  for (let row = 0; row < records.length && !sample; row += 1) {
+    for (const field of fields) {
+      const value = String(records[row]?.[field] ?? "").split(/[،,]/u)[0];
+      const words = value.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/gu, " ").trim().split(" ");
+      if (words.length > 1 && words.slice(0, 2).join(" ").length > 2) {
+        sample = row;
+        query = words.slice(0, 2).join(" ");
+        break;
+      }
+    }
+  }
+  assert.notEqual(sample, undefined, "dictionary fixture must include a two-token translation");
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ inline_query: { id: "two-token-search", query, from: { id: 154 } } }), env);
+  const results = calls.find((call) => call.url.endsWith("/answerInlineQuery"))?.payload?.results;
+  assert.ok(results?.some((result) => result.id === String(sample)), `search for ${query} omitted row ${sample}`);
 });
 
 test("search results localize the dictionary type and origin values in English, French and German", async () => {
   const expected = {
-    translation_en: ["Part of speech:", "Origin:"],
+    english: ["Part of speech:", "Origin:"],
     translation_fr: ["Nature:", "Origine:"],
     translation_de: ["Wortart:", "Herkunft:"],
   };
@@ -564,7 +597,7 @@ test("search results localize the dictionary type and origin values in English, 
     fakeTelegramApi(calls);
     await worker.fetch(updateRequest({ message: { text: query, chat: { id: 159 } } }), env);
     const text = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload?.text ?? "";
-    const language = field === "translation_en" ? "en" : field === "translation_fr" ? "fr" : "de";
+    const language = field === "english" ? "en" : field === "translation_fr" ? "fr" : "de";
     for (const fragment of expected[field]) assert.ok(text.includes(fragment), `${field} result missing ${fragment}`);
     assert.ok(text.includes(VALUE_TRANSLATIONS[language][record.kind]));
     assert.ok(text.includes(VALUE_TRANSLATIONS[language][record.origin]));
@@ -595,7 +628,7 @@ test("short inline prefixes preserve the full-scan result order", async () => {
 
   for (const query of ["ⲁ", "ⲁⲛ"]) {
     const expected = records.flatMap((record, row) => {
-      const keys = [record.coptic, record.english, record.phonetic, ...split(record.meaning)];
+      const keys = [record.coptic, record.english, ...split(record.meaning)];
       return keys.some((key) => normalizeForPrefixTest(key).startsWith(query)) ? [String(row)] : [];
     }).slice(0, 20);
     const calls = [];
@@ -633,10 +666,10 @@ test("the next meaning button keeps English labels and caption", async () => {
   const calls = [];
   fakeTelegramApi(calls);
   const englishCandidate = records.find((record) => {
-    const query = String(record.translation_en ?? "").split(/[،,]/u)[0].trim();
-    return query && records.filter((other) => String(other.translation_en ?? "").split(/[،,]/u).map((part) => part.trim()).includes(query)).length > 1;
+    const query = String(record.english ?? "").split(/[،,]/u)[0].trim();
+    return query && records.filter((other) => String(other.english ?? "").split(/[،,]/u).map((part) => part.trim()).includes(query)).length > 1;
   });
-  const englishQuery = String(englishCandidate?.translation_en ?? "see").split(/[،,]/u)[0].trim();
+  const englishQuery = String(englishCandidate?.english ?? "see").split(/[،,]/u)[0].trim();
   await worker.fetch(updateRequest({ message: { text: englishQuery, chat: { id: 153 } } }), env);
   const first = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload;
   assert.match(first.text, /<b>Word:<\/b>/u);

@@ -162,15 +162,15 @@ def main() -> None:
             # The new sheet has no separate English spelling column. Keep the
             # English column as the fallback spelling and as the English search field.
             "english": cell(TRANSLATION_EN_COLUMN),
-            "phonetic": "",
             "kind": cell(KIND_COLUMN),
-            "gender": "",
             "origin": cell(ORIGIN_COLUMN),
-            "translation_en": cell(TRANSLATION_EN_COLUMN),
             "translation_fr": cell(TRANSLATION_FR_COLUMN),
             "translation_de": cell(TRANSLATION_DE_COLUMN),
             "meaning": cell(MEANING_COLUMN),
         }
+        # Keep the Coptic key for stable ID assignment; omit other empty values to avoid
+        # serializing empty columns into every record. English is the sole English field.
+        record = {key: value for key, value in record.items() if key == "coptic" or value}
         if not any(record.values()):
             continue
         records.append(record)
