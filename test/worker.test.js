@@ -930,6 +930,65 @@ test("cancel and non-admin confirmation do nothing harmful", async () => {
   assert.equal(kvEnv.USERS.alarms.length, 0);
 });
 
+test("first-contact DO registration overlaps search preparation without sending early", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const calls = [];
+  fakeTelegramApi(calls);
+  const gate = () => {
+    let resolve;
+    const promise = new Promise((done) => { resolve = done; });
+    return { promise, resolve };
+  };
+  const registerStarted = gate();
+  const assetsStarted = gate();
+  const releaseRegister = gate();
+  const releaseAssets = gate();
+  const originalGet = kvEnv.USERS.get.bind(kvEnv.USERS);
+  kvEnv.USERS.get = (id) => {
+    const stub = originalGet(id);
+    return {
+      fetch: async (url, options) => {
+        const payload = JSON.parse(options.body);
+        const response = await stub.fetch(url, options);
+        if (payload.op === "register") {
+          registerStarted.resolve();
+          await releaseRegister.promise;
+        }
+        return response;
+      },
+    };
+  };
+  kvEnv.ASSETS = {
+    fetch: async (url) => {
+      const response = await fakeAssets.fetch(url);
+      if (new URL(url).pathname.startsWith("/search-index/")) {
+        assetsStarted.resolve();
+        await releaseAssets.promise;
+      }
+      return response;
+    },
+  };
+
+  const requestPromise = worker.fetch(updateRequest({
+    message: { text: "qzparalleltest", chat: { id: 2401, type: "private" }, from: { id: 2401, first_name: "Test" } },
+  }), kvEnv);
+  try {
+    const bothStarted = await Promise.race([
+      Promise.all([registerStarted.promise, assetsStarted.promise]).then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 1000)),
+    ]);
+    assert.equal(bothStarted, true, "search preparation should start while the registration call is pending");
+    assert.equal(calls.length, 0, "the bot must not send a message until registration state is known");
+  } finally {
+    releaseRegister.resolve();
+    releaseAssets.resolve();
+  }
+
+  const response = await requestPromise;
+  assert.equal(response.status, 200);
+  assert.ok(calls.some((call) => call.url.endsWith("/sendMessage")));
+});
+
 test("anyone who messages the bot is registered so broadcasts can reach them", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   await asUser(kvEnv, 401, { text: TEST_QUERY });

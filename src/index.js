@@ -1049,8 +1049,7 @@ function widenResultText(value, minimumWidth = 36) {
   const currentWidth = Math.max(...text.split("\n").map((line) => [...line].length), 0);
   return currentWidth >= minimumWidth ? text : `${text}\n${"\u2007".repeat(minimumWidth - currentWidth)}`;
 }
-
-async function sendSearch(env, chatId, query, page = 0, messageId = undefined, ctx = undefined) {
+async function prepareSearch(env, chatId, query, page = 0, messageId = undefined, ctx = undefined) {
   const cleanQuery = String(query ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, 160);
   const normalizedQuery = normalize(cleanQuery);
   const deliver = (payload) => messageId === undefined
@@ -1062,40 +1061,48 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined, c
     const isShortQuery = [...normalizedQuery.replace(/\s+/gu, "")].length <= SHORT_QUERY_MAX;
     if (messageId === undefined && !isShortQuery) {
       const chain = await exactChain(env, kind, normalizedQuery);
-      if (chain.length) return sendOption(env, chatId, chain, chain[0].index, 0, undefined, chainCallback(cleanQuery), cleanQuery, true, ctx);
+      if (chain.length) return () => sendOption(env, chatId, chain, chain[0].index, 0, undefined, chainCallback(cleanQuery), cleanQuery, true, ctx);
     }
     const words = await prefixWords(env, kind, normalizedQuery);
     if (words.length) {
       const view = renderWordSuggestions(cleanQuery, words, page);
-      return deliver({ text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup });
+      return () => deliver({ text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup });
     }
   }
   const matches = await findMatches(cleanQuery, env);
   if (!matches.length) {
-    return deliver({ text: uiTextFor(cleanQuery).noResult });
+    return () => deliver({ text: uiTextFor(cleanQuery).noResult });
   }
   if (matches.length > 1) {
     const view = renderSuggestions(cleanQuery, normalizedQuery, matches, page);
-    return deliver({ text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup });
+    return () => deliver({ text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup });
   }
-  const options = meaningOptions(matches[0], normalizedQuery);
-  const selected = options[0] ?? { index: matches[0], part: matchedPartIndex(records[matches[0]], normalizedQuery) };
-  const record = records[selected.index];
-  const cardLanguage = uiLanguage(normalizedQuery);
-  const media = messageId === undefined ? lookupMedia(env, record, cardLanguage) : null;
-  const voiceRecord = voiceRecordForSearch(record, normalizedQuery);
-  const voice = prepareWordVoice(env, voiceRecord, media, { skipRecorded: scriptKind(normalizedQuery) === "el" });
-  const more = moreMeaning(options, matches[0], 1, undefined, true, uiLanguage(normalizedQuery));
-  const text = widenResultText(`${formatRecord(record, selected.part, normalizedQuery)}${more.notice ?? ""}`).slice(0, MAX_MESSAGE_LENGTH);
-  if (await sendCardEntry(env, chatId, record, text, media, more.reply_markup, cardLanguage)) {
+  const matchIndex = matches[0];
+  return async () => {
+    const options = meaningOptions(matchIndex, normalizedQuery);
+    const selected = options[0] ?? { index: matchIndex, part: matchedPartIndex(records[matchIndex], normalizedQuery) };
+    const record = records[selected.index];
+    const cardLanguage = uiLanguage(normalizedQuery);
+    const media = messageId === undefined ? lookupMedia(env, record, cardLanguage) : null;
+    const voiceRecord = voiceRecordForSearch(record, normalizedQuery);
+    const voice = prepareWordVoice(env, voiceRecord, media, { skipRecorded: scriptKind(normalizedQuery) === "el" });
+    const more = moreMeaning(options, matchIndex, 1, undefined, true, uiLanguage(normalizedQuery));
+    const text = widenResultText(`${formatRecord(record, selected.part, normalizedQuery)}${more.notice ?? ""}`).slice(0, MAX_MESSAGE_LENGTH);
+    if (await sendCardEntry(env, chatId, record, text, media, more.reply_markup, cardLanguage)) {
+      if (ctx?.waitUntil) ctx.waitUntil(sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery).catch((error) => console.error("Background voice failed", error instanceof Error ? error.message : "unknown error")));
+      else await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery);
+      return undefined;
+    }
+    const response = await deliver({ text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
     if (ctx?.waitUntil) ctx.waitUntil(sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery).catch((error) => console.error("Background voice failed", error instanceof Error ? error.message : "unknown error")));
     else await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery);
-    return undefined;
-  }
-  const response = await deliver({ text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
-  if (ctx?.waitUntil) ctx.waitUntil(sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery).catch((error) => console.error("Background voice failed", error instanceof Error ? error.message : "unknown error")));
-  else await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery);
-  return response;
+    return response;
+  };
+}
+
+async function sendSearch(env, chatId, query, page = 0, messageId = undefined, ctx = undefined) {
+  const sendPrepared = await prepareSearch(env, chatId, query, page, messageId, ctx);
+  return sendPrepared();
 }
 
 async function sendRecord(env, chatId, index, partIndex = -1, searchKey = "") {
@@ -2636,6 +2643,17 @@ async function handleUpdate(update, env, ctx) {
   const userId = message.from?.id ?? message.chat.id;
   const isPrivate = (message.chat.type ?? "private") === "private";
   if (text === "/" || text === "/start" || text.startsWith("/start ") || text === "/admin") inBackground(ctx, ensureCommandMenu(env, userId));
+  const cachedRegistration = registeredCache.get(userId);
+  const cacheIsFresh = cachedRegistration && Date.now() - cachedRegistration.at < REGISTERED_CACHE_MS;
+  const canPrepareSearch = isPrivate && !isAdmin(env, userId) && env.USERS && text && !text.startsWith("/") &&
+    !message.voice && !message.audio && text !== "⌨️ الكيبورد القبطي" && text !== "/keyboard" && text !== "/k" && !cacheIsFresh;
+  // Search-index work can overlap the DO registration round trip, but its returned plan has no Telegram side effects.
+  const searchPlanPromise = canPrepareSearch
+    ? prepareSearch(env, message.chat.id, text, 0, undefined, ctx).catch((error) => {
+      console.error("Parallel search preparation failed", error instanceof Error ? error.message : "unknown error");
+      return null;
+    })
+    : null;
   const known = await registerOnFirstContact(env, message, userId, ctx);
   if (text === "⌨️ الكيبورد القبطي" || text === "/keyboard" || text === "/k") {
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "تم إلغاء الكيبورد القبطي نهائيًا. اكتب الكلمة مباشرة للبحث.", reply_markup: { remove_keyboard: true } });
@@ -2793,7 +2811,9 @@ async function handleUpdate(update, env, ctx) {
       }
       return;
     }
-    await sendSearch(env, message.chat.id, text, 0, undefined, ctx);
+    const preparedSearch = searchPlanPromise ? await searchPlanPromise : null;
+    if (preparedSearch) await preparedSearch();
+    else await sendSearch(env, message.chat.id, text, 0, undefined, ctx);
   }
 }
 
