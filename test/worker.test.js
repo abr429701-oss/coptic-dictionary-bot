@@ -420,12 +420,12 @@ test("Arabic meaning chains send the new Coptic word voice for each step", async
   assert.ok(secondCalls.some((call) => call.url.endsWith("/sendVoice")));
 });
 
-test("an unknown word gets the dictionary-under-development message", async () => {
+test("an unknown word gets the no-results message", async () => {
   const calls = [];
   fakeTelegramApi(calls);
   await worker.fetch(updateRequest({ message: { text: "ظظظظظظظ", chat: { id: 21 } } }), env);
   const text = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
-  assert.match(text, /القاموس قيد التطوير/u);
+  assert.match(text, /لا توجد نتائج حالياً لهذه الكلمة/u);
 });
 
 test("several different Coptic words for one Arabic word are shown one after another", async () => {
