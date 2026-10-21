@@ -650,7 +650,7 @@ test("Greek search is disabled", async () => {
   const text = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload?.text ?? "";
   assert.doesNotMatch(text, /<b>Word:|<b>الكلمة:/u);
   assert.equal(text.includes(record.coptic), false);
-  assert.match(text, /dictionary|القاموس/u);
+  assert.match(text, /results|نتائج/u);
 });
 test("a translation query does not match inside a longer phrase", async () => {
   const calls = [];
