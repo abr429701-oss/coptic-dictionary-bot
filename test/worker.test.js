@@ -491,19 +491,19 @@ async function say(envWithKv, userId, text) {
   return calls;
 }
 
-test("/start asks a new user for a three-part name, then welcomes with a photo", async () => {
+test("/start asks a new user for a letters-only name, then welcomes with a photo", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   let calls = await say(kvEnv, 21, "/start");
   const ask = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
-  assert.equal(ask, "مرحبًا بك! يبدو أنك تستخدم البوت لأول مرة, الرجاء إدخال اسمك ثلاثي للبدء في استخدام القاموس القبطي الناطق");
+  assert.equal(ask, "مرحبًا بك! يبدو أنك تستخدم البوت لأول مرة، الرجاء إدخال اسمك بدون رموز للبدء في استخدام القاموس القبطي الناطق.");
 
-  calls = await say(kvEnv, 21, "مينا");
-  assert.match(calls.find((call) => call.url.endsWith("/sendMessage")).payload.text, /ثلاثيًا/u);
+  calls = await say(kvEnv, 21, "مينا123!");
+  assert.match(calls.find((call) => call.url.endsWith("/sendMessage")).payload.text, /بدون رموز ولا أرقام/u);
   assert.ok(!calls.some((call) => call.url.endsWith("/sendPhoto")));
 
-  calls = await say(kvEnv, 21, "مينا جرجس بشرى");
+  calls = await say(kvEnv, 21, "مينا");
   const photo = calls.find((call) => call.url.endsWith("/sendPhoto")).payload;
-  assert.equal(photo.caption, "مرحبًا بك يا مينا جرجس بشرى في القاموس الرقمي الناطق للغة القبطية, تفضل الان بكتابة أي كلمة للبحث عنها");
+  assert.equal(photo.caption, "مرحبًا بك، مينا في القاموس القبطي الناطق، تفضل الان بكتابة أي كلمة للبحث عنها.");
   assert.ok(photo.photo instanceof Blob && photo.photo.size > 1000);
   assert.equal(photo.parse_mode, "HTML");
 });
@@ -513,7 +513,7 @@ test("/start greets a returning user by the saved name with the photo", async ()
   kvEnv.USERS.store.set("user:22", { name: "بيشوي مجدي فرج" });
   const calls = await say(kvEnv, 22, "/start");
   const photo = calls.find((call) => call.url.endsWith("/sendPhoto")).payload;
-  assert.match(photo.caption, /مرحبًا بك يا بيشوي مجدي فرج في القاموس الرقمي الناطق/u);
+  assert.match(photo.caption, /مرحبًا بك، بيشوي مجدي فرج في القاموس القبطي الناطق/u);
   assert.ok(!calls.some((call) => call.url.endsWith("/sendMessage")));
 });
 
@@ -1290,9 +1290,9 @@ test("a new user's name, username and id are sent to the User tab; a changed use
   assert.ok(row.joined_at);
 
   world.calls.length = 0;
-  await worker.fetch(updateRequest({ message: { text: "مرحبا", chat: { id: 5001, type: "private" }, from } }), kvEnv);
+  await worker.fetch(updateRequest({ message: { text: "مرحبا1", chat: { id: 5001, type: "private" }, from } }), kvEnv);
   assert.ok(!world.calls.some((call) => call.payload?.action === "users"));
-  await worker.fetch(updateRequest({ message: { text: "مرحبا", chat: { id: 5001, type: "private" }, from: { ...from, username: "mina_new" } } }), kvEnv);
+  await worker.fetch(updateRequest({ message: { text: "مرحبا1", chat: { id: 5001, type: "private" }, from: { ...from, username: "mina_new" } } }), kvEnv);
   assert.equal(world.calls.find((call) => call.payload?.action === "users").payload.users[0].username, "mina_new");
 });
 

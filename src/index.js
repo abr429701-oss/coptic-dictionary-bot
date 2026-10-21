@@ -12,8 +12,8 @@ const BROADCAST_BATCH_SIZE = 25;
 const BROADCAST_BATCH_DELAY_MS = 1200;
 const BROADCAST_MAX_TRANSIENT_RETRIES = 5;
 const FIRST_TIME_TEXT =
-  "مرحبًا بك! يبدو أنك تستخدم البوت لأول مرة, الرجاء إدخال اسمك ثلاثي للبدء في استخدام القاموس القبطي الناطق";
-const NAME_RETRY_TEXT = "الرجاء إدخال اسمك ثلاثيًا (ثلاث كلمات على الأقل) بالحروف فقط، مثل: مينا جرجس بشرى.";
+  "مرحبًا بك! يبدو أنك تستخدم البوت لأول مرة، الرجاء إدخال اسمك بدون رموز للبدء في استخدام القاموس القبطي الناطق.";
+const NAME_RETRY_TEXT = "الرجاء إدخال اسمك صحيحاً بالحروف فقط بدون رموز ولا أرقام.";
 const HELP_TEXT = `${BOT_TITLE}\n\nأهلًا بك في القاموس.\n\nاكتب الكلمة مباشرة، مثل:\nⲁⲛⲁⲩ\nwater\nماء\n\nسأبحث في القبطية والعربية والإنجليزية والفرنسية والألمانية والنطق.\n\nاكتب الكلمة أو أول حروفها لتظهر لك اقتراحات بالكلمات التي تبدأ بها.`;
 
 const ACCENT_MAP = { ὲ: "ⲉ", έ: "ⲉ", ὶ: "ⲓ", ί: "ⲓ", ὸ: "ⲟ", ό: "ⲟ", ὼ: "ⲱ", ώ: "ⲱ", ὴ: "ⲏ", ή: "ⲏ", ὰ: "ⲁ", ά: "ⲁ", ὺ: "ⲩ", ύ: "ⲩ" };
@@ -1576,9 +1576,9 @@ async function saveUser(env, userId, data) {
 
 function isValidFullName(value) {
   const name = String(value ?? "").replace(/\s+/gu, " ").trim();
-  if (name.length < 5 || name.length > 60) return false;
-  if (!/^[\p{L}\p{M}' .-]+$/u.test(name)) return false;
-  return name.split(" ").filter(Boolean).length >= 3;
+  if (name.length < 2 || name.length > 60) return false;
+  // Letters and combining marks only (any language), spaces allowed; no digits, no symbols.
+  return /^[\p{L}\p{M} ]+$/u.test(name);
 }
 
 function userReplyKeyboardMarkup() {
@@ -1587,7 +1587,7 @@ function userReplyKeyboardMarkup() {
 
 async function sendWelcome(env, chatId, name) {
   const caption =
-    `مرحبًا بك يا ${escapeHtml(name)} في القاموس الرقمي الناطق للغة القبطية, تفضل الان بكتابة أي كلمة للبحث عنها`;
+    `مرحبًا بك، ${escapeHtml(name)} في القاموس القبطي الناطق، تفضل الان بكتابة أي كلمة للبحث عنها.`;
   try {
     const bytes = Uint8Array.from(atob(welcomeImageBase64), (char) => char.charCodeAt(0));
     const form = new FormData();
