@@ -1587,7 +1587,7 @@ function userReplyKeyboardMarkup() {
 
 async function sendWelcome(env, chatId, name) {
   const caption =
-    `مرحبًا بك، ${escapeHtml(name)} في القاموس القبطي الناطق، تفضل الان بكتابة أي كلمة للبحث عنها.`;
+    `مرحبًا بك ${escapeHtml(name)}، في القاموس القبطي الناطق، تفضل الان بكتابة أي كلمة للبحث عنها.`;
   try {
     const bytes = Uint8Array.from(atob(welcomeImageBase64), (char) => char.charCodeAt(0));
     const form = new FormData();

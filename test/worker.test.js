@@ -503,7 +503,7 @@ test("/start asks a new user for a letters-only name, then welcomes with a photo
 
   calls = await say(kvEnv, 21, "مينا");
   const photo = calls.find((call) => call.url.endsWith("/sendPhoto")).payload;
-  assert.equal(photo.caption, "مرحبًا بك، مينا في القاموس القبطي الناطق، تفضل الان بكتابة أي كلمة للبحث عنها.");
+  assert.equal(photo.caption, "مرحبًا بك مينا، في القاموس القبطي الناطق، تفضل الان بكتابة أي كلمة للبحث عنها.");
   assert.ok(photo.photo instanceof Blob && photo.photo.size > 1000);
   assert.equal(photo.parse_mode, "HTML");
 });
@@ -513,7 +513,7 @@ test("/start greets a returning user by the saved name with the photo", async ()
   kvEnv.USERS.store.set("user:22", { name: "بيشوي مجدي فرج" });
   const calls = await say(kvEnv, 22, "/start");
   const photo = calls.find((call) => call.url.endsWith("/sendPhoto")).payload;
-  assert.match(photo.caption, /مرحبًا بك، بيشوي مجدي فرج في القاموس القبطي الناطق/u);
+  assert.match(photo.caption, /مرحبًا بك بيشوي مجدي فرج، في القاموس القبطي الناطق/u);
   assert.ok(!calls.some((call) => call.url.endsWith("/sendMessage")));
 });
 
