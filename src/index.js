@@ -587,6 +587,7 @@ async function findMatches(query, env) {
 
 const USER_COMMANDS = [
   { command: "start", description: "بدء استخدام القاموس" },
+  { command: "learn", description: "بوت تعلم اللغة القبطية من الصفر" },
 ];
 const ADMIN_COMMANDS = [
   ...USER_COMMANDS,
@@ -2772,6 +2773,13 @@ async function handleUpdate(update, env, ctx) {
     }
     await saveUser(env, userId, { ...user, awaitingName: true });
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: FIRST_TIME_TEXT });
+    return;
+  }
+  if (text === "/learn" || text.startsWith("/learn ")) {
+    await telegram(env, "sendMessage", {
+      chat_id: message.chat.id,
+      text: "هذا هو بوت تعلم اللغة القبطية من الصفر: https://t.me/Coptic2_bot",
+    });
     return;
   }
   if (message.voice || message.audio) {
