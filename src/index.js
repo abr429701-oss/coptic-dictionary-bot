@@ -587,6 +587,7 @@ async function findMatches(query, env) {
 
 const USER_COMMANDS = [
   { command: "start", description: "بدء استخدام القاموس" },
+  { command: "keyboard", description: "لوحة مفاتيح قبطية لكتابة الكلمات" },
   { command: "learn", description: "بوت تعلم اللغة القبطية من الصفر" },
 ];
 const ADMIN_COMMANDS = [
@@ -594,6 +595,74 @@ const ADMIN_COMMANDS = [
   { command: "admin", description: "لوحة تحكم الأدمن" },
 ];
 const commandMenuReady = new Set();
+
+// Coptic inline-keyboard composer: users tap letters to build a Coptic word,
+// then tap "بحث". The composed word lives in the message text itself, so no
+// extra storage is needed. Letters are exactly those used in the dictionary
+// (the archaic ⲋ is omitted because it never appears in the data).
+const KEYBOARD_WORD_PREFIX = "الكلمة: ";
+const KEYBOARD_EMPTY = "—";
+const JINKIM = "\u0300";
+const KEYBOARD_MAX_WORD = 48;
+const COPTIC_KEYBOARD_ROWS = [
+  ["\u2C81", "\u2C83", "\u2C85", "\u2C87", "\u2C89", "\u2C8D", "\u2C8F"],
+  ["\u2C91", "\u2C93", "\u2C95", "\u2C97", "\u2C99", "\u2C9B", "\u2C9D"],
+  ["\u2C9F", "\u2CA1", "\u2CA3", "\u2CA5", "\u2CA7", "\u2CA9", "\u2CAB"],
+  ["\u2CAD", "\u2CAF", "\u2CB1", "\u03E3", "\u03E5", "\u03E7", "\u03E9"],
+  ["\u03EB", "\u03ED", "\u03EF"],
+];
+function copticKeyboardMarkup() {
+  const rows = COPTIC_KEYBOARD_ROWS.map((row) => row.map((ch) => ({ text: ch, callback_data: `kb|${ch}` })));
+  rows.push([{ text: "\u25CC\u0300 جِنكِيم", callback_data: "kb|j" }]);
+  rows.push([
+    { text: "\u232B", callback_data: "kb|bs" },
+    { text: "\uD83D\uDDD1 مسح", callback_data: "kb|cl" },
+    { text: "\u2705 بحث", callback_data: "kb|go" },
+    { text: "\u274C إغلاق", callback_data: "kb|xx" },
+  ]);
+  return { inline_keyboard: rows };
+}
+function keyboardComposerText(word) {
+  const shown = word ? word : KEYBOARD_EMPTY;
+  return `\u2328\uFE0F لوحة المفاتيح القبطية\nاضغط على الحروف لتكوين الكلمة، ثم اضغط \u2705 بحث.\n\n${KEYBOARD_WORD_PREFIX}${shown}\n\n\u232B حذف آخر حرف • \uD83D\uDDD1 مسح الكلمة • \u274C إغلاق`;
+}
+function extractKeyboardWord(text) {
+  const line = String(text ?? "").split("\n").find((l) => l.startsWith(KEYBOARD_WORD_PREFIX));
+  if (!line) return "";
+  const word = line.slice(KEYBOARD_WORD_PREFIX.length).trim();
+  return word === KEYBOARD_EMPTY ? "" : word;
+}
+async function handleKeyboardCallback(env, callback, action, ctx) {
+  const message = callback.message;
+  if (!message?.chat?.id || !message?.message_id) return;
+  const chatId = message.chat.id;
+  const messageId = message.message_id;
+  const current = extractKeyboardWord(message.text);
+  const edit = (text, markup) => telegram(env, "editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    ...(markup ? { reply_markup: markup } : {}),
+  });
+  if (action === "xx") {
+    await edit("تم إغلاق لوحة المفاتيح. أرسل /keyboard لفتحها مرة أخرى.", { inline_keyboard: [] });
+    return;
+  }
+  if (action === "go") {
+    if (!current) return;
+    await edit(`\uD83D\uDD0E جارٍ البحث عن: ${current}`, { inline_keyboard: [] });
+    await inBackground(ctx, sendSearch(env, chatId, current, 0, undefined, ctx));
+    return;
+  }
+  let next = current;
+  if (action === "bs") next = current.slice(0, -1);
+  else if (action === "cl") next = "";
+  else if (action === "j") { if (current) next = current + JINKIM; else return; }
+  else next = current + action;
+  if (next.length > KEYBOARD_MAX_WORD) next = next.slice(0, KEYBOARD_MAX_WORD);
+  const text = keyboardComposerText(next);
+  if (text !== message.text) await edit(text, copticKeyboardMarkup());
+}
 async function ensureCommandMenu(env, userId) {
   const admin = isAdmin(env, userId);
   const key = admin ? "admin" : "user";
@@ -2558,6 +2627,11 @@ async function handleUpdate(update, env, ctx) {
     }
     // Acknowledge the tap in the background so the answer is not delayed by a round trip.
     await inBackground(ctx, telegram(env, "answerCallbackQuery", { callback_query_id: callback.id }));
+    const kbAction = /^kb\|(.+)$/su.exec(callback.data ?? "");
+    if (kbAction) {
+      await handleKeyboardCallback(env, callback, kbAction[1], ctx);
+      return;
+    }
     const chatForPick = callback.message?.chat?.id;
     const voiceDelete = /^vd\|(\d+|x)$/u.exec(callback.data ?? "");
     if (voiceDelete) {
@@ -2656,8 +2730,8 @@ async function handleUpdate(update, env, ctx) {
     })
     : null;
   const known = await registerOnFirstContact(env, message, userId, ctx);
-  if (text === "⌨️ الكيبورد القبطي" || text === "/keyboard" || text === "/k") {
-    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "تم إلغاء الكيبورد القبطي نهائيًا. اكتب الكلمة مباشرة للبحث.", reply_markup: { remove_keyboard: true } });
+  if (text === "⌨️ الكيبورد القبطي" || text === "/keyboard" || text === "/kbd" || text === "/k") {
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: keyboardComposerText(""), reply_markup: copticKeyboardMarkup() });
     return;
   }
   if (isAdmin(env, userId) && ["group", "supergroup"].includes(message.chat.type)

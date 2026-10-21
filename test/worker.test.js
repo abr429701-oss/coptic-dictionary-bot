@@ -1711,3 +1711,75 @@ test("recordings are not sent to an archive group", async () => {
   await worker.fetch(updateRequest({ message: { voice: { file_id: "direct-voice", duration: 3 }, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
   assert.equal(calls.some((call) => call.url.endsWith("/sendVoice")), false);
 });
+
+test("Coptic keyboard composer opens, appends letters, backspaces, searches and closes", async () => {
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: "/keyboard", chat: { id: 71 } } }), env);
+  const open = calls.find((c) => c.url.endsWith("/sendMessage"))?.payload;
+  assert.ok(open, "opening message was sent");
+  assert.match(open.text, /لوحة المفاتيح القبطية/u);
+  const kb = open.reply_markup.inline_keyboard;
+  assert.ok(kb.length >= 5, "keyboard has letter rows");
+  const letterButton = kb.flat().find((b) => b.callback_data === "kb|ⲁ");
+  assert.ok(letterButton, "ⲁ button exists");
+  assert.ok(kb.flat().some((b) => b.callback_data === "kb|go"), "search button exists");
+  assert.ok(kb.flat().some((b) => b.callback_data === "kb|bs"), "backspace button exists");
+
+  // Tap ⲁ
+  calls.length = 0;
+  await worker.fetch(updateRequest({ callback_query: { id: "k1", data: "kb|ⲁ", message: { message_id: 5, chat: { id: 71 }, text: open.text } } }), env);
+  const afterA = calls.find((c) => c.url.endsWith("/editMessageText"))?.payload;
+  assert.ok(afterA, "letter tap edits the message");
+  assert.match(afterA.text, /الكلمة: ⲁ\s*$/mu);
+  assert.ok(afterA.reply_markup.inline_keyboard.length >= 5, "keyboard stays open after a tap");
+
+  // Tap ⲛ -> ⲁⲛ
+  calls.length = 0;
+  await worker.fetch(updateRequest({ callback_query: { id: "k2", data: "kb|ⲛ", message: { message_id: 5, chat: { id: 71 }, text: afterA.text } } }), env);
+  const afterN = calls.find((c) => c.url.endsWith("/editMessageText"))?.payload;
+  assert.match(afterN.text, /الكلمة: ⲁⲛ\s*$/mu);
+
+  // Backspace -> ⲁ
+  calls.length = 0;
+  await worker.fetch(updateRequest({ callback_query: { id: "k3", data: "kb|bs", message: { message_id: 5, chat: { id: 71 }, text: afterN.text } } }), env);
+  const afterBs = calls.find((c) => c.url.endsWith("/editMessageText"))?.payload;
+  assert.match(afterBs.text, /الكلمة: ⲁ\s*$/mu);
+
+  // Clear -> empty placeholder
+  calls.length = 0;
+  await worker.fetch(updateRequest({ callback_query: { id: "k3b", data: "kb|cl", message: { message_id: 5, chat: { id: 71 }, text: afterBs.text } } }), env);
+  const afterCl = calls.find((c) => c.url.endsWith("/editMessageText"))?.payload;
+  assert.match(afterCl.text, /الكلمة: —\s*$/mu);
+
+  // Search with an empty word is a no-op (no edit, no search)
+  calls.length = 0;
+  await worker.fetch(updateRequest({ callback_query: { id: "k3c", data: "kb|go", message: { message_id: 5, chat: { id: 71 }, text: afterCl.text } } }), env);
+  assert.equal(calls.some((c) => c.url.endsWith("/editMessageText")), false, "empty search does nothing");
+
+  // Compose ⲁⲛ again then search -> triggers a real search sendMessage
+  calls.length = 0;
+  await worker.fetch(updateRequest({ callback_query: { id: "k4", data: "kb|go", message: { message_id: 5, chat: { id: 71 }, text: afterN.text } } }), env);
+  const edit = calls.find((c) => c.url.endsWith("/editMessageText"))?.payload;
+  assert.match(edit.text, /جارٍ البحث/u);
+  const result = calls.find((c) => c.url.endsWith("/sendMessage"))?.payload;
+  assert.ok(result, "search results message was sent");
+
+  // Close removes the keyboard
+  calls.length = 0;
+  await worker.fetch(updateRequest({ callback_query: { id: "k5", data: "kb|xx", message: { message_id: 5, chat: { id: 71 }, text: afterN.text } } }), env);
+  const closed = calls.find((c) => c.url.endsWith("/editMessageText"))?.payload;
+  assert.match(closed.text, /تم إغلاق/u);
+});
+
+test("/kbd and /k aliases open the Coptic keyboard composer", async () => {
+  for (const command of ["/kbd", "/k"]) {
+    const calls = [];
+    fakeTelegramApi(calls);
+    await worker.fetch(updateRequest({ message: { text: command, chat: { id: 72 } } }), env);
+    const open = calls.find((c) => c.url.endsWith("/sendMessage"))?.payload;
+    assert.ok(open, `${command} opens the keyboard`);
+    assert.match(open.text, /لوحة المفاتيح القبطية/u);
+    assert.ok(open.reply_markup.inline_keyboard.flat().some((b) => b.callback_data === "kb|ⲁ"));
+  }
+});
