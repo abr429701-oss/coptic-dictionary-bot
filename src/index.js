@@ -1669,18 +1669,15 @@ export class UserStore {
       return Response.json({ created: false, user, changed });
     }
     if (op === "bulk_import_users") {
-      const list = Array.isArray(ids) ? ids.map(String) : [];
-      let imported = 0, skipped = 0;
+      const list = Array.isArray(ids) ? ids.map(String).filter((id) => /^\d{5,}$/.test(id)) : [];
       const now = new Date().toISOString();
-      for (const id of list) {
-        if (!/^\d{5,}$/.test(id)) continue;
-        const key = `user:${id}`;
-        const existing = await storage.get(key);
-        if (existing) { skipped += 1; continue; }
-        await storage.put(key, { firstSeen: now, imported: true });
-        imported += 1;
-      }
-      return Response.json({ imported, skipped, total: list.length });
+      // One list call instead of N sequential gets; then parallel puts.
+      const existingList = await storage.list({ prefix: "user:" });
+      const existingIds = new Set([...existingList.keys()].map((k) => k.slice("user:".length)));
+      const fresh = list.filter((id) => !existingIds.has(id));
+      const skipped = list.length - fresh.length;
+      await Promise.all(fresh.map((id) => storage.put(`user:${id}`, { firstSeen: now, imported: true })));
+      return Response.json({ imported: fresh.length, skipped, total: list.length });
     }
     if (op === "userpage") {
       const size = limit ?? 40;
@@ -2410,7 +2407,7 @@ async function stopVoiceRecording(env, chatId, userId, user) {
 
 // ---- User directory in the spreadsheet ("User" tab, written by the Apps Script) ----
 const USERS_SYNC_CURSOR = "users-sync-cursor";
-const USERS_SYNC_BATCH = 30;
+const USERS_SYNC_BATCH = 100;
 
 function userSheetRow(id, record, from = {}) {
   const tgName = record?.tgName || displayNameOrEmpty(from);
@@ -4635,6 +4632,25 @@ async function handleUpdate(update, env, ctx) {
     }
     if (text === "/syncusers") {
       await inBackground(ctx, syncUsersBatch(env, message.chat.id));
+      return;
+    }
+    if (text === "/syncall") {
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⏳ بدأت مزامنة جميع المستخدمين إلى الشيت في الخلفية. سأرسل تقريرًا عند الانتهاء (قد يستغرق دقائق)." });
+      await inBackground(ctx, (async () => {
+        if (env.USERS) await storeCall(env, { op: "put", key: USERS_SYNC_CURSOR, value: null });
+        let total = 0, rounds = 0;
+        for (let i = 0; i < 60; i += 1) { // up to 60 rounds × 100 = 6000 users
+          const before = total;
+          await syncUsersBatch(env, message.chat.id, true);
+          const cursor = (await storeCall(env, { op: "get", key: USERS_SYNC_CURSOR })).value;
+          const page = await storeCall(env, { op: "userpage", cursor, limit: 1 });
+          total += (page.users ?? []).length ? 100 : 0;
+          rounds += 1;
+          if (!cursor || !(page.users ?? []).length) break;
+          await new Promise((r) => setTimeout(r, 800));
+        }
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ اكتملت المزامنة الشاملة (~${rounds} جولة). تحقق من تبويب User في الشيت.` });
+      })());
       return;
     }
     // ---- Batch 3 admin commands ----
