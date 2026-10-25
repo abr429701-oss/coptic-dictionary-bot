@@ -1521,6 +1521,46 @@ export class UserStore {
 
   async alarm() {
     const storage = this.state.storage;
+    // Sync job: each batch runs in its own alarm invocation with fresh time limit.
+    const syncJob = await storage.get("sync:job");
+    if (syncJob) {
+      const env = this.env;
+      const cursor = (await storage.get(USERS_SYNC_CURSOR)) ?? null;
+      const listPage = await storage.list({ prefix: "user:", ...(cursor ? { startAfter: cursor } : {}), limit: 50 });
+      const page = { users: [...listPage].map(([storedKey, record]) => ({ key: storedKey, id: storedKey.slice("user:".length), record })), next: listPage.cursor ?? null };
+      if ((page.users ?? []).length) {
+        const rows = [];
+        for (let c = 0; c < page.users.length; c += 10) {
+          const chunk = page.users.slice(c, c + 10);
+          const chunkRows = await Promise.all(chunk.map(async (item) => {
+            let record = item.record ?? {};
+            if (!syncJob.fast && !record.tgName && !record.username) {
+              const chat = await telegram(env, "getChat", { chat_id: item.id }).catch(() => null);
+              if (chat?.ok && chat.result) {
+                record = { ...record, tgName: displayNameOrEmpty(chat.result), username: chat.result.username ?? "" };
+                await saveUser(env, item.id, record).catch(() => null);
+              }
+            }
+            return userSheetRow(item.id, record);
+          }));
+          rows.push(...chunkRows);
+        }
+        await pushUsers(env, rows).catch(() => null);
+        syncJob.total = (syncJob.total ?? 0) + rows.length;
+        syncJob.rounds = (syncJob.rounds ?? 0) + 1;
+        if (page.next) {
+          await storage.put(USERS_SYNC_CURSOR, page.next);
+          await storage.put("sync:job", syncJob);
+          await storage.setAlarm(Date.now() + 25000); // user's idea: sync then pause ~25s then resume
+          if (syncJob.rounds % 4 === 0) await telegram(env, "sendMessage", { chat_id: syncJob.adminChat, text: `⏳ مزامنة تلقائية: ${syncJob.total} مستخدم حتى الآن (الجولة ${syncJob.rounds})…` }).catch(() => null);
+          return;
+        }
+      }
+      await storage.delete(USERS_SYNC_CURSOR);
+      await storage.delete("sync:job");
+      await telegram(env, "sendMessage", { chat_id: syncJob.adminChat, text: `✅ اكتملت المزامنة التلقائية: ${syncJob.total ?? 0} مستخدم في ${syncJob.rounds ?? 0} جولة. تحقق من تبويب "users" في الشيت.` }).catch(() => null);
+      return;
+    }
     const job = await storage.get("broadcast");
     if (!job) return;
     // Batch 4: broadcast pause/cancel control.
@@ -1821,6 +1861,16 @@ export class UserStore {
       });
       await storage.setAlarm(Date.now() + 100);
       return Response.json({ started: true, total: queue.length });
+    }
+    if (op === "sync_start") {
+      await storage.put("sync:job", { adminChat: fromChat ?? chatId ?? 0, fast: input === "fast", total: 0, rounds: 0, startedAt: new Date().toISOString() });
+      await storage.setAlarm(Date.now() + 5000);
+      return Response.json({ ok: true });
+    }
+    if (op === "sync_cancel") {
+      await storage.delete("sync:job");
+      await storage.delete(USERS_SYNC_CURSOR);
+      return Response.json({ ok: true });
     }
     const userKey = `user:${userId}`;
     if (op === "templates_get") return Response.json({ value: (await storage.get(TEMPLATES_KEY)) ?? {} });
@@ -4649,331 +4699,16 @@ async function handleUpdate(update, env, ctx) {
     if (text === "/syncall") {
       const dc = await driveConfig(env);
       if (!dc) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ لم يتم ربط Apps Script بعد. تأكد من وجود سر APPS_SCRIPT_URL في GitHub وأعد النشر بـ setup_webhook=true." }); return; }
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⏳ بدأت المزامنة (متواصلة من حيث توقفت). سأبلغك بعد كل جولة. أعد تشغيل /syncall إذا توقفت في منتصف الطريق." });
-      await inBackground(ctx, (async () => {
-        try {
-          let rounds = 0, total = 0, failedRounds = 0, lastError = "";
-          for (let i = 0; i < 30; i += 1) { // ~30 rounds × 50 = 1500 users per run; re-run to continue
-            const cursor = (await storeCall(env, { op: "get", key: USERS_SYNC_CURSOR })).value ?? null;
-            const page = await storeCall(env, { op: "userpage", cursor, limit: 50 });
-            if (!(page.users ?? []).length) break;
-            // Limited parallelism (10 at a time) to avoid Telegram 429 rate-limit on getChat.
-            const rows = [];
-            for (let c = 0; c < page.users.length; c += 10) {
-              const chunk = page.users.slice(c, c + 10);
-              const chunkRows = await Promise.all(chunk.map(async (item) => {
-                let record = item.record ?? {};
-                if (!record.tgName && !record.username) {
-                  const chat = await telegram(env, "getChat", { chat_id: item.id }).catch(() => null);
-                  if (chat?.ok && chat.result) {
-                    record = { ...record, tgName: displayNameOrEmpty(chat.result), username: chat.result.username ?? "" };
-                    await saveUser(env, item.id, record).catch(() => null);
-                  }
-                }
-                return userSheetRow(item.id, record);
-              }));
-              rows.push(...chunkRows);
-            }
-            const outcome = await pushUsers(env, rows).catch((e) => ({ ok: false, error: String(e) }));
-            if (outcome.ok) { total += rows.length; }
-            else { failedRounds += 1; lastError = outcome?.error ?? "unknown"; }
-            rounds += 1;
-            await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `⏳ جولة ${rounds}: ${total} متزامن حتى الآن${failedRounds ? ` (${failedRounds} فشل)` : ""}${lastError ? `\nآخر خطأ: ${escapeHtml(lastError)}` : ""}` }).catch(() => null);
-            if (page.next) await storeCall(env, { op: "put", key: USERS_SYNC_CURSOR, value: page.next });
-            else { await storeCall(env, { op: "put", key: USERS_SYNC_CURSOR, value: null }); break; }
-            await new Promise((r) => setTimeout(r, 300));
-          }
-          const cursorNow = (await storeCall(env, { op: "get", key: USERS_SYNC_CURSOR })).value;
-          const summary = cursorNow
-            ? `⏸️ توقفت مؤقتًا بعد ${total} مستخدم (${rounds} جولات).\nأعد تشغيل /syncall للمتابعة من حيث توقف.${failedRounds ? `\nجولات فاشلة: ${failedRounds}${lastError ? ` — ${escapeHtml(lastError)}` : ""}` : ""}`
-            : `✅ اكتملت المزامنة: ${total} مستخدم في ${rounds} جولة.${failedRounds ? `\nجولات فاشلة: ${failedRounds}${lastError ? ` — ${escapeHtml(lastError)}` : ""}` : ""}\nتحقق من تبويب "users" في الشيت.`;
-          await telegram(env, "sendMessage", { chat_id: message.chat.id, text: summary });
-        } catch (error) {
-          await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `❌ فشلت المزامنة: ${escapeHtml(error instanceof Error ? error.message : String(error))}\nأعد تشغيل /syncall — سيكمل من حيث توقف.` }).catch(() => null);
-        }
-      })());
+      const fast = text.includes("fast");
+      if (env.USERS) await storeCall(env, { op: "sync_start", fromChat: message.chat.id, input: fast ? "fast" : "" });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: fast
+        ? "⏳ بدأت المزامنة التلقائية السريعة (بدون جلب الأسماء). كل 50 مستخدم ثم انتظار 25 ثانية ثم المتابعة تلقائيًا. ستصل لك تقارير التقدم."
+        : "⏳ بدأت المزامنة التلقائية. كل 50 مستخدم ثم انتظار 25 ثانية ثم المتابعة تلقائيًا (فكرتك بالضبط). ستصل لك تقارير التقدم.\nأضف fast: /syncall fast لتخطي جلب الأسماء وتسريعها." });
       return;
     }
-    // ---- Batch 3 admin commands ----
-    if (text === "/setwod" || text.startsWith("/setwod ")) {
-      const word = text.slice("/setwod".length).trim();
-      if (!word) {
-        const config = await wordOfTheDayConfig(env);
-        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: config?.word ? `☀️ كلمة اليوم مضبوطة على «${escapeHtml(config.word)}» وتُرسل إلى ${config.chatId} يوميًا (آخر إرسال: ${config.lastSent ?? "لم يُرسل بعد"}).\nالاستخدام: /setwod <كلمة>` : "✏️ الاستخدام: /setwod <كلمة> — لتلقي كلمة اليوم تلقائيًا هنا كل يوم. نفّذها داخل المجموعة لإرسالها هناك.", parse_mode: "HTML" });
-        return;
-      }
-      await setWordOfTheDay(env, { word: word.slice(0, 80), chatId: message.chat.id, lastSent: null });
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم ضبط كلمة اليوم على «${escapeHtml(word.slice(0, 80))}» وستُرسل إلى هذه المحادثة تلقائيًا كل يوم.\nلإلغائها: /setwod off`, parse_mode: "HTML" });
-      return;
-    }
-    if (text === "/autoreply" || text.startsWith("/autoreply ")) {
-      const arg = text.slice("/autoreply".length).trim();
-      if (!arg) {
-        const list = await autoReplies(env);
-        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: list.length ? `🤖 الردود التلقائية الحالية (${list.length}):\n${list.map((r) => `• «${escapeHtml(r.trigger)}» → ${escapeHtml(r.reply.slice(0, 60))}`).join("\n")}\n\nلإضافة: /autoreply كلمة_التفويض = الرد\nللحذف: /autoreply حذف كلمة_التفويض` : "لا توجد ردود تلقائية.\nلإضافة: /autoreply كلمة_التفويض = الرد", parse_mode: "HTML" });
-        return;
-      }
-      const removeMatch = /^حذف\s+(.+)$/u.exec(arg);
-      if (removeMatch) {
-        const trigger = normalize(removeMatch[1]);
-        await setAutoReplies(env, (await autoReplies(env)).filter((r) => normalize(r.trigger) !== trigger));
-        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم حذف الرد التلقائي." });
-        return;
-      }
-      const sep = arg.includes("=") ? "=" : arg.includes("|") ? "|" : null;
-      const [trigger, ...rest] = sep ? arg.split(sep) : [];
-      if (!sep || !trigger.trim() || !rest.join("=").trim()) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /autoreply كلمة_التفويض = الرد" }); return; }
-      const list = (await autoReplies(env)).filter((r) => normalize(r.trigger) !== normalize(trigger));
-      list.push({ trigger: trigger.trim().slice(0, 60), reply: rest.join("=").trim().slice(0, 400) });
-      await setAutoReplies(env, list);
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم حفظ الرد التلقائي لـ «${escapeHtml(trigger.trim())}».`, parse_mode: "HTML" });
-      return;
-    }
-    if (text === "/searchlimit" || text.startsWith("/searchlimit ")) {
-      const arg = text.slice("/searchlimit".length).trim();
-      if (!/^\d+$/u.test(arg)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `الحد اليومي الحالي للبحث: <b>${await dailySearchLimit(env) || "بلا حد"}</b>\nالاستخدام: /searchlimit <عدد> (0 = بلا حد)`, parse_mode: "HTML" }); return; }
-      await setDailySearchLimit(env, Number(arg));
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: Number(arg) ? `✅ تم ضبط الحد اليومي لعمليات البحث إلى ${Number(arg).toLocaleString("en-US")} بحث لكل مستخدم (الأدمن استثناء).` : "✅ تم إلغاء الحد اليومي." });
-      return;
-    }
-    if (text === "/usagealert" || text.startsWith("/usagealert ")) {
-      const arg = text.slice("/usagealert".length).trim();
-      if (!/^\d+$/u.test(arg)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `تنبيه الاستخدام الحالي: <b>${Number((await alertsConfig(env))?.threshold ?? 0) || "معطّل"}</b>\nالاستخدام: /usagealert <عدد> (0 = إيقاف)`, parse_mode: "HTML" }); return; }
-      await setAlertsConfig(env, { threshold: Number(arg) });
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: Number(arg) ? `🚨 سيصلك تنبيه عندما تتجاوز طلبات اليوم ${Number(arg).toLocaleString("en-US")}.` : "✅ تم إيقاف تنبيهات الاستخدام." });
-      return;
-    }
-    if (text === "/tplsave" || text.startsWith("/tplsave ")) {
-      const name = text.slice("/tplsave".length).trim() || "افتراضي";
-      await beginBroadcastFromTemplate(env, message.chat.id, userId, admin ?? {}, name, message);
-      return;
-    }
-    if (text === "/tplsend" || text.startsWith("/tplsend ")) {
-      const name = text.slice("/tplsend".length).trim() || "افتراضي";
-      const templates = await broadcastTemplates(env);
-      const tpl = templates[name];
-      if (!tpl?.messageId) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `❌ لا يوجد قالب باسم «${escapeHtml(name)}». احفظ واحدًا بـ /tplsave ${name}.`, parse_mode: "HTML" }); return; }
-      await telegram(env, "sendMessage", {
-        chat_id: message.chat.id,
-        text: `🧷 إرسال القالب «${escapeHtml(name)}» (المحفوظ) إلى المستخدمين؟`,
-        parse_mode: "HTML",
-        reply_markup: { inline_keyboard: [[{ text: "🚀 إرسال الآن", callback_data: `tpl|go|${name}` }, { text: "❌ إلغاء", callback_data: "tpl|no" }]] },
-      });
-      return;
-    }
-    if (text === "/setwodtest") {
-      const config = await wordOfTheDayConfig(env);
-      if (!config?.word) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "☀️ كلمة اليوم غير مضبوطة. اضبطها أولًا بـ /setwod <كلمة>." }); return; }
-      await sendWordOfTheDay(env, message.chat.id, { ...config, lastSent: null });
-      return;
-    }
-    if (text === "/optout" || text === "/optoutstats") { await beginOptOutStats(env, message.chat.id); return; }
-    if (text === "/purge" || text.startsWith("/purge ")) {
-      const days = Number(text.slice("/purge".length).trim()) || 30;
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `🗑 تأكيد: حذف كل المستخدمين المسجلين قبل أكثر من ${days} يومًا (غير المحظورين)؟`, reply_markup: { inline_keyboard: [[{ text: `✅ نعم، احذف الخاملين (${days} يوم)`, callback_data: `ad|purgeconfirm|${days}` }, { text: "❌ إلغاء", callback_data: "ad|purgecancel" }]] } });
-      return;
-    }
-    if (text === "/resetuser" || text.startsWith("/resetuser ")) {
-      const id = text.slice("/resetuser".length).trim();
-      if (!/^\d+$/u.test(id)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /resetuser <user_id> — يحذف بيانات المستخدم ليعيد التسجيل من الصفر." }); return; }
-      const result = await storeCall(env, { op: "resetuser", userId: id });
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: result?.ok ? `✅ تم تصفير بيانات المستخدم <code>${escapeHtml(id)}</code>${result.hadName ? " (كان مسجلاً باسم)" : ""}؛ سيعيد التسجيل في أول رسالة.` : "❌ المستخدم غير موجود في التخزين.", parse_mode: "HTML" });
-      return;
-    }
-    if (text === "/pinhere" || text.startsWith("/pin ")) {
-      const target = text === "/pinhere" ? message.reply_to_message : null;
-      const idToPin = target?.message_id ?? Number(text.slice("/pin ".length).trim());
-      if (!idToPin) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /pin <message_id>، أو رد على رسالة بـ /pinhere. أضف البوت مشرفًا في المجموعة بصلاحية التثبيت." }); return; }
-      const result = await telegram(env, "pinChatMessage", { chat_id: message.chat.id, message_id: idToPin, disable_notification: false });
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: result?.ok ? "📌 تم تثبيت الرسالة." : `❌ تعذّر التثبيت: ${result?.description ?? "خطأ غير معروف"}` });
-      return;
-    }
-    if (text === "/unpin") {
-      const result = await telegram(env, "unpinAllChatMessages", { chat_id: message.chat.id });
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: result?.ok ? "📌 تم فك كل الرسائل المثبتة." : `❌ تعذّر: ${result?.description ?? "خطأ"}` });
-      return;
-    }
-    if (text === "/health" || text === "/healthcheck") { await sendHealthCheck(env, message.chat.id); return; }
-    if (text === "/uptime") { await sendUptime(env, message.chat.id); return; }
-    if (text === "/note" || text.startsWith("/note ")) {
-      const note = text.slice("/note".length).trim();
-      if (!note) {
-        const all = await adminNotes(env);
-        const mine = all[String(userId)];
-        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: mine ? `📝 ملاحظتك المحفوظة:\n${escapeHtml(mine.note)}\n(${mine.at})\nللحذف: /note حذف` : "لا توجد ملاحظة محفوظة.\n✏️ الاستخدام: /note نص الملاحظة", parse_mode: "HTML" });
-        return;
-      }
-      if (/^حذف$/u.test(note)) { await setAdminNote(env, userId, null); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم حذف ملاحظتك." }); return; }
-      await setAdminNote(env, userId, note);
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم حفظ ملاحظتك. اعرضها بـ /note" });
-      return;
-    }
-    if (text === "/exportuserscsv") { await exportUsersCsv(env, message.chat.id); return; }
-    if (text === "/reply" || text.startsWith("/reply ")) { await handleAdminReply(env, message, text); return; }
-    if (text === "/card_hide" || text.startsWith("/card_hide ")) {
-      await setCardVisibility(env, message.chat.id, text.slice("/card_hide".length), false);
-      return;
-    }
-    if (text === "/card_show" || text.startsWith("/card_show ")) {
-      await setCardVisibility(env, message.chat.id, text.slice("/card_show".length), true);
-      return;
-    }
-    if (text === "/setdrive" || text.startsWith("/setdrive ")) {
-      await setDriveConfig(env, message, text.slice("/setdrive".length).trim());
-      return;
-    }
-    if (text === "/record" || text === "/record_voice") {
-      await beginVoiceRecording(env, message.chat.id, userId, admin ?? {});
-      return;
-    }
-    if (text === "/record_choose" || text === "/record_select") {
-      await beginVoiceChoice(env, message.chat.id, userId, admin ?? {});
-      return;
-    }
-    if (text === "/setarchive" || text.startsWith("/setarchive ")) {
-      await setArchiveChat(env, message, text.slice("/setarchive".length));
-      return;
-    }
-    if (text === "/voice_delete_all") {
-      await askDeleteManyVoices(env, message.chat.id, userId, admin ?? {}, "", true);
-      return;
-    }
-    if (text === "/voice_delete_many" || text.startsWith("/voice_delete_many ")) {
-      await askDeleteManyVoices(env, message.chat.id, userId, admin ?? {}, text.slice("/voice_delete_many".length));
-      return;
-    }
-    if (text === "/voice_delete" || text.startsWith("/voice_delete ")) {
-      await askDeleteVoice(env, message.chat.id, text.slice("/voice_delete".length));
-      return;
-    }
-    if (text === "/record_stop") {
-      await stopVoiceRecording(env, message.chat.id, userId, admin ?? {});
-      return;
-    }
-    if (await handleAdminFlow(env, message, userId, admin, text)) return;
-    if (admin?.adminFlow?.kind === "uploadaudio" && (message.voice || message.audio)) {
-      await uploadAdminAudio(env, message, userId, admin);
-      return;
-    }
-    if (admin?.voiceRec && (message.voice || message.audio)) {
-      await captureVoiceRecording(env, message, userId, admin, ctx);
-      return;
-    }
-    if (admin?.voicePick && text && !text.startsWith("/")) {
-      const view = await renderVoiceWordSuggestions(text, env);
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: view.text, ...(view.reply_markup ? { reply_markup: view.reply_markup } : {}) });
-      return;
-    }
-    if (admin?.bc === "await" && !text.startsWith("/")) {
-      // tpl_name flow: capture the message as a broadcast template content, then confirm.
-      if (admin?.adminFlow?.kind === "tpl_name") {
-        const name = String(admin.adminFlow.name ?? "افتراضي");
-        await storeCall(env, { op: "template_save", key: name, fromChat: message.chat.id, messageId: message.message_id });
-        await clearAdminFlow(env, userId);
-        await saveUser(env, userId, { ...(admin ?? {}), bc: undefined });
-        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `🧷 تم حفظ القالب «${escapeHtml(name)}». أرسله للمستخدمين في أي وقت بـ /tplsend ${name}.`, parse_mode: "HTML" });
-        return;
-      }
-      await captureBroadcast(env, message, userId, admin);
-      return;
-    }
-    // ---- Batch 4 admin commands ----
-    if (text === "/feature" || text.startsWith("/feature ")) {
-      const arg = text.slice("/feature".length).trim();
-      if (!arg) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: await featureFlagsText(env), parse_mode: "HTML" }); return; }
-      const parts = arg.split(/\s+/u); const flag = parts[0]; const on = parts[1] ?? "on";
-      if (!Object.prototype.hasOwnProperty.call(FEATURE_DEFAULTS, flag)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `❌ ميزة غير معروفة. المتاحة: ${Object.keys(FEATURE_DEFAULTS).join(", ")}` }); return; }
-      await setFeatureFlag(env, flag, on !== "off"); await logAdminAction(env, userId, "feature", `${flag}=${on}`);
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ ميزة «${flag}» ${on !== "off" ? "مفعّلة" : "موقوفة"}.` }); return;
-    }
-    if (text === "/blacklist" || text.startsWith("/blacklist ")) {
-      const arg = text.slice("/blacklist".length).trim();
-      if (!arg) { const list = await blacklistedWords(env); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: list.length ? `🚫 <b>الكلمات المحظورة</b> (${list.length}):\n${list.map((w) => `• ${escapeHtml(w)}`).join("\n")}` : "✅ لا توجد كلمات محظورة.\n/blacklist add <كلمة>", parse_mode: "HTML" }); return; }
-      const parts = arg.split(/\s+/u); const sub = parts[0]; const word = parts.slice(1).join(" ");
-      if (sub === "add" && word) { await addBlacklist(env, word); await logAdminAction(env, userId, "blacklist_add", word); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ أُضيفت «${escapeHtml(word.slice(0, 40))}» إلى القائمة السوداء.` }); }
-      else if (sub === "remove" && word) { await removeBlacklist(env, word); await logAdminAction(env, userId, "blacklist_remove", word); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ أُزيلت «${escapeHtml(word.slice(0, 40))}».` }); }
-      else await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ /blacklist add <كلمة> | remove <كلمة> | list" });
-      return;
-    }
-    if (text === "/whitelist" || text.startsWith("/whitelist ")) {
-      const arg = text.slice("/whitelist".length).trim();
-      if (!arg) { const mode = await whitelistModeOn(env); const list = await whitelistUsers(env); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `الوضع: ${mode ? "🟢 مفعّل (فعلًا القائمة البيضاء فقط)" : "🔴 متوقف"}\nالمستخدمون (${list.length}): ${list.map((id) => `<code>${escapeHtml(id)}</code>`).join(", ") || "لا يوجد"}\n/whitelist on|off | add <id> | remove <id>`, parse_mode: "HTML" }); return; }
-      const parts = arg.split(/\s+/u); const sub = parts[0];
-      if (sub === "on") { await setWhitelistMode(env, true); await logAdminAction(env, userId, "whitelist_on"); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم تفعيل وضع القائمة البيضاء. فقط المستخدمون المدرجون والأدمن يمكنهم استخدام البوت." }); }
-      else if (sub === "off") { await setWhitelistMode(env, false); await logAdminAction(env, userId, "whitelist_off"); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إيقاف وضع القائمة البيضاء." }); }
-      else if (sub === "add" && /^\d+$/u.test(parts[1] ?? "")) { await addWhitelistUser(env, parts[1]); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ أُضيف <code>${escapeHtml(parts[1])}</code>.` }); }
-      else if (sub === "remove" && /^\d+$/u.test(parts[1] ?? "")) { await removeWhitelistUser(env, parts[1]); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ أُزيل <code>${escapeHtml(parts[1])}</code>.` }); }
-      else await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ /whitelist on|off | add <id> | remove <id>" });
-      return;
-    }
-    if (text === "/clearcache") { invalidateAllCaches(); await logAdminAction(env, userId, "clearcache"); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم مسح كل الكاش (مستخدمون، أوامر، ميزات، قوالب، إلخ)." }); return; }
-    if (text === "/msg" || text.startsWith("/msg ")) {
-      const arg = text.slice("/msg".length).trim();
-      const match = /^(\d+)\s+([\s\S]+)$/u.exec(arg);
-      if (!match) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /msg <user_id> <نص الرسالة>" }); return; }
-      const r = await telegram(env, "sendMessage", { chat_id: match[1], text: match[2].slice(0, 3500) });
-      await logAdminAction(env, userId, "msg", match[1]);
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: r?.ok ? "✅ تم إرسال الرسالة." : `❌ فشل: ${r?.description ?? "unknown"}` }); return;
-    }
-    if (text === "/topusers") { await sendTopUsersReport(env, message.chat.id); return; }
-    if (text === "/hourly") { await sendHourlyReport(env, message.chat.id); return; }
-    if (text === "/integrity") { await sendIntegrityReport(env, message.chat.id); return; }
-    if (text === "/nopronounce" || text.startsWith("/nopronounce")) { await sendMissingPronounceReport(env, message.chat.id, Number(text.split(/\s+/u)[1]) || 30); return; }
-    if (text === "/noaudio" || text.startsWith("/noaudio")) { await sendMissingAudioReport(env, message.chat.id, Number(text.split(/\s+/u)[1]) || 30); return; }
-    if (text === "/findempty" || text.startsWith("/findempty ")) { await sendFindEmptyReport(env, message.chat.id, text.slice("/findempty".length).trim()); return; }
-    if (text === "/livesearch") { await sendLiveSearchesReport(env, message.chat.id); return; }
-    if (text === "/exportsearch") { await exportSearchHistoryCsv(env, message.chat.id); return; }
-    if (text === "/resetstats") { await resetAnalyticsData(env, message.chat.id); await logAdminAction(env, userId, "resetstats"); return; }
-    if (text === "/adminaudit") { await sendAdminAuditReport(env, message.chat.id); return; }
-    if (text === "/setbanmsg" || text.startsWith("/setbanmsg ")) {
-      const arg = text.slice("/setbanmsg".length).trim();
-      if (!arg) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `الرسالة الحالية: ${escapeHtml(await customBanMessage(env)) || "(الافتراضية)"}\n✏️ /setbanmsg <نص الرسالة> | /setbanmsg reset` }); return; }
-      if (arg === "reset") { await setBanMessage(env, ""); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تمت إعادة رسالة الحظر إلى الافتراضية." }); }
-      else { await setBanMessage(env, arg); await logAdminAction(env, userId, "setbanmsg"); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم حفظ رسالة الحظر الجديدة." }); }
-      return;
-    }
-    if (text === "/setmaintmsg" || text.startsWith("/setmaintmsg ")) {
-      const arg = text.slice("/setmaintmsg".length).trim();
-      if (!arg) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `الرسالة الحالية: ${escapeHtml(await customMaintenanceMessage(env)) || "(الافتراضية)"}\n✏️ /setmaintmsg <نص> | /setmaintmsg reset` }); return; }
-      if (arg === "reset") { await setMaintenanceMessage(env, ""); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تمت إعادة رسالة الصيانة إلى الافتراضية." }); }
-      else { await setMaintenanceMessage(env, arg); await logAdminAction(env, userId, "setmaintmsg"); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم حفظ رسالة الصيانة الجديدة." }); }
-      return;
-    }
-    if (text === "/slowmode" || text.startsWith("/slowmode ")) {
-      const arg = text.slice("/slowmode".length).trim().toLowerCase();
-      const cfg = await slowModeConfig(env);
-      if (!arg) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `الوضع: ${cfg.on ? `🟢 مفعّل (${cfg.seconds} ثانية بين كل بحث)` : "🔴 متوقف"}\n/slowmode on | off | <ثواني>` }); return; }
-      if (arg === "on") { await setSlowModeConfig(env, { on: true, seconds: cfg.seconds }); await logAdminAction(env, userId, "slowmode_on"); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم تفعيل الوضع البطيء: ${cfg.seconds} ثانية بين كل بحث (للغير أدمن).` }); }
-      else if (arg === "off") { await setSlowModeConfig(env, { on: false, seconds: cfg.seconds }); await logAdminAction(env, userId, "slowmode_off"); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إيقاف الوضع البطيء." }); }
-      else if (/^\d+$/u.test(arg)) { const s = Math.max(1, Math.min(60, Number(arg))); await setSlowModeConfig(env, { on: cfg.on, seconds: s }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم ضبط مدة الوضع البطيء على ${s} ثانية.` }); }
-      else await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ /slowmode on | off | <ثواني 1-60>" });
-      return;
-    }
-    if (text === "/testbroadcast") {
-      const admins = adminIds(env);
-      for (const id of admins) await telegram(env, "sendMessage", { chat_id: id, text: "🧪 <b>رسالة تجريبية من الإرسال الجماعي</b>\nإذا رأيت هذه الرسالة، فإن الإرسال الجماعي يعمل بشكل صحيح.", parse_mode: "HTML" }).catch(() => null);
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم إرسال رسالة تجريبية إلى ${admins.length} أدمن.` }); return;
-    }
-    if (text === "/bcpause") { await setBroadcastControl(env, { paused: true }); await logAdminAction(env, userId, "bcpause"); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⏸️ تم إيقاف الإرسال الجماعي مؤقتًا (سيتوقف عند المستلم التالي)." }); return; }
-    if (text === "/bcresume") { await setBroadcastControl(env, { paused: false }); await logAdminAction(env, userId, "bcresume"); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "▶️ تم استئناف الإرسال الجماعي." }); return; }
-    if (text === "/bccancel") {
-      if (env.USERS) await storeCall(env, { op: "put", key: BROADCAST_CTRL_KEY, value: { paused: true, cancel: true } });
-      await logAdminAction(env, userId, "bccancel");
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🛑 تم طلب إلغاء الإرسال الجماعي. سيتوقف قريبًا." }); return;
-    }
-    if (text === "/importusers" || text.startsWith("/importusers")) {
-      if (!env.USERS) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ تخزين المستخدمين غير مفعّل." }); return; }
-      const arg = text.slice("/importusers".length).trim();
-      if (arg) { await importUserIds(env, message.chat.id, arg); return; }
-      await setAdminFlow(env, userId, { kind: "importusers" });
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "📥 أرسل الآن قائمة معرّفات المستخدمين (رقم في كل سطر أو مفصولة بفواصل/مسافات).\nستُسجّل دفعة واحدة في قاعدة بيانات البوت للإرسال الجماعي." });
-      return;
-    }
-    if (text === "/importsheet" || text.startsWith("/importsheet ")) {
-      if (!env.USERS) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ تخزين المستخدمين غير مفعّل." }); return; }
-      const arg = text.slice("/importsheet".length).trim();
-      if (!arg) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /importsheet <رابط_الورقة> [اسم_التبويب]\nمثال: /importsheet https://docs.google.com/spreadsheets/d/XXXX/edit bot\nيستورد المعرّفات من العمود الأول." }); return; }
-      await importFromSheet(env, message.chat.id, arg);
+    if (text === "/synccancel") {
+      if (env.USERS) await storeCall(env, { op: "sync_cancel" });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🛑 تم إيقاف المزامنة التلقائية." });
       return;
     }
   }
