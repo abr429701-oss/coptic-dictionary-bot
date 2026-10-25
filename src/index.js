@@ -2863,12 +2863,23 @@ async function saveDictionaryNew(env, callback) {
   const values = [...(flow.values ?? [])];
   while (values.length < flow.headers.length) values.push("");
   if (!String(values[0] ?? "").trim()) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ العمود A (الكلمة القبطية) مطلوب قبل الحفظ. اضغط عمود A وأدخل الكلمة." }); return; }
+  if (!String(values[2] ?? "").trim()) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ العمود C (المعنى) مطلوب قبل الحفظ. اضغط عمود C وأدخل المعنى." }); return; }
   const config = await driveConfig(env);
   if (!config) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ لم يتم ربط Google Sheets؛ لا يمكن إضافة الصف." }); return; }
   let result;
   try { result = await callAppsScript(config, { action: "dictionary_append", values, by: { id: "813894692" } }); }
   catch (error) { result = { ok: false, error: error instanceof Error ? error.message : "تعذّر الاتصال بالشيت" }; }
-  if (!result.ok) { await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ لم تتم الإضافة: ${result.error || "خطأ غير معروف"}` }); return; }
+  if (!result.ok) {
+    const err = String(result.error ?? "");
+    // Old deployed Apps Script falls through to upload_() and reports "audio_base64 is missing";
+    // the fixed Code.gs reports "unknown action". Both mean: redeploy is required.
+    if (err.includes("audio_base64") || err.includes("unknown action")) {
+      await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ لم تتم الإضافة: نسخة Apps Script المنشورة قديمة. يرجى فتح Google Apps Script ونشر (Deploy) ملف Code.gs مرة أخرى (New deployment) لإضافة دعم إضافة الكلمات." });
+    } else {
+      await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ لم تتم الإضافة: ${err || "خطأ غير معروف"}` });
+    }
+    return;
+  }
   // Add the new record to the in-memory array so it is immediately searchable.
   const record = { id: nextTempId() };
   for (let i = 0; i < DICTIONARY_LOCAL_FIELDS.length; i += 1) {

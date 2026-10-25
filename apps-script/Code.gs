@@ -58,7 +58,11 @@ function doPost(e) {
       const senderId = body.by && body.by.id != null ? String(body.by.id) : "";
       if (senderId !== String(CONFIG.ADMIN_ID)) return json_({ ok: false, error: "unauthorized" });
     }
-    return json_(upload_(body));
+    // Only the real voice-upload action may reach upload_() (it requires audio_base64).
+    // Any other (newer) action on an old deployed version must give a clear "redeploy" error
+    // instead of silently falling through to upload_() and reporting "audio_base64 is missing".
+    if (body.action === "upload") return json_(upload_(body));
+    return json_({ ok: false, error: "unknown action: " + String(body.action) + " — redeploy Apps Script (Code.gs)" });
   } catch (error) {
     return json_({ ok: false, error: String(error && error.message ? error.message : error) });
   }
