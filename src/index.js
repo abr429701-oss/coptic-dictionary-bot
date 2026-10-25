@@ -2084,7 +2084,7 @@ function userReplyKeyboardMarkup() {
 }
 
 function userMainKeyboardMarkup() {
-  return { keyboard: [["⌨️ الكيبورد القبطي", "📞 تواصل مع الإدارة"], ["🎲 كلمة عشوائية", "🏆 المتصدرون"]], resize_keyboard: true, is_persistent: true };
+  return { keyboard: [["⌨️ الكيبورد القبطي", "📞 تواصل مع الإدارة"], ["🎲 كلمة عشوائية"]], resize_keyboard: true, is_persistent: true };
 }
 
 async function sendWelcome(env, chatId, name) {
@@ -4452,10 +4452,10 @@ async function handleAdminFlow(env, message, userId, user, text) {
   else if (flow === "deletemany") await askDeleteManyVoices(env, message.chat.id, userId, user, text);
   else if (flow === "cardhide") await setCardVisibility(env, message.chat.id, text, false);
   else if (flow === "cardshow") await setCardVisibility(env, message.chat.id, text, true);
-  else if (flow === "findempty_wait") { await clearAdminFlow(env, userId); await sendFindEmptyReport(env, message.chat.id, text); return true; }
-  else if (flow === "importusers") { await clearAdminFlow(env, userId); await importUserIds(env, message.chat.id, text); return true; }
-  else if (flow === "replyto") { await clearAdminFlow(env, userId); await sendReplyToUser(env, message.chat.id, flow.target, text); return true; }
-  else if (flow === "bulk_add") { await clearAdminFlow(env, userId); await bulkAddDictionaryWords(env, message.chat.id, text); return true; }
+  else if (flow === "findempty_wait" || flow.kind === "findempty_wait") { await clearAdminFlow(env, userId); await sendFindEmptyReport(env, message.chat.id, text); return true; }
+  else if (flow === "importusers" || flow.kind === "importusers") { await clearAdminFlow(env, userId); await importUserIds(env, message.chat.id, text); return true; }
+  else if (flow === "replyto" || flow.kind === "replyto") { await clearAdminFlow(env, userId); await sendReplyToUser(env, message.chat.id, flow.target ?? flow, text); return true; }
+  else if (flow === "bulk_add" || flow.kind === "bulk_add") { await clearAdminFlow(env, userId); await bulkAddDictionaryWords(env, message.chat.id, text); return true; }
   return true;
 }
 async function handleAdminDashboardCallback(env, callback, ctx) {
@@ -4745,7 +4745,6 @@ async function handleUpdate(update, env, ctx) {
   let text = String(message.text ?? "").trim();
   if (text === "📞 تواصل مع الإدارة") text = "/contact";
   else if (text === "🎲 كلمة عشوائية") text = "/random";
-  else if (text === "🏆 المتصدرون") text = "/leaderboard";
   const userId = message.from?.id ?? message.chat.id;
   const isPrivate = (message.chat.type ?? "private") === "private";
   // Pro feature: per-user rate limit (sliding window). Admins get a higher limit.
@@ -5508,7 +5507,8 @@ async function handleUpdate(update, env, ctx) {
     return;
   }
   if (text) {
-    const user = known ?? await getUser(env, userId);
+    // Fresh read (not the registeredCache snapshot) so awaitingContact / awaitingName are never stale.
+    const user = await getUser(env, userId);
     if (user?.awaitingContact) {
       await saveUser(env, userId, { ...user, awaitingContact: undefined });
       await deliverContactMessage(env, message, userId, text);
