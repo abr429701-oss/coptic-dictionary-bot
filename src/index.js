@@ -2137,6 +2137,7 @@ function buildCommandsHelpText(env, userId) {
     lines.push("/testbroadcast — إرسال تجريبي | /bcpause | /bcresume | /bccancel — التحكم في البث");
     lines.push("/importusers — استيراد قائمة معرّفات مستخدمين قديمة دفعة واحدة");
     lines.push("/importsheet <رابط> [تبويب] — استيراد المعرّفات من ورقة Google مباشرة");
+    lines.push("/recoverusers — استرجاع مستخدمي فترة الصيانة من السجلات ورفعهم للشيت");
     lines.push("/syncall — مزامنة جميع المستخدمين للشيت (يكمل من حيث توقف) | /syncreset — تصفير المؤشر");
   }
   return lines.join("\n");
@@ -3684,6 +3685,62 @@ async function importFromSheet(env, chatId, arg) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ فشل جلب الورقة: ${error instanceof Error ? error.message : "unknown"}.\nتأكد أن الورقة عامة (أي شخص لديه الرابط يمكنه الاطلاع).` });
   }
 }
+
+// Recovers users who contacted the bot during a maintenance window: every text search was logged
+// (history/gamify/recent) before the maintenance early-return, but their ids were never registered.
+// Users who only sent /start and nothing else left no trace and cannot be recovered automatically.
+async function recoverMissingUsers(env, chatId, ctx) {
+  if (!env.USERS) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تخزين المستخدمين غير مفعّل." }); return; }
+  await telegram(env, "sendMessage", { chat_id: chatId, text: "⏳ جارٍ فحص السجلات لاسترجاع مستخدمي فترة الصيانة…" });
+  const candidateIds = new Set();
+  const namesById = new Map();
+  const addId = (id, name) => {
+    const s = String(id ?? "");
+    if (/^\d{5,}$/.test(s)) {
+      candidateIds.add(s);
+      if (name && !namesById.has(s)) namesById.set(s, String(name).slice(0, 60));
+    }
+  };
+  // 1) Persisted per-user search history (every text search was flushed here before the early-return).
+  try {
+    const history = ((await storeCall(env, { op: "get", key: "history:snapshot" })).value ?? {});
+    for (const id of Object.keys(history)) addId(id);
+  } catch { /* non-critical */ }
+  // 2) Persisted gamify scores (logged for every text search while gamify was on; carries the display name).
+  try {
+    const gamify = ((await storeCall(env, { op: "get", key: "gamify:scores" })).value ?? {});
+    for (const [id, entry] of Object.entries(gamify)) addId(id, entry?.name);
+  } catch { /* non-critical */ }
+  // 3) In-memory buffers of the current isolate (recent searches, live history, gamify, slow-mode).
+  for (const s of recentSearches) addId(s.userId, s.name);
+  for (const id of userHistory.keys()) addId(id);
+  for (const [id, entry] of gamifyScores) addId(id, entry?.name);
+  for (const id of lastUserSearchAt.keys()) addId(id);
+  const ids = [...candidateIds].slice(0, 5000);
+  if (!ids.length) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "📭 لم أجد أي معرفات مستخدمين في السجلات.\n\n📌 من أرسلوا /start فقط دون أي بحث نصي أثناء الصيانة لا يترك أثرًا في السجلات ولا يمكن استرجاعهم آليًا. من الآن فصاعدًا يتم تسجيل كل مستخدم فور دخوله حتى أثناء الصيانة." });
+    return;
+  }
+  const result = await storeCall(env, { op: "bulk_import_users", ids }).catch((e) => ({ error: String(e) }));
+  if (result?.error) { await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ فشل التسجيل في السيستم: ${result.error}` }); return; }
+  // Push every recovered id to the sheet in the background (upsert by id, so already-present rows are harmless).
+  const now = new Date().toISOString();
+  const rows = ids.map((id) => userSheetRow(id, { firstSeen: now, tgName: namesById.get(id) || "" }));
+  if (ctx) inBackground(ctx, pushUsers(env, rows).catch((e) => console.error("Recover pushUsers failed", e instanceof Error ? e.message : "unknown")));
+  await logAdminAction(env, chatId, "recoverusers", `${ids.length} candidates, imported ${result?.imported ?? 0}`);
+  const lines = [
+    "♻️ <b>تمت استرجاع مستخدمي فترة الصيانة</b>",
+    "",
+    `🔍 معرفات وُجدت في السجلات: <b>${ids.length.toLocaleString("en-US")}</b>`,
+    `✅ سُجلوا حديثًا في السيستم: <b>${Number(result?.imported ?? 0).toLocaleString("en-US")}</b>`,
+    `⏭️ كانوا مسجلين مسبقًا: <b>${Number(result?.skipped ?? 0).toLocaleString("en-US")}</b>`,
+    ctx ? "📤 جارٍ رفعهم جميعًا إلى الشيت (تبويب users) في الخلفية." : "📤 تم تجهيزهم للرفع إلى الشيت.",
+    "",
+    "📌 ملاحظة مهمة: من أرسلوا /start فقط دون أي بحث نصي أثناء الصيانة لا يترك أثرًا في السجلات، فلا يمكن استرجاعهم آليًا. من الآن فصاعدًا يتم تسجيل كل مستخدم فور دخوله حتى أثناء الصيانة، فلن تتكرر المشكلة.",
+  ];
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML" });
+}
+
 async function featureFlagsText(env) {
   const flags = await featureFlags(env);
   const lines = ["🎚 <b>مفاتيح الميزات</b>", ""];
@@ -4198,6 +4255,7 @@ function adminMenuMarkup(page = "home") {
     [{ text: "📊 تحليلات البحث", callback_data: "ad|analytics" }, { text: "📋 سجل التدقيق", callback_data: "ad|auditlog" }],
     [{ text: "👥 المستخدمون", callback_data: "ad|users" }, { text: "💡 اقتراحات الكلمات", callback_data: "ad|suggestions" }],
     [{ text: "⚠️ سجل الأخطاء", callback_data: "ad|errors" }, { text: "🔧 وضع الصيانة", callback_data: "ad|maintoggle" }],
+    [{ text: "♻️ استرجاع مستخدمي الصيانة", callback_data: "ad|recover" }],
     [{ text: "📦 تصدير القاموس JSON", callback_data: "ad|exportdict" }, { text: "👥 تصدير المستخدمين CSV", callback_data: "ad|exportusers" }],
     [{ text: "💾 نسخة احتياطية", callback_data: "ad|backup" }, { text: "🔄 تحديث الأوامر", callback_data: "ad|commands" }],
     [{ text: "🖼 إخفاء بطاقة كلمة", callback_data: "ad|cardhide" }, { text: "🖼 إظهار بطاقة كلمة", callback_data: "ad|cardshow" }],
@@ -4357,6 +4415,7 @@ async function handleAdminDashboardCallback(env, callback, ctx) {
   if (action === "errors") { await sendErrorLogReport(env, chatId); return; }
   if (action === "suggestions") { await sendSuggestionsList(env, chatId); return; }
   if (action === "maintoggle") { const on = !(await maintenanceOn(env)); await setMaintenance(env, on); await telegram(env, "sendMessage", { chat_id: chatId, text: on ? "🔧 تم تفعيل وضع الصيانة." : "✅ تم إيقاف وضع الصيانة." }); return; }
+  if (action === "recover") { await recoverMissingUsers(env, chatId, ctx); return; }
   const prompts = { deleteone: ["🗑 أرسل كلمة واحدة لحذف تسجيلها:", "deleteone"], deletemany: ["🗑 أرسل الكلمات مفصولة بعلامة | أو فاصلة:", "deletemany"], setdrive: ["🔗 أرسل رابط Apps Script المنتهي بـ /exec:", "setdrive"], setarchive: ["📦 أرسل رقم المجموعة، أو off لإيقاف الأرشيف:", "setarchive"], cardhide: ["🖼 أرسل الكلمة لإخفاء بطاقتها:", "cardhide"], cardshow: ["🖼 أرسل الكلمة لإظهار بطاقتها:", "cardshow"] };
   if (prompts[action]) { await setAdminFlow(env, callback.from.id, prompts[action][1]); await telegram(env, "sendMessage", { chat_id: chatId, text: prompts[action][0] }); return; }
   if (action === "resetdrive") { await setDriveConfig(env, { chat: { id: chatId } }, "reset"); return; }
@@ -4559,6 +4618,9 @@ async function handleUpdate(update, env, ctx) {
   if (text && !text.startsWith("/")) trackSearchHistory(userId, text);
   if (text && !text.startsWith("/")) pushRecentSearch(userId, displayName(message.from), text);
   if (text && !text.startsWith("/") && await gamifyOn(env)) { trackGamify(userId, displayName(message.from)); inBackground(ctx, flushGamify(env)); }
+  // Register the user BEFORE any banned/whitelist/maintenance early-return, so their id is
+  // always recorded in the user store and pushed to the sheet — even during maintenance.
+  const registerPromise = registerOnFirstContact(env, message, userId, ctx);
   // Admin feature: banned users get no response; maintenance mode blocks non-admins.
   // Batch 4: whitelist mode, custom ban/maintenance messages, slow mode.
   const [banned, maint, wlMode, wlList, banMsg, maintMsg, slowCfg] = await Promise.all([
@@ -4566,15 +4628,18 @@ async function handleUpdate(update, env, ctx) {
     customBanMessage(env), customMaintenanceMessage(env), slowModeConfig(env),
   ]);
   if (banned) {
+    await registerPromise.catch(() => null);
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: banMsg || "🚫 تم حظرك من استخدام البوت. إذا كنت تعتقد أن ذلك خطأ، تواصل مع المشرف." });
     return;
   }
   const adminNow = isAdmin(env, userId);
   if (!adminNow && wlMode && !wlList.includes(String(userId))) {
+    await registerPromise.catch(() => null);
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🔒 البوت في وضع القائمة البيضاء حاليًا. فقط المستخدمون المصرح لهم يمكنهم الاستخدام." });
     return;
   }
   if (!adminNow && maint) {
+    await registerPromise.catch(() => null);
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: maintMsg || "🔧 بوت القاموس القبطي الناطق تحت الصيانة حالياً نظراً للاضافة الكبيرة القادمة قريباً، وسيتم تنبيهك عند الاتاحة الكاملة، شكرًا لتفهمك." });
     return;
   }
@@ -4582,7 +4647,7 @@ async function handleUpdate(update, env, ctx) {
   if (!adminNow && slowCfg.on && text && !text.startsWith("/") && message.chat.type === "private") {
     const last = lastUserSearchAt.get(String(userId)) ?? 0;
     const wait = slowCfg.seconds * 1000 - (Date.now() - last);
-    if (wait > 0) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `⏳ الوضع البطيء مفعّل. انتظر ${Math.ceil(wait / 1000)} ثانية قبل البحث التالي.` }); return; }
+    if (wait > 0) { await registerPromise.catch(() => null); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `⏳ الوضع البطيء مفعّل. انتظر ${Math.ceil(wait / 1000)} ثانية قبل البحث التالي.` }); return; }
     lastUserSearchAt.set(String(userId), Date.now());
   }
   // Batch 3: notify admins of group joins/leaves, then let the daily features tick.
@@ -4599,11 +4664,11 @@ async function handleUpdate(update, env, ctx) {
     const replies = await (featureEnabled(env, "autoreply") ? autoReplies(env) : Promise.resolve([]));
     const normalizedText = normalize(text);
     const hit = replies.find((r) => { const t = normalize(r.trigger); return t && (normalizedText === t || normalizedText.startsWith(`${t} `)); });
-    if (hit) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: String(hit.reply).slice(0, 3000) }); return; }
+    if (hit) { await registerPromise.catch(() => null); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: String(hit.reply).slice(0, 3000) }); return; }
     const limit = await dailySearchLimit(env);
     if (limit) {
       const used = bumpSearchCount(userId);
-      if (used > limit) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `⏳ وصلت إلى الحد اليومي للبحث (${limit} بحثًا). حاول غدًا أو تواصل مع المشرف عبر /contact.` }); return; }
+      if (used > limit) { await registerPromise.catch(() => null); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `⏳ وصلت إلى الحد اليومي للبحث (${limit} بحثًا). حاول غدًا أو تواصل مع المشرف عبر /contact.` }); return; }
     }
   }
   if (text === "/" || text === "/start" || text.startsWith("/start ") || text === "/admin") inBackground(ctx, ensureCommandMenu(env, userId));
@@ -4618,7 +4683,7 @@ async function handleUpdate(update, env, ctx) {
       return null;
     })
     : null;
-  const known = await registerOnFirstContact(env, message, userId, ctx);
+  const known = await registerPromise;
   if (text === "⌨️ الكيبورد القبطي" || text === "/keyboard" || text === "/kbd" || text === "/k") {
     if (!await featureEnabled(env, "keyboard")) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⌨️ لوحة المفاتيح القبطية معطلة حاليًا من قبل الأدمن." }); return; }
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: keyboardComposerText(""), reply_markup: copticKeyboardMarkup() });
@@ -5185,6 +5250,7 @@ async function handleUpdate(update, env, ctx) {
       await importFromSheet(env, message.chat.id, arg);
       return;
     }
+    if (text === "/recoverusers" || text === "/recover") { await recoverMissingUsers(env, message.chat.id, ctx); return; }
   }
   if (text === "/start" || text.startsWith("/start ")) {
     if (!env.USERS) {
