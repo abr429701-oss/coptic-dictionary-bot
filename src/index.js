@@ -4299,7 +4299,7 @@ async function handleUpdate(update, env, ctx) {
   inBackground(ctx, autoWordOfTheDay(env, message.chat.id, ctx));
   // Batch 3: keyword auto-replies and the daily search limit apply to non-admin text searches.
   if (!isAdmin(env, userId) && text && !text.startsWith("/")) {
-    const replies = await featureEnabled(env, "autoreply") ? autoReplies(env) : Promise.resolve([]);
+    const replies = await (featureEnabled(env, "autoreply") ? autoReplies(env) : Promise.resolve([]));
     const normalizedText = normalize(text);
     const hit = replies.find((r) => { const t = normalize(r.trigger); return t && (normalizedText === t || normalizedText.startsWith(`${t} `)); });
     if (hit) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: String(hit.reply).slice(0, 3000) }); return; }
