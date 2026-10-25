@@ -9,8 +9,9 @@ const PAGE_SIZE = 1;
 const MAX_MESSAGE_LENGTH = 3900;
 const CALLBACK_DATA_MAX_BYTES = 64;
 const DEFAULT_ADMIN_IDS = "813894692"; // owner chat id from data/owner_chat_id.txt; override with ADMIN_CHAT_ID
-const BROADCAST_BATCH_SIZE = 25;
+const BROADCAST_BATCH_SIZE = 4;
 const BROADCAST_BATCH_DELAY_MS = 1200;
+const BROADCAST_DEFAULT_PER_USER_DELAY_MS = 5000;
 const BROADCAST_MAX_TRANSIENT_RETRIES = 5;
 
 // ============================================================================
@@ -224,30 +225,45 @@ async function sendHealthCheck(env, chatId) {
 }
 
 // ---- Contact admin (user) + admin reply ----
-async function handleContactAdmin(env, message, userId, text) {
-  const body = text.slice("/contact".length).trim();
-  if (!body) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /contact رسالتك — ستصل إلى مشرفي البوت." }); return; }
+async function deliverContactMessage(env, message, userId, body) {
   const last = contactCooldown.get(String(userId)) ?? 0;
-  if (Date.now() - last < 60000) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⏳ أرسلت رسالة للتو. انتظر دقيقة قبل رسالة أخرى." }); return; }
+  if (Date.now() - last < 60000) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⏳ أرسلت رسالة للتو. انتظر دقيقة قبل رسالة أخرى." }); return false; }
   contactCooldown.set(String(userId), Date.now());
   if (contactCooldown.size > 5000) contactCooldown.clear();
-  await notifyAdmins(env, [
+  const text = [
     "📬 <b>رسالة من مستخدم</b>",
     `👤 ${escapeHtml(displayName(message.from))}${message.from?.username ? ` (@${escapeHtml(message.from.username)})` : ""}`,
     `🆔 <code>${escapeHtml(String(userId))}</code>`,
-    `💬 ${escapeHtml(body.slice(0, 1000))}`,
-    "",
-    `↩️ للرد: /reply ${escapeHtml(String(userId))} نص الرد`,
-  ].join("\n"));
+    `💬 ${escapeHtml(String(body).slice(0, 1000))}`,
+  ].join("\n");
+  const replyMarkup = { inline_keyboard: [[{ text: "↩️ رد سريع على هذا المستخدم", callback_data: `replyto|${userId}` }]] };
+  for (const id of adminIds(env)) {
+    await telegram(env, "sendMessage", { chat_id: id, text, parse_mode: "HTML", reply_markup: replyMarkup }).catch(() => null);
+  }
   await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ وصلت رسالتك إلى المشرفين، سيتم الرد عليك قريبًا." });
+  return true;
+}
+async function handleContactAdmin(env, message, userId, text) {
+  if (!await featureEnabled(env, "contact")) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "📭 خاصية التواصل مع الأدمن معطلة حاليًا." }); return; }
+  const body = text.slice("/contact".length).trim();
+  if (!body) {
+    const user = (await getUser(env, userId)) ?? {};
+    await saveUser(env, userId, { ...user, awaitingContact: true });
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ اكتب رسالتك الآن وستصل إلى إدارة البوت مباشرة. (/cancel للإلغاء)" });
+    return;
+  }
+  await deliverContactMessage(env, message, userId, body);
+}
+async function sendReplyToUser(env, adminChatId, target, replyText) {
+  const result = await telegram(env, "sendMessage", { chat_id: Number(target), text: `📬 رسالة من إدارة البوت:\n\n${escapeHtml(String(replyText).slice(0, 2500))}`, parse_mode: "HTML" });
+  await telegram(env, "sendMessage", { chat_id: adminChatId, text: result?.ok ? "✅ تم إرسال الرد." : "❌ تعذّر الإرسال — ربما حظر المستخدم البوت." });
 }
 async function handleAdminReply(env, message, text) {
   const parts = text.split(/\s+/u);
   const target = parts[1] ?? "";
   const reply = text.slice("/reply".length + target.length + 1).trim();
-  if (!/^\d+$/u.test(target) || !reply) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /reply <user_id> <نص الرد>" }); return; }
-  const result = await telegram(env, "sendMessage", { chat_id: Number(target), text: `📬 رسالة من إدارة البوت:\n\n${escapeHtml(reply.slice(0, 2500))}`, parse_mode: "HTML" });
-  await telegram(env, "sendMessage", { chat_id: message.chat.id, text: result?.ok ? "✅ تم إرسال الرد." : "❌ تعذّر الإرسال — ربما حظر المستخدم البوت." });
+  if (!/^\d+$/u.test(target) || !reply) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /reply <user_id> <نص الرد>\nأو اضغط زر «↩️ رد سريع» على رسالة المستخدم مباشرة." }); return; }
+  await sendReplyToUser(env, message.chat.id, target, reply);
 }
 
 // ---- Template broadcast confirmation (tpl| callbacks) ----
@@ -1668,6 +1684,7 @@ export class UserStore {
     if (ctrl.paused) { await storage.setAlarm(Date.now() + 15000); return; }
     const batch = job.queue.splice(0, BROADCAST_BATCH_SIZE);
     let delay = BROADCAST_BATCH_DELAY_MS;
+    const perUserDelay = Number(await storage.get("bc:perUserDelay")) || BROADCAST_DEFAULT_PER_USER_DELAY_MS;
     for (let i = 0; i < batch.length; i += 1) {
       const id = batch[i];
       const recordFailure = (reason) => {
@@ -1722,6 +1739,7 @@ export class UserStore {
           job.retryForId = null;
           job.retryCount = 0;
         }
+        await new Promise((r) => setTimeout(r, perUserDelay));
       } else if (result?.error_code === 429) {
         // Telegram asked us to slow down: put the rest back and wait.
         job.queue.unshift(...batch.slice(i));
@@ -2065,6 +2083,10 @@ function userReplyKeyboardMarkup() {
   return { remove_keyboard: true };
 }
 
+function userMainKeyboardMarkup() {
+  return { keyboard: [["⌨️ الكيبورد القبطي", "📞 تواصل مع الإدارة"], ["🎲 كلمة عشوائية", "🏆 المتصدرون"]], resize_keyboard: true, is_persistent: true };
+}
+
 async function sendWelcome(env, chatId, name) {
   const caption = await getWelcomeCaption(env, name);
   try {
@@ -2073,7 +2095,7 @@ async function sendWelcome(env, chatId, name) {
     form.append("chat_id", String(chatId));
     form.append("caption", caption);
     form.append("parse_mode", "HTML");
-    form.append("reply_markup", JSON.stringify(userReplyKeyboardMarkup()));
+    form.append("reply_markup", JSON.stringify(userMainKeyboardMarkup()));
     form.append("photo", new Blob([bytes], { type: "image/jpeg" }), "welcome.jpg");
     const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, { method: "POST", body: form });
     const result = await response.json().catch(() => ({}));
@@ -2083,7 +2105,7 @@ async function sendWelcome(env, chatId, name) {
   } catch (error) {
     console.error("Welcome photo failed", error instanceof Error ? error.message : "unknown error");
   }
-  await telegram(env, "sendMessage", { chat_id: chatId, text: caption, parse_mode: "HTML", reply_markup: userReplyKeyboardMarkup() });
+  await telegram(env, "sendMessage", { chat_id: chatId, text: caption, parse_mode: "HTML", reply_markup: userMainKeyboardMarkup() });
 }
 
 // Organized commands menu (sent as a separate text message because photo captions are limited to 1024 chars).
@@ -2097,6 +2119,7 @@ function buildCommandsHelpText(env, userId) {
     "/keyboard — لوحة مفاتيح قبطية",
     "/learn — تعلم اللغة القبطية",
     "/random — كلمة عشوائية من القاموس",
+    "/contact — تواصل مع إدارة البوت (أو زر «📞 تواصل مع الإدارة»)",
     "💡 اكتب أي كلمة مباشرة للبحث: قبطي / عربي / إنجليزي / يوناني / فرنسي / ألماني.",
   ];
   if (admin) {
@@ -2138,6 +2161,10 @@ function buildCommandsHelpText(env, userId) {
     lines.push("/importusers — استيراد قائمة معرّفات مستخدمين قديمة دفعة واحدة");
     lines.push("/importsheet <رابط> [تبويب] — استيراد المعرّفات من ورقة Google مباشرة");
     lines.push("/recoverusers — استرجاع مستخدمي فترة الصيانة من السجلات ورفعهم للشيت");
+    lines.push("/bulkadd — إضافة عدة كلمات للقاموس دفعة واحدة (سطر لكل كلمة)");
+    lines.push("/userfind <اسم> — البحث عن مستخدم بالاسم مع زر رد سريع (بدون معرف)");
+    lines.push("/blockedusers — قائمة المحظورين مع زر فك الحظر | /configexport — نسخة احتياطية للإعدادات JSON");
+    lines.push("/bcspeed <ثواني> — تأخير الإرسال الجماعي بين كل مستخدم (افتراضي 5 ثوانٍ)");
     lines.push("/syncall — مزامنة جميع المستخدمين للشيت (يكمل من حيث توقف) | /syncreset — تصفير المؤشر");
   }
   return lines.join("\n");
@@ -3741,6 +3768,96 @@ async function recoverMissingUsers(env, chatId, ctx) {
   await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML" });
 }
 
+// Bulk dictionary add: admin pastes many lines at once (coptic|ipa|meaning|en|fr|de|greek|origin|kind).
+async function bulkAddDictionaryWords(env, chatId, rawText) {
+  const config = await driveConfig(env);
+  if (!config) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ لم يتم ربط Google Sheets؛ استخدم /setdrive أولًا." }); return; }
+  const lines = rawText.split(/\r?\n/u).map((l) => l.trim()).filter(Boolean);
+  const rows = [];
+  const skipped = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const parts = lines[i].split(/\s*\|\s*/u).map((p) => (p === "—" || p === "-" ? "" : p.trim()));
+    const [coptic = "", ipa = "", meaning = "", english = "", french = "", german = "", greek = "", origin = "", kind = ""] = parts;
+    if (!coptic || !meaning) { skipped.push(i + 1); continue; }
+    rows.push([coptic, ipa, meaning, english, french, german, greek, "", "", origin, kind]);
+  }
+  if (!rows.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ لم أجد أي صف صالح. كل صف يحتاج على الأقل: قبطي | المعنى.${skipped.length ? ` أسطر تالفة: ${skipped.slice(0, 15).join(", ")}` : ""}` }); return; }
+  let added = 0;
+  let lastError = "";
+  for (let i = 0; i < rows.length; i += 500) {
+    const chunk = rows.slice(i, i + 500);
+    try {
+      const result = await callAppsScript(config, { action: "dictionary_append_batch", rows: chunk, by: { id: "813894692" } });
+      if (!result.ok) { lastError = String(result.error ?? "unknown"); break; }
+      added += chunk.length;
+      for (const r of chunk) {
+        const record = { id: nextTempId() };
+        for (let f = 0; f < DICTIONARY_LOCAL_FIELDS.length; f += 1) {
+          const field = DICTIONARY_LOCAL_FIELDS[f];
+          if (field) record[field] = r[f] ?? "";
+        }
+        records.push(record);
+      }
+    } catch (error) { lastError = error instanceof Error ? error.message : "تعذّر الاتصال بالشيت"; break; }
+  }
+  await logAdminAction(env, chatId, "bulkadd", `${added} words`);
+  await telegram(env, "sendMessage", { chat_id: chatId, text: added
+    ? `✅ تمت إضافة ${added} كلمة إلى القاموس والورقة، وأصبحت قابلة للبحث فورًا.${skipped.length ? `\n⚠️ تم تخطي ${skipped.length} سطر (ناقص قبطي أو معنى): ${skipped.slice(0, 15).join(", ")}${skipped.length > 15 ? "…" : ""}` : ""}${lastError ? `\n❌ توقف عند: ${lastError}` : ""}`
+    : `❌ فشلت الإضافة: ${lastError || "خطأ غير معروف"}` });
+}
+
+// Find users by name/username (no id needed) and offer one-tap reply buttons.
+async function findUsers(env, chatId, query) {
+  if (!env.USERS) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تخزين المستخدمين غير مفعّل." }); return; }
+  const q = normalize(query);
+  const matches = [];
+  let cursor = null;
+  for (let page = 0; page < 40; page += 1) {
+    const result = await storeCall(env, { op: "userpage", cursor, limit: 200 });
+    const list = result?.users ?? [];
+    for (const item of list) {
+      const rec = item.record ?? {};
+      const hay = normalize([rec.name, rec.tgName, rec.username].filter(Boolean).join(" "));
+      if (hay.includes(q)) matches.push({ id: item.id, name: rec.name || rec.tgName || "—", username: rec.username ?? "", blocked: rec.blocked === true });
+    }
+    if (!result?.next) break;
+    cursor = result.next;
+  }
+  if (!matches.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: `🔍 لا توجد نتائج لـ «${escapeHtml(query)}».` }); return; }
+  const lines = [`🔍 نتائج البحث عن «${escapeHtml(query)}» (${matches.length}):`, ""];
+  matches.slice(0, 20).forEach((m, i) => { lines.push(`${i + 1}. ${escapeHtml(String(m.name).slice(0, 30))}${m.username ? ` (@${escapeHtml(m.username)})` : ""} — <code>${escapeHtml(m.id)}</code>${m.blocked ? " 🚫" : ""}`); });
+  const buttons = matches.slice(0, 10).map((m) => [{ text: `↩️ رد: ${String(m.name).slice(0, 18)}`, callback_data: `replyto|${m.id}` }]);
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML", reply_markup: { inline_keyboard: buttons } });
+}
+
+// List blocked users with one-tap unban buttons.
+async function listBlockedUsers(env, chatId) {
+  if (!env.USERS) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تخزين المستخدمين غير مفعّل." }); return; }
+  const blocked = [];
+  let cursor = null;
+  for (let page = 0; page < 40; page += 1) {
+    const result = await storeCall(env, { op: "userpage", cursor, limit: 200 });
+    for (const item of result?.users ?? []) { if (item.record?.blocked === true) blocked.push({ id: item.id, name: item.record.name || item.record.tgName || "—" }); }
+    if (!result?.next) break;
+    cursor = result.next;
+  }
+  if (!blocked.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ لا يوجد مستخدمون محظورون حاليًا." }); return; }
+  const lines = [`🚫 المستخدمون المحظورون (${blocked.length}):`, "", ...blocked.slice(0, 30).map((b, i) => `${i + 1}. ${escapeHtml(String(b.name).slice(0, 30))} — <code>${escapeHtml(b.id)}</code>`)];
+  const buttons = blocked.slice(0, 10).map((b) => [{ text: `✅ فك حظر: ${String(b.name).slice(0, 16)}`, callback_data: `unban|${b.id}` }]);
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML", reply_markup: { inline_keyboard: buttons } });
+}
+
+// Export all bot configuration as a JSON backup file.
+async function exportConfigBackup(env, chatId) {
+  const [flags, bl, wl, wlMode, banMsg, maintMsg, slow, maint, gamify, autoreplies, tpls, searchLimit] = await Promise.all([
+    featureFlags(env), blacklistedWords(env), whitelistUsers(env), whitelistModeOn(env), customBanMessage(env),
+    customMaintenanceMessage(env), slowModeConfig(env), maintenanceOn(env), gamifyOn(env),
+    featureEnabled(env, "autoreply") ? autoReplies(env) : Promise.resolve([]), broadcastTemplates(env), dailySearchLimit(env),
+  ]).catch(() => [{}, [], [], false, "", "", { on: false, seconds: 5 }, false, false, [], {}, 0]);
+  const cfg = { exportedAt: new Date().toISOString(), featureFlags: flags, blacklist: bl, whitelist: wl, whitelistMode: wlMode, banMsg, maintMsg, slowMode: slow, maintenanceOn: maint, gamifyOn: gamify, autoreplies, templates: tpls, dailySearchLimit: searchLimit, extraAdmins: extraAdminsSync };
+  await sendTextFile(env, chatId, "bot-config-backup.json", JSON.stringify(cfg, null, 2), "💾 تم تصدير نسخة احتياطية من إعدادات البوت (JSON).", "application/json");
+}
+
 async function featureFlagsText(env) {
   const flags = await featureFlags(env);
   const lines = ["🎚 <b>مفاتيح الميزات</b>", ""];
@@ -4256,6 +4373,7 @@ function adminMenuMarkup(page = "home") {
     [{ text: "👥 المستخدمون", callback_data: "ad|users" }, { text: "💡 اقتراحات الكلمات", callback_data: "ad|suggestions" }],
     [{ text: "⚠️ سجل الأخطاء", callback_data: "ad|errors" }, { text: "🔧 وضع الصيانة", callback_data: "ad|maintoggle" }],
     [{ text: "♻️ استرجاع مستخدمي الصيانة", callback_data: "ad|recover" }],
+    [{ text: "📥 إضافة دفعة كلمات", callback_data: "ad|bulkadd" }, { text: "🚫 المحظورون", callback_data: "ad|blocked" }],
     [{ text: "📦 تصدير القاموس JSON", callback_data: "ad|exportdict" }, { text: "👥 تصدير المستخدمين CSV", callback_data: "ad|exportusers" }],
     [{ text: "💾 نسخة احتياطية", callback_data: "ad|backup" }, { text: "🔄 تحديث الأوامر", callback_data: "ad|commands" }],
     [{ text: "🖼 إخفاء بطاقة كلمة", callback_data: "ad|cardhide" }, { text: "🖼 إظهار بطاقة كلمة", callback_data: "ad|cardshow" }],
@@ -4336,6 +4454,8 @@ async function handleAdminFlow(env, message, userId, user, text) {
   else if (flow === "cardshow") await setCardVisibility(env, message.chat.id, text, true);
   else if (flow === "findempty_wait") { await clearAdminFlow(env, userId); await sendFindEmptyReport(env, message.chat.id, text); return true; }
   else if (flow === "importusers") { await clearAdminFlow(env, userId); await importUserIds(env, message.chat.id, text); return true; }
+  else if (flow === "replyto") { await clearAdminFlow(env, userId); await sendReplyToUser(env, message.chat.id, flow.target, text); return true; }
+  else if (flow === "bulk_add") { await clearAdminFlow(env, userId); await bulkAddDictionaryWords(env, message.chat.id, text); return true; }
   return true;
 }
 async function handleAdminDashboardCallback(env, callback, ctx) {
@@ -4416,6 +4536,8 @@ async function handleAdminDashboardCallback(env, callback, ctx) {
   if (action === "suggestions") { await sendSuggestionsList(env, chatId); return; }
   if (action === "maintoggle") { const on = !(await maintenanceOn(env)); await setMaintenance(env, on); await telegram(env, "sendMessage", { chat_id: chatId, text: on ? "🔧 تم تفعيل وضع الصيانة." : "✅ تم إيقاف وضع الصيانة." }); return; }
   if (action === "recover") { await recoverMissingUsers(env, chatId, ctx); return; }
+  if (action === "bulkadd") { await setAdminFlow(env, callback.from.id, { kind: "bulk_add" }); await telegram(env, "sendMessage", { chat_id: chatId, text: "📥 أرسل الآن الكلمات، كل كلمة في سطر، مفصولة بـ | بهذا الترتيب:\nقبطي | النطق | المعنى | English | Français | Deutsch | اليوناني | الأصل | النوع\n\nالحقلان المطلوبان: القبطي والمعنى. اكتب — لحقل تريد تركه فاضيًا." }); return; }
+  if (action === "blocked") { await listBlockedUsers(env, chatId); return; }
   const prompts = { deleteone: ["🗑 أرسل كلمة واحدة لحذف تسجيلها:", "deleteone"], deletemany: ["🗑 أرسل الكلمات مفصولة بعلامة | أو فاصلة:", "deletemany"], setdrive: ["🔗 أرسل رابط Apps Script المنتهي بـ /exec:", "setdrive"], setarchive: ["📦 أرسل رقم المجموعة، أو off لإيقاف الأرشيف:", "setarchive"], cardhide: ["🖼 أرسل الكلمة لإخفاء بطاقتها:", "cardhide"], cardshow: ["🖼 أرسل الكلمة لإظهار بطاقتها:", "cardshow"] };
   if (prompts[action]) { await setAdminFlow(env, callback.from.id, prompts[action][1]); await telegram(env, "sendMessage", { chat_id: chatId, text: prompts[action][0] }); return; }
   if (action === "resetdrive") { await setDriveConfig(env, { chat: { id: chatId } }, "reset"); return; }
@@ -4501,6 +4623,30 @@ async function handleUpdate(update, env, ctx) {
     }
     if (String(callback.data ?? "").startsWith("ad|")) {
       await handleAdminDashboardCallback(env, callback, ctx);
+      return;
+    }
+    const replyToMatch = /^replyto\|(\d+)$/u.exec(callback.data ?? "");
+    if (replyToMatch) {
+      await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
+      if (isAdmin(env, callback.from?.id)) {
+        const target = replyToMatch[1];
+        const admin = (await getUser(env, callback.from.id)) ?? {};
+        await saveUser(env, callback.from.id, { ...admin, adminFlow: { kind: "replyto", target } });
+        await telegram(env, "sendMessage", { chat_id: callback.message?.chat?.id, text: `✏️ اكتب نص الرد الآن وسيُرسل مباشرة إلى المستخدم <code>${escapeHtml(target)}</code>.\n/cancel للإلغاء.`, parse_mode: "HTML" });
+      }
+      return;
+    }
+    const unbanMatch = /^unban\|(\d+)$/u.exec(callback.data ?? "");
+    if (unbanMatch) {
+      await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
+      if (isAdmin(env, callback.from?.id)) {
+        const id = unbanMatch[1];
+        const user = (await getUser(env, id)) ?? {};
+        const updated = { ...user, blocked: false, blockedAt: undefined, blockedReason: undefined };
+        await saveUser(env, id, updated);
+        await pushUsers(env, [userSheetRow(id, updated)]);
+        await telegram(env, "sendMessage", { chat_id: callback.message?.chat?.id, text: `✅ تم فك حظر المستخدم <code>${escapeHtml(id)}</code>.`, parse_mode: "HTML" });
+      }
       return;
     }
     if (callback.data === "noop") {
@@ -4597,6 +4743,9 @@ async function handleUpdate(update, env, ctx) {
   const message = update.message;
   if (!message?.chat?.id) return;
   let text = String(message.text ?? "").trim();
+  if (text === "📞 تواصل مع الإدارة") text = "/contact";
+  else if (text === "🎲 كلمة عشوائية") text = "/random";
+  else if (text === "🏆 المتصدرون") text = "/leaderboard";
   const userId = message.from?.id ?? message.chat.id;
   const isPrivate = (message.chat.type ?? "private") === "private";
   // Pro feature: per-user rate limit (sliding window). Admins get a higher limit.
@@ -4639,9 +4788,16 @@ async function handleUpdate(update, env, ctx) {
     return;
   }
   if (!adminNow && maint) {
-    await registerPromise.catch(() => null);
-    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: maintMsg || "🔧 بوت القاموس القبطي الناطق تحت الصيانة حالياً نظراً للاضافة الكبيرة القادمة قريباً، وسيتم تنبيهك عند الاتاحة الكاملة، شكرًا لتفهمك." });
-    return;
+    const regUser = await registerPromise.catch(() => undefined);
+    // During maintenance, allow /start, commands and the name-registration flow; only block
+    // actual dictionary lookups (plain text search or voice) so users are still fully registered.
+    const awaitingName = regUser?.awaitingName === true || regUser?.awaitingContact === true;
+    const isSearchAttempt = (text && !text.startsWith("/") && !awaitingName) || Boolean(message.voice || message.audio);
+    if (isSearchAttempt) {
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: maintMsg || "🔧 بوت القاموس القبطي الناطق تحت الصيانة حالياً نظراً للاضافة الكبيرة القادمة قريباً، وسيتم تنبيهك عند الاتاحة الكاملة، شكرًا لتفهمك." });
+      return;
+    }
+    // commands (/start, /contact, ...) and the registration name-entry proceed normally.
   }
   // Batch 4 slow mode: global cooldown between searches for non-admins.
   if (!adminNow && slowCfg.on && text && !text.startsWith("/") && message.chat.type === "private") {
@@ -5251,6 +5407,18 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     if (text === "/recoverusers" || text === "/recover") { await recoverMissingUsers(env, message.chat.id, ctx); return; }
+    if (text === "/bulkadd") { await setAdminFlow(env, userId, { kind: "bulk_add" }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "📥 أرسل الآن الكلمات، كل كلمة في سطر، مفصولة بـ | بهذا الترتيب:\nقبطي | النطق | المعنى | English | Français | Deutsch | اليوناني | الأصل | النوع\n\nمثال:\nⲁⲛⲁⲩ | [anaʊ] | ماء | water | eau | Wasser | — | قبطي | اسم\n\nالحقلان المطلوبان: القبطي والمعنى. اكتب — لحقل تريد تركه فاضيًا." }); return; }
+    if (text === "/bcspeed" || text.startsWith("/bcspeed ")) {
+      const secs = Number(text.split(/\s+/u)[1]);
+      if (!Number.isFinite(secs) || secs < 1 || secs > 60) { const cur = env.USERS ? (((await storeCall(env, { op: "get", key: "bc:perUserDelay" })).value ?? 5000) / 1000) : 5; await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `⏱ التأخير الحالي بين كل مستخدم في الإرسال الجماعي: ${cur} ثانية.\n✏️ الاستخدام: /bcspeed <عدد_الثواني> (من 1 إلى 60).` }); return; }
+      await storeCall(env, { op: "put", key: "bc:perUserDelay", value: Math.round(secs * 1000) });
+      await logAdminAction(env, userId, "bcspeed", `${secs}s`);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم ضبط التأخير بين كل مستخدم في الإرسال الجماعي على ${secs} ثانية. سينفذ في الإرسال القادم.` });
+      return;
+    }
+    if (text === "/userfind" || text.startsWith("/userfind ")) { const q = text.slice("/userfind".length).trim(); if (!q) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /userfind <اسم أو معرف المستخدم> — ستظهر أزرار رد سريع بدون كتابة المعرف." }); return; } await findUsers(env, message.chat.id, q); return; }
+    if (text === "/blockedusers") { await listBlockedUsers(env, message.chat.id); return; }
+    if (text === "/configexport") { await exportConfigBackup(env, message.chat.id); return; }
   }
   if (text === "/start" || text.startsWith("/start ")) {
     if (!env.USERS) {
@@ -5297,6 +5465,10 @@ async function handleUpdate(update, env, ctx) {
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🔔 تم إعادة تسجيلك لاستقبال الرسائل الجماعية." });
     return;
   }
+  if (text === "/cancel") {
+    const user = known ?? await getUser(env, userId);
+    if (user?.awaitingContact) { await saveUser(env, userId, { ...user, awaitingContact: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء رسالة التواصل مع الإدارة." }); return; }
+  }
   if (text === "/suggest" || text.startsWith("/suggest ")) {
     const suggestion = text.slice("/suggest".length).trim();
     if (!suggestion) {
@@ -5337,6 +5509,11 @@ async function handleUpdate(update, env, ctx) {
   }
   if (text) {
     const user = known ?? await getUser(env, userId);
+    if (user?.awaitingContact) {
+      await saveUser(env, userId, { ...user, awaitingContact: undefined });
+      await deliverContactMessage(env, message, userId, text);
+      return;
+    }
     if (user?.awaitingName) {
       if (!isValidFullName(text)) {
         await telegram(env, "sendMessage", { chat_id: message.chat.id, text: NAME_RETRY_TEXT });
