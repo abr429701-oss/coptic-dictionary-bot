@@ -7,3 +7,4 @@ public/search-index/
 __pycache__/
 *.py[cod]
 .DS_Store
+data/admin_data.json

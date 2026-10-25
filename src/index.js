@@ -36,6 +36,66 @@ const lastLookup = new Map(); // chatId -> last searched record summary (favorit
 const contactCooldown = new Map(); // userId -> last /contact timestamp
 const searchCounts = new Map(); // `${userId}:${day}` -> { day, count }
 
+// ---- Batch 4 admin features: feature flags, blacklist, whitelist, custom messages, admin audit, slow mode ----
+const FEATURE_FLAGS_KEY = "admin:features";
+const BLACKLIST_KEY = "admin:blacklist";
+const WHITELIST_KEY = "admin:whitelist";
+const WHITELIST_MODE_KEY = "admin:whitelist:mode";
+const BAN_MSG_KEY = "admin:banmsg";
+const MAINT_MSG_KEY = "admin:maintmsg";
+const ADMIN_AUDIT_KEY = "admin:audit:actions";
+const SLOW_MODE_KEY = "admin:slowmode";
+const BROADCAST_CTRL_KEY = "broadcast:control";
+const featureFlagsCache = { value: null, at: 0 };
+const blacklistCache = { value: null, at: 0 };
+const whitelistCache = { value: null, at: 0 };
+const whitelistModeCache = { value: null, at: 0 };
+const banMsgCache = { value: null, at: 0 };
+const maintMsgCache = { value: null, at: 0 };
+const slowModeCache = { value: null, at: 0 };
+const FEATURE_DEFAULTS = { audio: true, cards: true, voice_transcribe: true, inline_mode: true, keyboard: true, suggestions: true, gamify: true, contact: true, wod: true, autoreply: true };
+const recentSearches = []; // ring buffer of { userId, name, query, at }
+const RECENT_SEARCHES_MAX = 200;
+const lastUserSearchAt = new Map(); // userId -> ts (slow mode)
+function pushRecentSearch(userId, name, query) {
+  recentSearches.push({ userId: String(userId), name: String(name ?? "").slice(0, 40), query: String(query ?? "").slice(0, 80), at: Date.now() });
+  if (recentSearches.length > RECENT_SEARCHES_MAX) recentSearches.splice(0, recentSearches.length - RECENT_SEARCHES_MAX);
+}
+async function featureFlags(env) { const v = await cachedDoGet(env, FEATURE_FLAGS_KEY, featureFlagsCache, {}); return v && typeof v === "object" ? v : {}; }
+async function featureEnabled(env, flag) { const flags = await featureFlags(env); return flags[flag] !== false; } // default ON unless explicitly false
+async function setFeatureFlag(env, flag, on) { const flags = await featureFlags(env); flags[flag] = !!on; if (env.USERS) await storeCall(env, { op: "put", key: FEATURE_FLAGS_KEY, value: flags }); invalidateCache(featureFlagsCache); }
+async function blacklistedWords(env) { const v = await cachedDoGet(env, BLACKLIST_KEY, blacklistCache, []); return Array.isArray(v) ? v : []; }
+async function isBlacklistedWord(env, query) { const list = await blacklistedWords(env); const q = normalize(query); return list.some((w) => q === normalize(w) || q.includes(normalize(w))); }
+async function addBlacklist(env, word) { const list = await blacklistedWords(env); if (!list.includes(String(word))) list.push(String(word).slice(0, 80)); if (env.USERS) await storeCall(env, { op: "put", key: BLACKLIST_KEY, value: list.slice(-200) }); invalidateCache(blacklistCache); }
+async function removeBlacklist(env, word) { const list = (await blacklistedWords(env)).filter((w) => normalize(w) !== normalize(word)); if (env.USERS) await storeCall(env, { op: "put", key: BLACKLIST_KEY, value: list }); invalidateCache(blacklistCache); }
+async function whitelistUsers(env) { const v = await cachedDoGet(env, WHITELIST_KEY, whitelistCache, []); return Array.isArray(v) ? v : []; }
+async function whitelistModeOn(env) { const v = await cachedDoGet(env, WHITELIST_MODE_KEY, whitelistModeCache, false); return v === true; }
+async function setWhitelistMode(env, on) { if (env.USERS) await storeCall(env, { op: "put", key: WHITELIST_MODE_KEY, value: !!on }); invalidateCache(whitelistModeCache); }
+async function addWhitelistUser(env, id) { const list = await whitelistUsers(env); if (!list.includes(String(id))) list.push(String(id)); if (env.USERS) await storeCall(env, { op: "put", key: WHITELIST_KEY, value: list.slice(-1000) }); invalidateCache(whitelistCache); }
+async function removeWhitelistUser(env, id) { const list = (await whitelistUsers(env)).filter((x) => x !== String(id)); if (env.USERS) await storeCall(env, { op: "put", key: WHITELIST_KEY, value: list }); invalidateCache(whitelistCache); }
+async function customBanMessage(env) { const v = await cachedDoGet(env, BAN_MSG_KEY, banMsgCache, ""); return typeof v === "string" ? v : ""; }
+async function setBanMessage(env, text) { if (env.USERS) await storeCall(env, { op: "put", key: BAN_MSG_KEY, value: String(text ?? "").slice(0, 500) }); invalidateCache(banMsgCache); }
+async function customMaintenanceMessage(env) { const v = await cachedDoGet(env, MAINT_MSG_KEY, maintMsgCache, ""); return typeof v === "string" ? v : ""; }
+async function setMaintenanceMessage(env, text) { if (env.USERS) await storeCall(env, { op: "put", key: MAINT_MSG_KEY, value: String(text ?? "").slice(0, 500) }); invalidateCache(maintMsgCache); }
+async function logAdminAction(env, userId, action, detail = "") {
+  if (!env.USERS) return;
+  try {
+    const prev = ((await storeCall(env, { op: "get", key: ADMIN_AUDIT_KEY })).value ?? []);
+    const list = Array.isArray(prev) ? prev : [];
+    list.unshift({ at: new Date().toISOString(), admin: String(userId), action: String(action).slice(0, 60), detail: String(detail ?? "").slice(0, 200) });
+    await storeCall(env, { op: "put", key: ADMIN_AUDIT_KEY, value: list.slice(0, 200) });
+  } catch { /* non-critical */ }
+}
+async function readAdminAudit(env) { if (!env.USERS) return []; const v = ((await storeCall(env, { op: "get", key: ADMIN_AUDIT_KEY })).value ?? []); return Array.isArray(v) ? v : []; }
+async function slowModeConfig(env) { const v = await cachedDoGet(env, SLOW_MODE_KEY, slowModeCache, { on: false, seconds: 5 }); return v && typeof v === "object" ? v : { on: false, seconds: 5 }; }
+async function setSlowModeConfig(env, cfg) { if (env.USERS) await storeCall(env, { op: "put", key: SLOW_MODE_KEY, value: cfg }); invalidateCache(slowModeCache); }
+function invalidateAllCaches() {
+  for (const c of [wodCache, autoReplyCache, searchLimitCache, alertsCache, templatesCache, optOutCache, notesCache, featureFlagsCache, blacklistCache, whitelistCache, whitelistModeCache, banMsgCache, maintMsgCache, slowModeCache, gamifyCache, apiKeyCache, rateLimitCache, bansCache, maintCache]) { c.value = null; c.at = 0; }
+  registeredCache.clear(); commandMenuReady.clear(); lastLookup.clear();
+}
+async function broadcastControlState(env) { if (!env.USERS) return { paused: false }; const v = ((await storeCall(env, { op: "get", key: BROADCAST_CTRL_KEY })).value ?? { paused: false }); return v && typeof v === "object" ? v : { paused: false }; }
+async function setBroadcastControl(env, state) { if (env.USERS) await storeCall(env, { op: "put", key: BROADCAST_CTRL_KEY, value: state }); }
+
 // ---- Word of the day ----
 async function wordOfTheDayConfig(env) { return await cachedDoGet(env, "wod:config", wodCache, null); }
 async function setWordOfTheDay(env, value) {
@@ -56,6 +116,7 @@ async function autoWordOfTheDay(env, chatId, ctx) {
   try {
     const config = await wordOfTheDayConfig(env);
     if (!config?.word || !config?.chatId || Number(config.chatId) !== Number(chatId)) return;
+    if (!await featureEnabled(env, "wod")) return;
     if (config.lastSent === utcDay()) return;
     await sendWordOfTheDay(env, chatId, config);
   } catch (error) {
@@ -794,6 +855,16 @@ const ADMIN_COMMANDS = [
   { command: "uptime", description: "مدة تشغيل البوت" },
   { command: "note", description: "ملاحظة خاصة للأدمن" },
   { command: "setwod", description: "ضبط كلمة اليوم" },
+  { command: "feature", description: "مفاتيح تشغيل/إيقاف الميزات" },
+  { command: "blacklist", description: "قائمة الكلمات المحظورة" },
+  { command: "whitelist", description: "وضع القائمة البيضاء" },
+  { command: "msg", description: "إرسال رسالة لمستخدم محدد" },
+  { command: "integrity", description: "فحص سلامة القاموس" },
+  { command: "topusers", description: "الأكثر نشاطًا" },
+  { command: "livesearch", description: "عمليات البحث المباشرة" },
+  { command: "adminaudit", description: "سجل إجراءات الأدمن" },
+  { command: "slowmode", description: "الوضع البطيء العام" },
+  { command: "clearcache", description: "مسح كل الكاش" },
 ];
 const commandMenuReady = new Set();
 
@@ -1406,7 +1477,7 @@ async function sendOption(env, chatId, options, baseIndex, step, fallback = unde
   if (!(await sendCardEntry(env, chatId, record, text, media, more.reply_markup, cardLanguage))) {
     await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
   }
-  if (sendVoice) {
+  if (sendVoice && await featureEnabled(env, "audio")) {
     if (ctx?.waitUntil) ctx.waitUntil(sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, searchKey).catch((error) => console.error("Background voice failed", error instanceof Error ? error.message : "unknown error")));
     else await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, searchKey);
   }
@@ -1452,6 +1523,15 @@ export class UserStore {
     const storage = this.state.storage;
     const job = await storage.get("broadcast");
     if (!job) return;
+    // Batch 4: broadcast pause/cancel control.
+    const ctrl = (await storage.get("broadcast:control")) ?? { paused: false };
+    if (ctrl.cancel) {
+      await storage.delete("broadcast");
+      await storage.delete("broadcast:control");
+      await telegram(this.env, "sendMessage", { chat_id: job.adminChat, text: `🛑 تم إلغاء الإرسال الجماعي. تم إرسال ${job.sent} من ${job.total}.` });
+      return;
+    }
+    if (ctrl.paused) { await storage.setAlarm(Date.now() + 15000); return; }
     const batch = job.queue.splice(0, BROADCAST_BATCH_SIZE);
     let delay = BROADCAST_BATCH_DELAY_MS;
     for (let i = 0; i < batch.length; i += 1) {
@@ -1540,6 +1620,7 @@ export class UserStore {
       return;
     }
     await storage.delete("broadcast");
+    await storage.delete("broadcast:control");
     const failureLines = Object.entries(job.failureReasons ?? {}).slice(0, 3)
       .map(([reason, count]) => `• ${count}× ${reason}`);
     await telegram(this.env, "sendMessage", {
@@ -1882,6 +1963,16 @@ function buildCommandsHelpText(env, userId) {
     lines.push("/optout — إحصاء خيار الخروج من البث | /purge &lt;أيام&gt; — حذف الخاملين");
     lines.push("/resetuser &lt;id&gt; — تصفير مستخدم | /pin &lt;id&gt; / /pinhere / /unpin — تثبيت");
     lines.push("/reply &lt;id&gt; &lt;نص&gt; — الرد على رسالة /contact | /exportuserscsv — تصدير المستخدمين");
+    lines.push("— Batch 4 —");
+    lines.push("/feature &lt;ميزة&gt; on|off — مفاتيح الميزات (audio/keyboard/contact/...)");
+    lines.push("/blacklist add|remove &lt;كلمة&gt; — كلمات محظورة | /whitelist on|off/add|remove — القائمة البيضاء");
+    lines.push("/msg &lt;id&gt; &lt;نص&gt; — رسالة مباشرة لمستخدم | /topusers — الأكثر نشاطًا");
+    lines.push("/integrity — فحص سلامة القاموس | /nopronounce — كلمات بدون نطق | /noaudio — كلمات بدون صوت");
+    lines.push("/findempty &lt;حقل&gt; — خلايا فاضية | /livesearch — بحث مباشر | /hourly — توزيع الساعات");
+    lines.push("/adminaudit — سجل إجراءات الأدمن | /exportsearch — تصدير سجل البحث | /resetstats — تصفير الإحصاءات");
+    lines.push("/setbanmsg &lt;نص&gt; — رسالة الحظر | /setmaintmsg &lt;نص&gt; — رسالة الصيانة");
+    lines.push("/slowmode on|off|&lt;ثواني&gt; — الوضع البطيء | /clearcache — مسح الكاش");
+    lines.push("/testbroadcast — إرسال تجريبي | /bcpause | /bcresume | /bccancel — التحكم في البث");
   }
   return lines.join("\n");
 }
@@ -3204,6 +3295,112 @@ async function sendDuplicatesReport(env, chatId) {
   await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
 }
 
+// ---- Batch 4 admin reports: integrity, top users, hourly, missing pronounce/audio, find empty, live searches, admin audit ----
+async function sendIntegrityReport(env, chatId) {
+  let missingCoptic = 0, missingMeaning = 0, missingPron = 0, missingId = 0, emptyFields = new Map();
+  const fields = ["coptic", "greek", "pronunciation", "english", "phonetic", "arabic_pronunciation", "kind", "gender", "meaning"];
+  for (const rec of records) {
+    if (rec._deleted) continue;
+    if (!String(rec.coptic ?? "").trim()) missingCoptic += 1;
+    if (!String(rec.meaning ?? "").trim()) missingMeaning += 1;
+    if (!String(rec.pronunciation ?? "").trim()) missingPron += 1;
+    if (!String(rec.id ?? "").trim()) missingId += 1;
+    for (const f of fields) if (!String(rec[f] ?? "").trim()) emptyFields.set(f, (emptyFields.get(f) ?? 0) + 1);
+  }
+  const lines = [
+    "🔍 <b>تقرير سلامة القاموس</b>", "",
+    `📚 إجمالي السجلات: <b>${records.length.toLocaleString("en-US")}</b>`,
+    `❌ كلمة قبطية ناقصة: <b>${missingCoptic}</b>`,
+    `❌ معنى ناقص: <b>${missingMeaning}</b>`,
+    `🔇 بدون نطق: <b>${missingPron}</b>`,
+    `🆔 بدون معرّف صوت: <b>${missingId}</b>`, "",
+    "<b>الحقول الفاضية:</b>",
+    ...[...emptyFields.entries()].sort((a, b) => b[1] - a[1]).map(([f, n]) => `• ${f}: ${n}`),
+  ];
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
+}
+async function sendTopUsersReport(env, chatId) {
+  if (!env.USERS) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ غير مفعّل (لا يوجد تخزين مستخدمين)." }); return; }
+  const all = await storeCall(env, { op: "userpage", limit: 500 });
+  const users = (all.users ?? []).map(({ id, record }) => ({ id, searches: Number(record?.searches ?? record?.searchCount ?? 0), name: record?.name ?? record?.tgName ?? "—", username: record?.username ?? "" })).filter((u) => u.searches > 0).sort((a, b) => b.searches - a.searches).slice(0, 20);
+  if (!users.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: "📭 لا توجد بيانات بحث بعد." }); return; }
+  const lines = ["🏆 <b>أكثر المستخدمين نشاطًا</b>", "", ...users.map((u, i) => `${i + 1}. <code>${escapeHtml(u.id)}</code> — ${escapeHtml(String(u.name).slice(0, 25))}${u.username ? ` (@${escapeHtml(u.username)})` : ""}: <b>${u.searches}</b> بحث`)];
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
+}
+async function sendHourlyReport(env, chatId) {
+  const hours = new Map();
+  for (const s of recentSearches) { const h = new Date(s.at).getHours(); hours.set(h, (hours.get(h) ?? 0) + 1); }
+  if (!hours.size) { await telegram(env, "sendMessage", { chat_id: chatId, text: "📭 لا توجد عمليات بحث مسجلة في الجلسة الحالية." }); return; }
+  const max = Math.max(...hours.values());
+  const lines = ["🕐 <b>توزيع البحث حسب الساعة</b> (الجلسة الحالية)", ""];
+  for (let h = 0; h < 24; h += 1) {
+    const n = hours.get(h) ?? 0;
+    if (n === 0 && ![0, 6, 12, 18].includes(h)) continue;
+    const bar = "█".repeat(Math.round((n / max) * 12));
+    lines.push(`${String(h).padStart(2, "0")}:00 ${bar} ${n}`);
+  }
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
+}
+async function sendMissingPronounceReport(env, chatId, limit = 30) {
+  const missing = records.filter((r) => !r._deleted && !String(r.pronunciation ?? "").trim()).slice(0, limit);
+  const total = records.filter((r) => !r._deleted && !String(r.pronunciation ?? "").trim()).length;
+  if (!total) { await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ كل الكلمات لها نطق." }); return; }
+  const lines = [`🔇 <b>كلمات بدون نطق</b>: ${total} (عرض أول ${missing.length})`, "", ...missing.map((r, i) => `${i + 1}. صف ${records.indexOf(r) + 2}: <b>${escapeHtml(String(r.coptic ?? "—").slice(0, 30))}</b> — ${escapeHtml(String(r.meaning ?? "").slice(0, 50))}`)];
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
+}
+async function sendMissingAudioReport(env, chatId, limit = 30) {
+  const manifest = await loadAudioManifest(env).catch(() => ({}));
+  const have = new Set(Object.keys(manifest ?? {}));
+  const missing = records.filter((r) => !r._deleted && String(r.pronunciation ?? "").trim() && !have.has(String(r.id ?? ""))).slice(0, limit);
+  const total = records.filter((r) => !r._deleted && String(r.pronunciation ?? "").trim() && !have.has(String(r.id ?? ""))).length;
+  if (!total) { await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ كل الكلمات ذات النطق لها صوت." }); return; }
+  const lines = [`🔊 <b>كلمات لها نطق لكن بدون صوت</b>: ${total} (عرض أول ${missing.length})`, "", ...missing.map((r, i) => `${i + 1}. <b>${escapeHtml(String(r.coptic ?? "—").slice(0, 30))}</b> — ${escapeHtml(String(r.meaning ?? "").slice(0, 50))}`)];
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
+}
+async function sendFindEmptyReport(env, chatId, fieldArg, limit = 30) {
+  const fieldMap = { a: "coptic", b: "greek", c: "pronunciation", d: "english", e: "phonetic", f: "arabic_pronunciation", g: "kind", h: "gender", i: "meaning" };
+  const field = fieldMap[String(fieldArg ?? "").toLowerCase()] || (DICTIONARY_LOCAL_FIELDS.includes(fieldArg) ? fieldArg : null);
+  if (!field) { await telegram(env, "sendMessage", { chat_id: chatId, text: `✏️ الاستخدام: /findempty <حقل A-I أو اسم الحقل>\nالحقول: ${Object.entries(fieldMap).map(([k, v]) => `${k}=${v}`).join(", ")}` }); return; }
+  const missing = records.filter((r) => !r._deleted && !String(r[field] ?? "").trim()).slice(0, limit);
+  const total = records.filter((r) => !r._deleted && !String(r[field] ?? "").trim()).length;
+  if (!total) { await telegram(env, "sendMessage", { chat_id: chatId, text: `✅ لا توجد خلايا فاضية في الحقل «${field}».` }); return; }
+  const lines = [`📭 <b>سجلات فاضية في الحقل «${field}»</b>: ${total} (عرض أول ${missing.length})`, "", ...missing.map((r, i) => `${i + 1}. صف ${records.indexOf(r) + 2}: <b>${escapeHtml(String(r.coptic ?? "—").slice(0, 30))}</b>`)];
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
+}
+async function sendLiveSearchesReport(env, chatId) {
+  if (!recentSearches.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: "📭 لا توجد عمليات بحث في الجلسة الحالية." }); return; }
+  const lines = ["🔴 <b>آخر عمليات البحث المباشرة</b>", "", ...recentSearches.slice(-20).reverse().map((s) => `• [${new Date(s.at).toLocaleTimeString("en-GB")}] <code>${escapeHtml(s.userId)}</code> ${escapeHtml(s.name ? `(${s.name})` : "")}: ${escapeHtml(s.query)}`)];
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
+}
+async function sendAdminAuditReport(env, chatId) {
+  const list = await readAdminAudit(env);
+  if (!list.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: "📭 لا توجد إجراءات إدارية مسجلة بعد." }); return; }
+  const lines = ["📋 <b>سجل إجراءات الأدمن</b> (آخر 30)", "", ...list.slice(0, 30).map((e) => `• ${escapeHtml(e.at?.slice(0, 19) ?? "")} <code>${escapeHtml(e.admin)}</code>: <b>${escapeHtml(e.action)}</b>${e.detail ? ` — ${escapeHtml(e.detail)}` : ""}`)];
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
+}
+async function exportSearchHistoryCsv(env, chatId) {
+  const rows = [["timestamp", "user_id", "user_name", "query"]];
+  for (const s of recentSearches) rows.push([new Date(s.at).toISOString(), s.userId, s.name, s.query]);
+  const csv = "\uFEFF" + rows.map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+  await sendTextFile(env, chatId, "search_history.csv", csv, "📥 تم تصدير سجل البحث (الجلسة الحالية).", "text/csv");
+}
+async function resetAnalyticsData(env, chatId) {
+  if (env.USERS) await storeCall(env, { op: "put", key: "analytics:snapshot", value: { searches: 0, commands: 0, inline: 0, topWords: [], updatedAt: new Date().toISOString() } });
+  analyticsState.searches = 0; analyticsState.commands = 0; analyticsState.inline = 0; analyticsState.topWords.clear();
+  recentSearches.length = 0;
+  await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ تم تصفير التحليلات وسجل البحث المباشر." });
+}
+async function featureFlagsText(env) {
+  const flags = await featureFlags(env);
+  const lines = ["🎚 <b>مفاتيح الميزات</b>", ""];
+  for (const [flag, def] of Object.entries(FEATURE_DEFAULTS)) {
+    const on = flags[flag] !== false;
+    lines.push(`${on ? "🟢" : "🔴"} ${flag}: ${on ? "مفعّلة" : "موقوفة"}`);
+  }
+  lines.push("", "✏️ الاستخدام: /feature <اسم> on|off");
+  return lines.join("\n");
+}
+
 // ---- Admin feature: suggestion box review ----
 async function sendSuggestionsList(env, chatId) {
   const list = await listSuggestions(env);
@@ -3662,8 +3859,19 @@ function adminMenuMarkup(page = "home") {
     [{ text: "📊 الإحصاءات", callback_data: "ad|page|stats" }, { text: "🎙 الأصوات", callback_data: "ad|page|voices" }],
     [{ text: "☁️ Drive وSheets", callback_data: "ad|page|drive" }, { text: "👥 المستخدمون", callback_data: "ad|page|users" }],
     [{ text: "📖 تعديل القاموس", callback_data: "ad|page|dictionary" }, { text: "⚙️ أدوات النظام", callback_data: "ad|page|tools" }],
+    [{ text: "🔧 أدوات متقدمة", callback_data: "ad|page|advanced" }, { text: "🎚 مفاتيح الميزات", callback_data: "ad|features" }],
     [{ text: "⬆️ مزامنة الأصوات", callback_data: "ad|syncvoices" }, { text: "👥 مزامنة المستخدمين", callback_data: "ad|syncusers" }],
     [{ text: "📢 حالة الإرسال", callback_data: "ad|bcstatus" }, { text: "🧹 مسح جلسة", callback_data: "ad|clearflow" }],
+  ] };
+  if (page === "advanced") return { inline_keyboard: [
+    [{ text: "🔍 سلامة القاموس", callback_data: "ad|integrity" }, { text: "🏆 الأكثر نشاطًا", callback_data: "ad|topusers" }],
+    [{ text: "🕐 توزيع الساعات", callback_data: "ad|hourly" }, { text: "🔴 بحث مباشر", callback_data: "ad|livesearch" }],
+    [{ text: "🔇 بدون نطق", callback_data: "ad|nopronounce" }, { text: "🔊 بدون صوت", callback_data: "ad|noaudio" }],
+    [{ text: "📭 خلايا فاضية", callback_data: "ad|findempty" }, { text: "📋 سجل إجراءات الأدمن", callback_data: "ad|adminaudit" }],
+    [{ text: "🧪 إرسال تجريبي", callback_data: "ad|testbroadcast" }, { text: "🧹 مسح الكاش", callback_data: "ad|clearcache" }],
+    [{ text: "⏸️ إيقاف البث", callback_data: "ad|bcpause" }, { text: "▶️ استئناف البث", callback_data: "ad|bcresume" }],
+    [{ text: "📥 تصدير سجل البحث", callback_data: "ad|exportsearch" }, { text: "🔄 تصفير الإحصاءات", callback_data: "ad|resetstats" }],
+    back,
   ] };
   if (page === "stats") return { inline_keyboard: [
     [{ text: "🔄 تحديث الإحصاءات", callback_data: "ad|page|stats" }], back,
@@ -3774,6 +3982,7 @@ async function handleAdminFlow(env, message, userId, user, text) {
   else if (flow === "deletemany") await askDeleteManyVoices(env, message.chat.id, userId, user, text);
   else if (flow === "cardhide") await setCardVisibility(env, message.chat.id, text, false);
   else if (flow === "cardshow") await setCardVisibility(env, message.chat.id, text, true);
+  else if (flow === "findempty_wait") { await clearAdminFlow(env, userId); await sendFindEmptyReport(env, message.chat.id, text); return true; }
   return true;
 }
 async function handleAdminDashboardCallback(env, callback, ctx) {
@@ -3896,6 +4105,28 @@ async function handleAdminDashboardCallback(env, callback, ctx) {
     return;
   }
   if (action === "exportuserscsv") { await exportUsersCsv(env, chatId); return; }
+  // ---- Batch 4 dashboard callbacks ----
+  if (action === "integrity") { await sendIntegrityReport(env, chatId); return; }
+  if (action === "topusers") { await sendTopUsersReport(env, chatId); return; }
+  if (action === "hourly") { await sendHourlyReport(env, chatId); return; }
+  if (action === "nopronounce") { await sendMissingPronounceReport(env, chatId); return; }
+  if (action === "noaudio") { await sendMissingAudioReport(env, chatId); return; }
+  if (action === "livesearch") { await sendLiveSearchesReport(env, chatId); return; }
+  if (action === "adminaudit") { await sendAdminAuditReport(env, chatId); return; }
+  if (action === "clearcache") { invalidateAllCaches(); await logAdminAction(env, callback.from.id, "clearcache"); await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ تم مسح كل الكاش." }); return; }
+  if (action === "features") { await telegram(env, "sendMessage", { chat_id: chatId, text: await featureFlagsText(env), parse_mode: "HTML" }); return; }
+  if (action === "featoggle") {
+    const flag = parts[2]; if (!Object.prototype.hasOwnProperty.call(FEATURE_DEFAULTS, flag)) return;
+    const flags = await featureFlags(env); const on = flags[flag] === false;
+    await setFeatureFlag(env, flag, on); await logAdminAction(env, callback.from.id, "feature", `${flag}=${on}`);
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `✅ ميزة «${flag}» ${on ? "مفعّلة" : "موقوفة"}.` }); return;
+  }
+  if (action === "testbroadcast") { const admins = adminIds(env); for (const id of admins) await telegram(env, "sendMessage", { chat_id: id, text: "🧪 رسالة تجريبية من الإرسال الجماعي." }).catch(() => null); await telegram(env, "sendMessage", { chat_id: chatId, text: `✅ تم الإرسال التجريبي إلى ${admins.length} أدمن.` }); return; }
+  if (action === "bcpause") { await setBroadcastControl(env, { paused: true }); await telegram(env, "sendMessage", { chat_id: chatId, text: "⏸️ تم إيقاف البث مؤقتًا." }); return; }
+  if (action === "bcresume") { await setBroadcastControl(env, { paused: false }); await telegram(env, "sendMessage", { chat_id: chatId, text: "▶️ تم استئناف البث." }); return; }
+  if (action === "resetstats") { await resetAnalyticsData(env, chatId); await logAdminAction(env, callback.from.id, "resetstats"); return; }
+  if (action === "exportsearch") { await exportSearchHistoryCsv(env, chatId); return; }
+  if (action === "findempty") { await setAdminFlow(env, callback.from.id, { kind: "findempty_wait" }); await telegram(env, "sendMessage", { chat_id: chatId, text: "✏️ أرسل اسم الحقل (A-I أو coptic/meaning/pronunciation/...) للعثور على الخلايا الفاضية فيه." }); return; }
 }
 async function handleUpdate(update, env, ctx) {
   if (update.inline_query) {
@@ -4031,16 +4262,33 @@ async function handleUpdate(update, env, ctx) {
   inBackground(ctx, flushErrorLog(env));
   inBackground(ctx, flushUserHistory(env));
   if (text && !text.startsWith("/")) trackSearchHistory(userId, text);
+  if (text && !text.startsWith("/")) pushRecentSearch(userId, displayName(message.from), text);
   if (text && !text.startsWith("/") && await gamifyOn(env)) { trackGamify(userId, displayName(message.from)); inBackground(ctx, flushGamify(env)); }
   // Admin feature: banned users get no response; maintenance mode blocks non-admins.
-  const [banned, maint] = await Promise.all([isBanned(env, userId), maintenanceOn(env)]);
+  // Batch 4: whitelist mode, custom ban/maintenance messages, slow mode.
+  const [banned, maint, wlMode, wlList, banMsg, maintMsg, slowCfg] = await Promise.all([
+    isBanned(env, userId), maintenanceOn(env), whitelistModeOn(env), whitelistUsers(env),
+    customBanMessage(env), customMaintenanceMessage(env), slowModeConfig(env),
+  ]);
   if (banned) {
-    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🚫 تم حظرك من استخدام البوت. إذا كنت تعتقد أن ذلك خطأ، تواصل مع المشرف." });
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: banMsg || "🚫 تم حظرك من استخدام البوت. إذا كنت تعتقد أن ذلك خطأ، تواصل مع المشرف." });
     return;
   }
-  if (!isAdmin(env, userId) && maint) {
-    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🔧 البوت حاليًا تحت الصيانة. عُد لاحقًا بعد قليل، شكرًا لتفهمك." });
+  const adminNow = isAdmin(env, userId);
+  if (!adminNow && wlMode && !wlList.includes(String(userId))) {
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🔒 البوت في وضع القائمة البيضاء حاليًا. فقط المستخدمون المصرح لهم يمكنهم الاستخدام." });
     return;
+  }
+  if (!adminNow && maint) {
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: maintMsg || "🔧 البوت حاليًا تحت الصيانة. عُد لاحقًا بعد قليل، شكرًا لتفهمك." });
+    return;
+  }
+  // Batch 4 slow mode: global cooldown between searches for non-admins.
+  if (!adminNow && slowCfg.on && text && !text.startsWith("/") && message.chat.type === "private") {
+    const last = lastUserSearchAt.get(String(userId)) ?? 0;
+    const wait = slowCfg.seconds * 1000 - (Date.now() - last);
+    if (wait > 0) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `⏳ الوضع البطيء مفعّل. انتظر ${Math.ceil(wait / 1000)} ثانية قبل البحث التالي.` }); return; }
+    lastUserSearchAt.set(String(userId), Date.now());
   }
   // Batch 3: notify admins of group joins/leaves, then let the daily features tick.
   if (["group", "supergroup"].includes(message.chat.type) && (message.new_chat_members || message.left_chat_member)) {
@@ -4051,7 +4299,7 @@ async function handleUpdate(update, env, ctx) {
   inBackground(ctx, autoWordOfTheDay(env, message.chat.id, ctx));
   // Batch 3: keyword auto-replies and the daily search limit apply to non-admin text searches.
   if (!isAdmin(env, userId) && text && !text.startsWith("/")) {
-    const replies = await autoReplies(env);
+    const replies = await featureEnabled(env, "autoreply") ? autoReplies(env) : Promise.resolve([]);
     const normalizedText = normalize(text);
     const hit = replies.find((r) => { const t = normalize(r.trigger); return t && (normalizedText === t || normalizedText.startsWith(`${t} `)); });
     if (hit) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: String(hit.reply).slice(0, 3000) }); return; }
@@ -4075,6 +4323,7 @@ async function handleUpdate(update, env, ctx) {
     : null;
   const known = await registerOnFirstContact(env, message, userId, ctx);
   if (text === "⌨️ الكيبورد القبطي" || text === "/keyboard" || text === "/kbd" || text === "/k") {
+    if (!await featureEnabled(env, "keyboard")) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⌨️ لوحة المفاتيح القبطية معطلة حاليًا من قبل الأدمن." }); return; }
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: keyboardComposerText(""), reply_markup: copticKeyboardMarkup() });
     return;
   }
@@ -4519,6 +4768,90 @@ async function handleUpdate(update, env, ctx) {
       await captureBroadcast(env, message, userId, admin);
       return;
     }
+    // ---- Batch 4 admin commands ----
+    if (text === "/feature" || text.startsWith("/feature ")) {
+      const arg = text.slice("/feature".length).trim();
+      if (!arg) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: await featureFlagsText(env), parse_mode: "HTML" }); return; }
+      const parts = arg.split(/\s+/u); const flag = parts[0]; const on = parts[1] ?? "on";
+      if (!Object.prototype.hasOwnProperty.call(FEATURE_DEFAULTS, flag)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `❌ ميزة غير معروفة. المتاحة: ${Object.keys(FEATURE_DEFAULTS).join(", ")}` }); return; }
+      await setFeatureFlag(env, flag, on !== "off"); await logAdminAction(env, userId, "feature", `${flag}=${on}`);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ ميزة «${flag}» ${on !== "off" ? "مفعّلة" : "موقوفة"}.` }); return;
+    }
+    if (text === "/blacklist" || text.startsWith("/blacklist ")) {
+      const arg = text.slice("/blacklist".length).trim();
+      if (!arg) { const list = await blacklistedWords(env); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: list.length ? `🚫 <b>الكلمات المحظورة</b> (${list.length}):\n${list.map((w) => `• ${escapeHtml(w)}`).join("\n")}` : "✅ لا توجد كلمات محظورة.\n/blacklist add <كلمة>", parse_mode: "HTML" }); return; }
+      const parts = arg.split(/\s+/u); const sub = parts[0]; const word = parts.slice(1).join(" ");
+      if (sub === "add" && word) { await addBlacklist(env, word); await logAdminAction(env, userId, "blacklist_add", word); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ أُضيفت «${escapeHtml(word.slice(0, 40))}» إلى القائمة السوداء.` }); }
+      else if (sub === "remove" && word) { await removeBlacklist(env, word); await logAdminAction(env, userId, "blacklist_remove", word); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ أُزيلت «${escapeHtml(word.slice(0, 40))}».` }); }
+      else await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ /blacklist add <كلمة> | remove <كلمة> | list" });
+      return;
+    }
+    if (text === "/whitelist" || text.startsWith("/whitelist ")) {
+      const arg = text.slice("/whitelist".length).trim();
+      if (!arg) { const mode = await whitelistModeOn(env); const list = await whitelistUsers(env); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `الوضع: ${mode ? "🟢 مفعّل (فعلًا القائمة البيضاء فقط)" : "🔴 متوقف"}\nالمستخدمون (${list.length}): ${list.map((id) => `<code>${escapeHtml(id)}</code>`).join(", ") || "لا يوجد"}\n/whitelist on|off | add <id> | remove <id>`, parse_mode: "HTML" }); return; }
+      const parts = arg.split(/\s+/u); const sub = parts[0];
+      if (sub === "on") { await setWhitelistMode(env, true); await logAdminAction(env, userId, "whitelist_on"); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم تفعيل وضع القائمة البيضاء. فقط المستخدمون المدرجون والأدمن يمكنهم استخدام البوت." }); }
+      else if (sub === "off") { await setWhitelistMode(env, false); await logAdminAction(env, userId, "whitelist_off"); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إيقاف وضع القائمة البيضاء." }); }
+      else if (sub === "add" && /^\d+$/u.test(parts[1] ?? "")) { await addWhitelistUser(env, parts[1]); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ أُضيف <code>${escapeHtml(parts[1])}</code>.` }); }
+      else if (sub === "remove" && /^\d+$/u.test(parts[1] ?? "")) { await removeWhitelistUser(env, parts[1]); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ أُزيل <code>${escapeHtml(parts[1])}</code>.` }); }
+      else await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ /whitelist on|off | add <id> | remove <id>" });
+      return;
+    }
+    if (text === "/clearcache") { invalidateAllCaches(); await logAdminAction(env, userId, "clearcache"); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم مسح كل الكاش (مستخدمون، أوامر، ميزات، قوالب، إلخ)." }); return; }
+    if (text === "/msg" || text.startsWith("/msg ")) {
+      const arg = text.slice("/msg".length).trim();
+      const match = /^(\d+)\s+([\s\S]+)$/u.exec(arg);
+      if (!match) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /msg <user_id> <نص الرسالة>" }); return; }
+      const r = await telegram(env, "sendMessage", { chat_id: match[1], text: match[2].slice(0, 3500) });
+      await logAdminAction(env, userId, "msg", match[1]);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: r?.ok ? "✅ تم إرسال الرسالة." : `❌ فشل: ${r?.description ?? "unknown"}` }); return;
+    }
+    if (text === "/topusers") { await sendTopUsersReport(env, message.chat.id); return; }
+    if (text === "/hourly") { await sendHourlyReport(env, message.chat.id); return; }
+    if (text === "/integrity") { await sendIntegrityReport(env, message.chat.id); return; }
+    if (text === "/nopronounce" || text.startsWith("/nopronounce")) { await sendMissingPronounceReport(env, message.chat.id, Number(text.split(/\s+/u)[1]) || 30); return; }
+    if (text === "/noaudio" || text.startsWith("/noaudio")) { await sendMissingAudioReport(env, message.chat.id, Number(text.split(/\s+/u)[1]) || 30); return; }
+    if (text === "/findempty" || text.startsWith("/findempty ")) { await sendFindEmptyReport(env, message.chat.id, text.slice("/findempty".length).trim()); return; }
+    if (text === "/livesearch") { await sendLiveSearchesReport(env, message.chat.id); return; }
+    if (text === "/exportsearch") { await exportSearchHistoryCsv(env, message.chat.id); return; }
+    if (text === "/resetstats") { await resetAnalyticsData(env, message.chat.id); await logAdminAction(env, userId, "resetstats"); return; }
+    if (text === "/adminaudit") { await sendAdminAuditReport(env, message.chat.id); return; }
+    if (text === "/setbanmsg" || text.startsWith("/setbanmsg ")) {
+      const arg = text.slice("/setbanmsg".length).trim();
+      if (!arg) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `الرسالة الحالية: ${escapeHtml(await customBanMessage(env)) || "(الافتراضية)"}\n✏️ /setbanmsg <نص الرسالة> | /setbanmsg reset` }); return; }
+      if (arg === "reset") { await setBanMessage(env, ""); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تمت إعادة رسالة الحظر إلى الافتراضية." }); }
+      else { await setBanMessage(env, arg); await logAdminAction(env, userId, "setbanmsg"); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم حفظ رسالة الحظر الجديدة." }); }
+      return;
+    }
+    if (text === "/setmaintmsg" || text.startsWith("/setmaintmsg ")) {
+      const arg = text.slice("/setmaintmsg".length).trim();
+      if (!arg) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `الرسالة الحالية: ${escapeHtml(await customMaintenanceMessage(env)) || "(الافتراضية)"}\n✏️ /setmaintmsg <نص> | /setmaintmsg reset` }); return; }
+      if (arg === "reset") { await setMaintenanceMessage(env, ""); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تمت إعادة رسالة الصيانة إلى الافتراضية." }); }
+      else { await setMaintenanceMessage(env, arg); await logAdminAction(env, userId, "setmaintmsg"); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم حفظ رسالة الصيانة الجديدة." }); }
+      return;
+    }
+    if (text === "/slowmode" || text.startsWith("/slowmode ")) {
+      const arg = text.slice("/slowmode".length).trim().toLowerCase();
+      const cfg = await slowModeConfig(env);
+      if (!arg) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `الوضع: ${cfg.on ? `🟢 مفعّل (${cfg.seconds} ثانية بين كل بحث)` : "🔴 متوقف"}\n/slowmode on | off | <ثواني>` }); return; }
+      if (arg === "on") { await setSlowModeConfig(env, { on: true, seconds: cfg.seconds }); await logAdminAction(env, userId, "slowmode_on"); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم تفعيل الوضع البطيء: ${cfg.seconds} ثانية بين كل بحث (للغير أدمن).` }); }
+      else if (arg === "off") { await setSlowModeConfig(env, { on: false, seconds: cfg.seconds }); await logAdminAction(env, userId, "slowmode_off"); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إيقاف الوضع البطيء." }); }
+      else if (/^\d+$/u.test(arg)) { const s = Math.max(1, Math.min(60, Number(arg))); await setSlowModeConfig(env, { on: cfg.on, seconds: s }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم ضبط مدة الوضع البطيء على ${s} ثانية.` }); }
+      else await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ /slowmode on | off | <ثواني 1-60>" });
+      return;
+    }
+    if (text === "/testbroadcast") {
+      const admins = adminIds(env);
+      for (const id of admins) await telegram(env, "sendMessage", { chat_id: id, text: "🧪 <b>رسالة تجريبية من الإرسال الجماعي</b>\nإذا رأيت هذه الرسالة، فإن الإرسال الجماعي يعمل بشكل صحيح.", parse_mode: "HTML" }).catch(() => null);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم إرسال رسالة تجريبية إلى ${admins.length} أدمن.` }); return;
+    }
+    if (text === "/bcpause") { await setBroadcastControl(env, { paused: true }); await logAdminAction(env, userId, "bcpause"); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⏸️ تم إيقاف الإرسال الجماعي مؤقتًا (سيتوقف عند المستلم التالي)." }); return; }
+    if (text === "/bcresume") { await setBroadcastControl(env, { paused: false }); await logAdminAction(env, userId, "bcresume"); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "▶️ تم استئناف الإرسال الجماعي." }); return; }
+    if (text === "/bccancel") {
+      if (env.USERS) await storeCall(env, { op: "put", key: BROADCAST_CTRL_KEY, value: { paused: true, cancel: true } });
+      await logAdminAction(env, userId, "bccancel");
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🛑 تم طلب إلغاء الإرسال الجماعي. سيتوقف قريبًا." }); return;
+    }
   }
   if (text === "/start" || text.startsWith("/start ")) {
     if (!env.USERS) {
@@ -4554,7 +4887,7 @@ async function handleUpdate(update, env, ctx) {
     await sendRecord(env, message.chat.id, index, -1, "");
     return;
   }
-  if (text === "/contact" || text.startsWith("/contact ")) { await handleContactAdmin(env, message, userId, text); return; }
+  if (text === "/contact" || text.startsWith("/contact ")) { if (!await featureEnabled(env, "contact")) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "📭 خاصية التواصل مع الأدمن معطلة حاليًا." }); return; } await handleContactAdmin(env, message, userId, text); return; }
   if (text === "/stopbroadcast") {
     await setOptOut(env, userId, true);
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🔕 تم تسجيل خروجك من الرسائل الجماعية. يمكنك العودة في أي وقت بأمر /startbroadcast." });
@@ -4619,6 +4952,11 @@ async function handleUpdate(update, env, ctx) {
       if (!isAdmin(env, userId)) {
         await notifyAdmins(env, `✅ أكمل التسجيل: <b>${escapeHtml(name)}</b> (🆔 <code>${escapeHtml(userId)}</code>)`);
       }
+      return;
+    }
+    // Batch 4: word blacklist (moderation) — blocked queries return no results.
+    if (!isAdmin(env, userId) && await isBlacklistedWord(env, text)) {
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⚠️ لا تتوفر نتائج لهذا البحث حاليًا." });
       return;
     }
     const preparedSearch = searchPlanPromise ? await searchPlanPromise : null;

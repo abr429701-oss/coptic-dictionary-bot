@@ -342,6 +342,280 @@ async def audio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("الصوت لم يُولَّد لهذه الكلمة بعد. شغّل Workflow الصوت ثم جرّب مرة أخرى.")
 
 
+# ===================== ADMIN FEATURES (Python) =====================
+ADMIN_DATA_FILE = BASE / "data" / "admin_data.json"
+
+
+def _load_admin_data() -> dict:
+    if ADMIN_DATA_FILE.exists():
+        try:
+            return json.loads(ADMIN_DATA_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"users": {}, "bans": {}, "broadcast": None}
+
+
+def _save_admin_data(data: dict) -> None:
+    ADMIN_DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _owner_id() -> int:
+    owner_file = BASE / "data" / "owner_chat_id.txt"
+    if owner_file.exists():
+        try:
+            return int(owner_file.read_text().strip())
+        except (ValueError, TypeError):
+            pass
+    return 0
+
+
+def _is_admin(update: Update) -> bool:
+    return update.effective_user is not None and update.effective_user.id == _owner_id()
+
+
+async def _track_user(update: Update) -> None:
+    user = update.effective_user
+    if not user:
+        return
+    import time as _time
+    data = _load_admin_data()
+    uid = str(user.id)
+    entry = data["users"].get(uid, {})
+    entry["name"] = (user.full_name or "")[:60]
+    entry["username"] = user.username or ""
+    entry["searches"] = int(entry.get("searches", 0)) + 1
+    entry["last_active"] = int(_time.time())
+    data["users"][uid] = entry
+    _save_admin_data(data)
+
+
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        await update.effective_message.reply_text("هذه الخاصية متاحة لمالك البوت فقط.")
+        return
+    data = _load_admin_data()
+    users = len(data["users"])
+    bans = len(data["bans"])
+    total_searches = sum(int(u.get("searches", 0)) for u in data["users"].values())
+    text = (
+        "🎛 <b>لوحة تحكم الأدمن</b>\n\n"
+        f"👥 المستخدمون: <b>{users}</b>\n"
+        f"🔍 إجمالي البحث: <b>{total_searches}</b>\n"
+        f"🚫 المحظورون: <b>{bans}</b>\n"
+        f"📚 سجلات القاموس: <b>{len(RECORDS):,}</b>\n\n"
+        "<b>الأوامر:</b>\n"
+        "/reload — إعادة تحميل القاموس\n"
+        "/users — قائمة المستخدمين\n"
+        "/topusers — الأكثر نشاطًا\n"
+        "/ban &lt;id&gt; — حظر مستخدم\n"
+        "/unban &lt;id&gt; — رفع الحظر\n"
+        "/broadcast &lt;نص&gt; — إرسال جماعي\n"
+        "/setname &lt;اسم&gt; — تغيير اسم البوت\n"
+        "/setabout &lt;نص&gt; — النص القصير (About)\n"
+        "/setdescription &lt;نص&gt; — الوصف الكامل\n"
+        "/exportusers — تصدير المستخدمين CSV\n"
+        "/botinfo — معلومات البوت\n"
+        "/leave &lt;chat_id&gt; — مغادرة مجموعة\n"
+        "/setcommands — تحديث قائمة الأوامر"
+    )
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def admin_reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        await update.effective_message.reply_text("هذه الخاصية متاحة لمالك البوت فقط.")
+        return
+    global RECORDS, SEARCH_TEXT
+    with DATA_FILE.open(encoding="utf-8") as f:
+        RECORDS = json.load(f)
+    SEARCH_TEXT = [normalize(" ".join(r.values())) for r in RECORDS]
+    await update.effective_message.reply_text(f"✅ تمت إعادة تحميل القاموس: {len(RECORDS):,} سجل.")
+
+
+async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        await update.effective_message.reply_text("هذه الخاصية متاحة لمالك البوت فقط.")
+        return
+    data = _load_admin_data()
+    users = sorted(data["users"].items(), key=lambda kv: -int(kv[1].get("searches", 0)))[:30]
+    lines = [f"👥 <b>المستخدمون</b> ({len(data['users'])}):", ""]
+    for uid, u in users:
+        ban = " 🚫" if uid in data["bans"] else ""
+        uname = f" (@{u['username']})" if u.get("username") else ""
+        lines.append(f"• <code>{uid}</code> — {esc(u.get('name', ''))}{uname} — {u.get('searches', 0)} بحث{ban}")
+    await update.effective_message.reply_text("\n".join(lines)[:3500], parse_mode=ParseMode.HTML)
+
+
+async def admin_topusers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        await update.effective_message.reply_text("هذه الخاصية متاحة لمالك البوت فقط.")
+        return
+    data = _load_admin_data()
+    top = sorted(data["users"].items(), key=lambda kv: -int(kv[1].get("searches", 0)))[:15]
+    lines = ["🏆 <b>الأكثر نشاطًا</b>", ""]
+    for i, (uid, u) in enumerate(top, 1):
+        lines.append(f"{i}. {esc(u.get('name', '—'))} — <b>{u.get('searches', 0)}</b> بحث")
+    await update.effective_message.reply_text("\n".join(lines)[:3500], parse_mode=ParseMode.HTML)
+
+
+async def admin_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        await update.effective_message.reply_text("هذه الخاصية متاحة لمالك البوت فقط.")
+        return
+    if not context.args or not context.args[0].isdigit():
+        await update.effective_message.reply_text("✏️ الاستخدام: /ban <user_id> [سبب]")
+        return
+    uid = context.args[0]
+    reason = " ".join(context.args[1:])[:120]
+    import time as _time
+    data = _load_admin_data()
+    data["bans"][uid] = {"reason": reason, "at": int(_time.time())}
+    _save_admin_data(data)
+    await update.effective_message.reply_text(f"🚫 تم حظر المستخدم <code>{uid}</code>.", parse_mode=ParseMode.HTML)
+
+
+async def admin_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        await update.effective_message.reply_text("هذه الخاصية متاحة لمالك البوت فقط.")
+        return
+    if not context.args or not context.args[0].isdigit():
+        await update.effective_message.reply_text("✏️ الاستخدام: /unban <user_id>")
+        return
+    uid = context.args[0]
+    data = _load_admin_data()
+    data["bans"].pop(uid, None)
+    _save_admin_data(data)
+    await update.effective_message.reply_text(f"✅ تم رفع الحظر عن <code>{uid}</code>.", parse_mode=ParseMode.HTML)
+
+
+async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        await update.effective_message.reply_text("هذه الخاصية متاحة لمالك البوت فقط.")
+        return
+    text = " ".join(context.args or [])
+    if not text:
+        await update.effective_message.reply_text("✏️ الاستخدام: /broadcast <نص الرسالة>")
+        return
+    data = _load_admin_data()
+    sent, failed = 0, 0
+    for uid in list(data["users"].keys()):
+        if uid in data["bans"] or int(uid) == _owner_id():
+            continue
+        try:
+            await context.bot.send_message(chat_id=int(uid), text=text)
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            failed += 1
+    await update.effective_message.reply_text(f"📢 اكتمل الإرسال: وصل {sent}، فشل {failed}.")
+
+
+async def admin_setname(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        return
+    name = " ".join(context.args or [])
+    if not name:
+        await update.effective_message.reply_text("✏️ /setname <الاسم الجديد>")
+        return
+    ok = await context.bot.set_my_name(name[:64])
+    await update.effective_message.reply_text("✅ تم تغيير اسم البوت." if ok else "❌ فشل التغيير.")
+
+
+async def admin_setabout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        return
+    about = " ".join(context.args or [])
+    if not about:
+        await update.effective_message.reply_text("✏️ /setabout <النص القصير>")
+        return
+    ok = await context.bot.set_my_short_description(about[:120])
+    await update.effective_message.reply_text("✅ تم تغيير النص القصير." if ok else "❌ فشل.")
+
+
+async def admin_setdescription(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        return
+    desc = " ".join(context.args or [])
+    if not desc:
+        await update.effective_message.reply_text("✏️ /setdescription <الوصف الكامل>")
+        return
+    ok = await context.bot.set_my_description(desc[:255])
+    await update.effective_message.reply_text("✅ تم تغيير الوصف." if ok else "❌ فشل.")
+
+
+async def admin_exportusers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        return
+    import csv, io
+    data = _load_admin_data()
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["user_id", "name", "username", "searches", "last_active"])
+    for uid, u in data["users"].items():
+        w.writerow([uid, u.get("name", ""), u.get("username", ""), u.get("searches", 0), u.get("last_active", "")])
+    buf.seek(0)
+    bio = io.BytesIO(buf.getvalue().encode("utf-8-sig"))
+    bio.name = "users.csv"
+    await update.effective_message.reply_document(bio, caption=f"👥 تصدير {len(data['users'])} مستخدم.")
+
+
+async def admin_botinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        return
+    me = await context.bot.get_me()
+    data = _load_admin_data()
+    text = (
+        f"🤖 <b>{esc(me.full_name)}</b> (@{esc(me.username)})\n"
+        f"🆔 <code>{me.id}</code>\n"
+        f"👥 المستخدمون: {len(data['users'])}\n"
+        f"🚫 المحظورون: {len(data['bans'])}\n"
+        f"📚 السجلات: {len(RECORDS):,}"
+    )
+    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def admin_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        return
+    if not context.args or not context.args[0].lstrip("-").isdigit():
+        await update.effective_message.reply_text("✏️ /leave <chat_id>")
+        return
+    ok = await context.bot.leave_chat(int(context.args[0]))
+    await update.effective_message.reply_text("✅ غادر البوت المجموعة." if ok else "❌ فشل المغادرة.")
+
+
+async def admin_setcommands(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        return
+    from telegram import BotCommand
+    user_cmds = [
+        BotCommand("start", "بدء الاستخدام"),
+        BotCommand("help", "المساعدة"),
+        BotCommand("stats", "إحصائيات القاموس"),
+    ]
+    admin_cmds = user_cmds + [
+        BotCommand("admin", "لوحة تحكم الأدمن"),
+        BotCommand("reload", "إعادة تحميل القاموس"),
+        BotCommand("broadcast", "إرسال جماعي"),
+        BotCommand("users", "قائمة المستخدمين"),
+        BotCommand("ban", "حظر مستخدم"),
+    ]
+    await context.bot.set_my_commands(user_cmds)
+    if _owner_id():
+        await context.bot.set_my_commands(admin_cmds, scope={"type": "chat", "chat_id": _owner_id()})
+    await update.effective_message.reply_text("✅ تم تحديث قائمة الأوامر.")
+
+
+async def text_search_tracked(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _track_user(update)
+    uid = str(update.effective_user.id) if update.effective_user else ""
+    data = _load_admin_data()
+    if uid in data["bans"]:
+        await update.effective_message.reply_text("🚫 تم حظرك من استخدام البوت.")
+        return
+    await text_search(update, context)
+
+
 def main():
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -350,11 +624,26 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("stats", stats))
+    # ---- Admin commands (Python) ----
+    app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CommandHandler("reload", admin_reload))
+    app.add_handler(CommandHandler("users", admin_users))
+    app.add_handler(CommandHandler("topusers", admin_topusers))
+    app.add_handler(CommandHandler("ban", admin_ban))
+    app.add_handler(CommandHandler("unban", admin_unban))
+    app.add_handler(CommandHandler("broadcast", admin_broadcast))
+    app.add_handler(CommandHandler("setname", admin_setname))
+    app.add_handler(CommandHandler("setabout", admin_setabout))
+    app.add_handler(CommandHandler("setdescription", admin_setdescription))
+    app.add_handler(CommandHandler("exportusers", admin_exportusers))
+    app.add_handler(CommandHandler("botinfo", admin_botinfo))
+    app.add_handler(CommandHandler("leave", admin_leave))
+    app.add_handler(CommandHandler("setcommands", admin_setcommands))
     app.add_handler(CallbackQueryHandler(audio_callback, pattern=r"^a\|"))
     app.add_handler(CallbackQueryHandler(page_callback, pattern=r"^p\|"))
     app.add_handler(MessageHandler(filters.PHOTO, set_profile_photo))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, voice_search))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_search))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_search_tracked))
     log.info("Starting bot with %s records", len(RECORDS))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
