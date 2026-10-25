@@ -2260,9 +2260,10 @@ const RATE_LIMIT_ADMIN_MULTIPLIER = 5;
 const RATE_WARN_COOLDOWN_MS = 30000;
 const rateBuckets = new Map(); // userId -> { windowStart, count }
 const rateLastWarn = new Map(); // userId -> last warning timestamp
-function checkRateLimit(userId, admin) {
+function checkRateLimit(userId, admin, customMax = null) {
   const now = Date.now();
-  const max = admin ? RATE_LIMIT_MAX * RATE_LIMIT_ADMIN_MULTIPLIER : RATE_LIMIT_MAX;
+  const base = Number(customMax) > 0 ? Number(customMax) : RATE_LIMIT_MAX;
+  const max = admin ? base * RATE_LIMIT_ADMIN_MULTIPLIER : base;
   const key = String(userId);
   let bucket = rateBuckets.get(key);
   if (!bucket || now - bucket.windowStart >= RATE_LIMIT_WINDOW_MS) {
@@ -2578,6 +2579,132 @@ async function resyncDictionary(env) {
   records.push(...fetched);
   SEARCH_INDEX_CACHE.clear();
   return { count: fetched.length };
+}
+
+// ============================================================================
+// Batch 2 admin features
+// ============================================================================
+// Custom rate limit (admin-adjustable, DO-stored, cached in memory).
+const rateLimitCache = { value: null, at: 0 };
+async function customRateLimit(env) {
+  const v = await cachedDoGet(env, "ratelimit:max", rateLimitCache, null);
+  return Number(v) > 0 ? Number(v) : RATE_LIMIT_MAX;
+}
+// Gamification: points per search + day streak; in-memory buffer flushed to DO.
+const gamifyCache = { value: null, at: 0 };
+const gamifyScores = new Map(); // userId -> { points, name, lastDay, streak }
+let gamifyFlushAt = 0;
+async function gamifyOn(env) { return Boolean(await cachedDoGet(env, "gamify:on", gamifyCache, false)); }
+function trackGamify(userId, name) {
+  const key = String(userId);
+  const today = utcDay();
+  const entry = gamifyScores.get(key) ?? { points: 0, name: String(name ?? "").slice(0, 40), lastDay: "", streak: 0 };
+  entry.points += 1;
+  if (entry.lastDay !== today) {
+    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    entry.streak = entry.lastDay === yesterday ? (entry.streak ?? 0) + 1 : 1;
+    entry.lastDay = today;
+  }
+  gamifyScores.set(key, entry);
+  if (gamifyScores.size > 5000) { const first = gamifyScores.keys().next().value; if (first) gamifyScores.delete(first); }
+}
+async function flushGamify(env) {
+  if (!env.USERS || !gamifyScores.size) return;
+  const now = Date.now();
+  if (now - gamifyFlushAt < 60000) return;
+  gamifyFlushAt = now;
+  try {
+    const previous = (await storeCall(env, { op: "get", key: "gamify:scores" })).value ?? {};
+    for (const [key, e] of gamifyScores) {
+      const prev = previous[key] ?? { points: 0, streak: 0, lastDay: "" };
+      previous[key] = { points: (prev.points ?? 0) + e.points, streak: Math.max(prev.streak ?? 0, e.streak), lastDay: e.lastDay || prev.lastDay, name: e.name || prev.name };
+    }
+    gamifyScores.clear();
+    await storeCall(env, { op: "put", key: "gamify:scores", value: previous });
+  } catch {}
+}
+async function leaderboardTop(env, n = 10) {
+  const persisted = env.USERS ? ((await storeCall(env, { op: "get", key: "gamify:scores" })).value ?? {}) : {};
+  for (const [key, e] of gamifyScores) {
+    const prev = persisted[key] ?? { points: 0, name: e.name };
+    persisted[key] = { ...prev, points: (prev.points ?? 0) + e.points, name: e.name || prev.name };
+  }
+  return Object.entries(persisted).sort((a, b) => (b[1].points ?? 0) - (a[1].points ?? 0)).slice(0, n);
+}
+// API keys (DO-stored set) + in-memory per-key rate limit.
+const apiKeyCache = { value: null, at: 0 };
+const apiKeyHits = new Map();
+async function validApiKey(env, key) {
+  const keys = await cachedDoGet(env, "apikeys:list", apiKeyCache, []);
+  return Array.isArray(keys) && keys.includes(String(key));
+}
+function apiKeyAllowed(key) {
+  const now = Date.now(); const k = String(key);
+  const bucket = apiKeyHits.get(k) ?? { at: now, count: 0 };
+  if (now - bucket.at > 60000) { bucket.at = now; bucket.count = 0; }
+  bucket.count += 1; apiKeyHits.set(k, bucket);
+  return bucket.count <= 120;
+}
+// Referral links: count new users per campaign.
+async function trackReflink(env, campaign) {
+  if (!env.USERS || !campaign) return;
+  const key = `reflinks:${String(campaign).slice(0, 30)}`;
+  try {
+    const current = (await storeCall(env, { op: "get", key })).value ?? 0;
+    await storeCall(env, { op: "put", key, value: current + 1 });
+  } catch {}
+}
+// Spam suspects (users who repeatedly hit the rate limit).
+const spamSuspects = new Set();
+function markSpamSuspect(userId) { spamSuspects.add(String(userId)); if (spamSuspects.size > 500) spamSuspects.clear(); }
+// Anki export: Front=Coptic, Back=meaning+pronunciation+origin.
+async function exportAnki(env, chatId) {
+  const rows = [["#separator:Comma"], ["#html:true"], ["#columns:Front,Back"], ["Front", "Back"]];
+  for (const record of records) {
+    if (record._deleted) continue;
+    const front = String(record.coptic ?? "").replaceAll('"', '""');
+    const back = [record.meaning, record.pronunciation ? `(${record.pronunciation})` : "", record.origin].filter(Boolean).join(" — ").replaceAll('"', '""');
+    if (front) rows.push([`"${front}"`, `"${back}"`]);
+    if (rows.length > 20000) break;
+  }
+  const csv = rows.map((r) => r.join(",")).join("\n");
+  const stamp = new Date().toISOString().slice(0, 10);
+  await sendTextFile(env, chatId, `coptic-anki-${stamp}.csv`, csv, `🃏 تصدير Anki: ${rows.length - 4} بطاقة.`, "text/csv");
+}
+
+// Admin uploads a voice/audio file; the bot downloads it, base64-encodes it, and calls the
+// existing Apps Script "upload" action (which requires audio_base64).
+async function uploadAdminAudio(env, message, userId, admin) {
+  const fileId = message.voice?.file_id ?? message.audio?.file_id;
+  const word = String(admin?.adminFlow?.word ?? "");
+  const info = await telegram(env, "getFile", { file_id: fileId });
+  if (!info?.ok) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ تعذّر الحصول على ملف الصوت من تيليجرام." }); return; }
+  const fileResp = await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${info.result.file_path}`);
+  if (!fileResp.ok) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ تعذّر تنزيل ملف الصوت." }); return; }
+  const bytes = new Uint8Array(await fileResp.arrayBuffer());
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  const base64 = btoa(binary);
+  const config = await driveConfig(env);
+  if (!config) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ لم يتم ربط Google Sheets/Drive." }); return; }
+  let result;
+  try {
+    result = await callAppsScript(config, {
+      action: "upload", word, audio_base64: base64,
+      mime: message.voice ? "audio/ogg" : (message.audio?.mime_type ?? "audio/mpeg"),
+      duration: message.voice?.duration ?? message.audio?.duration ?? 0,
+      by: { id: String(userId), name: String(admin?.name ?? ""), username: message.from?.username ?? "" },
+    });
+  } catch (error) { result = { ok: false, error: error instanceof Error ? error.message : "unknown" }; }
+  if (result?.ok) {
+    await clearAdminFlow(env, userId);
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم رفع الصوت لكلمة «${escapeHtml(word.slice(0, 40))}» إلى Drive وورقة upload.` });
+  } else {
+    const err = String(result?.error ?? "");
+    if (err.includes("unknown action") || err.includes("audio_base64")) await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ نسخة Apps Script قديمة — انشر Code.gs مرة أخرى." });
+    else await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `❌ فشل الرفع: ${err}` });
+  }
 }
 
 async function flushUsage(env, day, count) {
@@ -3542,8 +3669,10 @@ async function handleUpdate(update, env, ctx) {
   const userId = message.from?.id ?? message.chat.id;
   const isPrivate = (message.chat.type ?? "private") === "private";
   // Pro feature: per-user rate limit (sliding window). Admins get a higher limit.
-  const rate = checkRateLimit(userId, isAdmin(env, userId));
+  const rateMax = await customRateLimit(env);
+  const rate = checkRateLimit(userId, isAdmin(env, userId), rateMax);
   if (!rate.allowed) {
+    markSpamSuspect(userId);
     if (rate.shouldWarn) {
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `⏳ أرسلت طلبات كثيرة جدًا (${rate.count} من ${rate.max} خلال ${RATE_LIMIT_WINDOW_MS / 1000} ثوانٍ). ابتهد قليلًا ثم عاود المحاولة.` });
     }
@@ -3556,6 +3685,7 @@ async function handleUpdate(update, env, ctx) {
   inBackground(ctx, flushErrorLog(env));
   inBackground(ctx, flushUserHistory(env));
   if (text && !text.startsWith("/")) trackSearchHistory(userId, text);
+  if (text && !text.startsWith("/") && await gamifyOn(env)) { trackGamify(userId, displayName(message.from)); inBackground(ctx, flushGamify(env)); }
   // Admin feature: banned users get no response; maintenance mode blocks non-admins.
   const [banned, maint] = await Promise.all([isBanned(env, userId), maintenanceOn(env)]);
   if (banned) {
@@ -3715,6 +3845,128 @@ async function handleUpdate(update, env, ctx) {
       await sendUserHistoryReport(env, message.chat.id, text.slice("/userhistory".length).trim());
       return;
     }
+    // ---- Batch 2 admin commands ----
+    if (text === "/setbotname" || text.startsWith("/setbotname ")) {
+      const name = text.slice("/setbotname".length).trim();
+      if (!name) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /setbotname الاسم الجديد" }); return; }
+      const r = await telegram(env, "setMyName", { name: name.slice(0, 64) });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: r.ok ? "✅ تم تغيير اسم البوت." : `❌ ${r.description ?? "فشل"}` });
+      return;
+    }
+    if (text === "/setbotabout" || text.startsWith("/setbotabout ")) {
+      const about = text.slice("/setbotabout".length).trim();
+      if (!about) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /setbotabout النص القصير" }); return; }
+      const r = await telegram(env, "setMyShortDescription", { short_description: about.slice(0, 120) });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: r.ok ? "✅ تم تغيير النص القصير (About)." : `❌ ${r.description ?? "فشل"}` });
+      return;
+    }
+    if (text === "/setbotdescription" || text.startsWith("/setbotdescription ")) {
+      const desc = text.slice("/setbotdescription".length).trim();
+      if (!desc) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /setbotdescription الوصف الكامل" }); return; }
+      const r = await telegram(env, "setMyDescription", { description: desc.slice(0, 255) });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: r.ok ? "✅ تم تغيير الوصف (Description)." : `❌ ${r.description ?? "فشل"}` });
+      return;
+    }
+    if (text === "/setcommands") { commandMenuReady.delete("admin"); await ensureCommandMenu(env, userId); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم تحديث قائمة الأوامر." }); return; }
+    if (text === "/bulkedit" || text.startsWith("/bulkedit ")) {
+      const args = text.slice("/bulkedit".length).trim();
+      const match = /^([A-Ka-k])\s+(.+)$/u.exec(args);
+      if (!match) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /bulkedit <عمود A-K> <قيمة> — يملأ الخلايا الفاضية في ذلك العمود (حتى 50 صف)." }); return; }
+      const colIndex = match[1].toUpperCase().charCodeAt(0) - 65;
+      const field = DICTIONARY_LOCAL_FIELDS[colIndex];
+      const value = match[2];
+      const targets = [];
+      for (let i = 0; i < records.length && targets.length < 50; i += 1) {
+        const rec = records[i];
+        if (rec._deleted) continue;
+        if (field && !String(rec[field] ?? "").trim()) targets.push({ index: i, row: i + 2, coptic: rec.coptic });
+      }
+      if (!targets.length) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ لا توجد خلايا فاضية في هذا العمود." }); return; }
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `⏳ سيُملأ ${targets.length} صفًا في العمود ${match[1].toUpperCase()} بقيمة «${escapeHtml(value.slice(0, 40))}»…` });
+      inBackground(ctx, (async () => {
+        const config = await driveConfig(env);
+        if (!config) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ لم يتم ربط Sheets." }); return; }
+        let ok = 0, fail = 0;
+        for (const t of targets) {
+          const values = DICTIONARY_LOCAL_FIELDS.map((f) => (f ? String(records[t.index]?.[f] ?? "") : ""));
+          values[colIndex] = value;
+          try {
+            const r = await callAppsScript(config, { action: "dictionary_update", row: t.row, expected_coptic: t.coptic, values, by: { id: "813894692" } });
+            if (r.ok) { if (field) records[t.index][field] = value; ok += 1; } else fail += 1;
+          } catch { fail += 1; }
+        }
+        logAudit({ action: "bulkedit", userId: String(userId), column: field, value, updated: ok, failed: fail });
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ التعديل الجماعي: نجح ${ok}، فشل ${fail}.` });
+      })());
+      return;
+    }
+    if (text === "/gamify" || text.startsWith("/gamify ")) {
+      const arg = text.slice("/gamify".length).trim().toLowerCase();
+      if (arg === "on") { if (env.USERS) await storeCall(env, { op: "put", key: "gamify:on", value: true }); invalidateCache(gamifyCache); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم تفعيل النقاط ولوحة المتصدرين." }); }
+      else if (arg === "off") { if (env.USERS) await storeCall(env, { op: "put", key: "gamify:on", value: false }); invalidateCache(gamifyCache); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إيقاف النقاط." }); }
+      else await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `الوضع: ${(await gamifyOn(env)) ? "مفعّل" : "متوقف"}\n/gamify on | off` });
+      return;
+    }
+    if (text === "/apikey" || text.startsWith("/apikey ")) {
+      const parts = text.split(/\s+/u);
+      const sub = parts[1] ?? "list";
+      const keys = env.USERS ? ((await storeCall(env, { op: "get", key: "apikeys:list" })).value ?? []) : [];
+      if (sub === "generate") {
+        const key = `cdb_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+        keys.push(key);
+        if (env.USERS) await storeCall(env, { op: "put", key: "apikeys:list", value: keys });
+        invalidateCache(apiKeyCache);
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `🔑 المفتاح الجديد:\n<code>${escapeHtml(key)}</code>\nالاستخدام: /api/dictionary?key=...&q=كلمة`, parse_mode: "HTML" });
+      } else if (sub === "revoke" && parts[2]) {
+        const filtered = keys.filter((k) => k !== parts[2]);
+        if (env.USERS) await storeCall(env, { op: "put", key: "apikeys:list", value: filtered });
+        invalidateCache(apiKeyCache);
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء المفتاح." });
+      } else {
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `🔑 المفاتيح (${keys.length}):\n${keys.map((k) => `<code>${escapeHtml(k)}</code>`).join("\n") || "لا توجد. أنشئ بـ /apikey generate"}\n/apikey generate | revoke <key>`, parse_mode: "HTML" });
+      }
+      return;
+    }
+    if (text === "/ratelimit" || text.startsWith("/ratelimit ")) {
+      const arg = Number(text.slice("/ratelimit".length).trim());
+      if (!Number.isFinite(arg) || arg < 5) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✏️ الاستخدام: /ratelimit <عدد>\nالحد الحالي: ${await customRateLimit(env)} طلب / ${RATE_LIMIT_WINDOW_MS / 1000} ثوانٍ (الأدمن ×${RATE_LIMIT_ADMIN_MULTIPLIER}).` }); return; }
+      if (env.USERS) await storeCall(env, { op: "put", key: "ratelimit:max", value: Math.round(arg) });
+      invalidateCache(rateLimitCache);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم ضبط الحد على ${Math.round(arg)} طلب / ${RATE_LIMIT_WINDOW_MS / 1000} ثوانٍ.` });
+      return;
+    }
+    if (text === "/reflinks") {
+      if (!env.USERS) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ غير مفعّل." }); return; }
+      const all = await storeCall(env, { op: "userpage", limit: 200 });
+      const counts = new Map();
+      for (const { record } of all.users ?? []) {
+        if (record?.reflink) counts.set(record.reflink, (counts.get(record.reflink) ?? 0) + 1);
+      }
+      const lines = ["🔗 <b>روابط الدعوة</b>", "", ...[...counts.entries()].sort((a, b) => b[1] - a[1]).map(([c, n]) => `• ${escapeHtml(c)}: ${n} مستخدم`)];
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: lines.length > 3 ? lines.join("\n") : "لا توجد إحالات مسجلة. استخدم https://t.me/<البوت>?start=campaign", parse_mode: "HTML" });
+      return;
+    }
+    if (text === "/uploadaudio" || text.startsWith("/uploadaudio ")) {
+      const word = text.slice("/uploadaudio".length).trim();
+      if (!word) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /uploadaudio <كلمة> ثم أرسل ملف الصوت/Voice." }); return; }
+      await setAdminFlow(env, userId, { kind: "uploadaudio", word });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `🎙 أرسل الآن ملف الصوت (Voice أو audio) للكلمة «${escapeHtml(word.slice(0, 40))}».` });
+      return;
+    }
+    if (text === "/exportanki") { await exportAnki(env, message.chat.id); return; }
+    if (text === "/setmenubutton" || text.startsWith("/setmenubutton ")) {
+      const arg = text.slice("/setmenubutton".length).trim();
+      if (!arg) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /setmenubutton default  أو  /setmenubutton https://example.com" }); return; }
+      const menuButton = arg === "default" ? { type: "default" } : { type: "web_app", text: "فتح", web_app: { url: arg } };
+      const r = await telegram(env, "setChatMenuButton", { menu_button: menuButton });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: r.ok ? "✅ تم ضبط زر القائمة." : `❌ ${r.description ?? "فشل"}` });
+      return;
+    }
+    if (text === "/spamlist") {
+      const list = [...spamSuspects].slice(0, 30);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: list.length ? `⚠️ <b>مشتبه بهم بالسبام</b> (${list.length}):\n${list.map((id) => `• <code>${escapeHtml(id)}</code> — /ban ${id}`).join("\n")}` : "✅ لا يوجد مشتبه بهم.", parse_mode: "HTML" });
+      return;
+    }
     if (text === "/syncusers") {
       await inBackground(ctx, syncUsersBatch(env, message.chat.id));
       return;
@@ -3760,6 +4012,10 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     if (await handleAdminFlow(env, message, userId, admin, text)) return;
+    if (admin?.adminFlow?.kind === "uploadaudio" && (message.voice || message.audio)) {
+      await uploadAdminAudio(env, message, userId, admin);
+      return;
+    }
     if (admin?.voiceRec && (message.voice || message.audio)) {
       await captureVoiceRecording(env, message, userId, admin, ctx);
       return;
@@ -3781,6 +4037,12 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     const user = known ?? await getUser(env, userId);
+    // Referral link tracking: /start <campaign> remembers the source for new users.
+    const startParam = text.startsWith("/start ") ? text.slice(7).trim() : "";
+    if (startParam && !user?.registeredAt) {
+      inBackground(ctx, trackReflink(env, startParam));
+      if (env.USERS) await saveUser(env, userId, { ...user, reflink: startParam });
+    }
     if (user?.name) {
       await sendWelcome(env, message.chat.id, user.name);
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: buildCommandsHelpText(env, userId), parse_mode: "HTML", disable_web_page_preview: true });
@@ -3810,6 +4072,14 @@ async function handleUpdate(update, env, ctx) {
     }
     const entry = await addSuggestion(env, userId, suggestion);
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: entry ? "✅ تم استلام اقتراحك وسيُراجعه الأدمن قريبًا. شكرًا لمساهمتك!" : "⚠️ تعذّر حفظ الاقتراح حاليًا، جرّب لاحقًا." });
+    return;
+  }
+  if (text === "/leaderboard") {
+    const top = await leaderboardTop(env, 10);
+    const lines = ["🏆 <b>لوحة المتصدرين</b>", ""];
+    if (!top.length) lines.push("لا توجد نقاط مسجلة بعد. اكتب أي كلمة للبحث واكسب نقاطًا!");
+    top.forEach(([id, e], i) => { lines.push(`${i + 1}. ${escapeHtml(String(e?.name ?? id).slice(0, 30))} — ${Number(e?.points ?? 0).toLocaleString("en-US")} نقطة${e?.streak > 1 ? ` (سلسلة ${e.streak} أيام)` : ""}`); });
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: lines.join("\n").slice(0, 2000), parse_mode: "HTML" });
     return;
   }
   if (message.voice || message.audio) {
@@ -3876,6 +4146,20 @@ export default {
         usersStore: Boolean(env.USERS),
         driveConfigured: Boolean(await driveConfig(env).catch(() => null)),
       });
+    }
+    // Public read-only API for external consumers (admin-issued keys, 120 req/min per key).
+    if (request.method === "GET" && url.pathname === "/api/dictionary") {
+      const key = url.searchParams.get("key") ?? "";
+      const q = url.searchParams.get("q") ?? "";
+      const jsonHeaders = { "content-type": "application/json; charset=utf-8" };
+      if (!key || !(await validApiKey(env, key))) {
+        return new Response(JSON.stringify({ ok: false, error: "invalid or missing api key" }), { status: 403, headers: jsonHeaders });
+      }
+      if (!apiKeyAllowed(key)) {
+        return new Response(JSON.stringify({ ok: false, error: "rate limit exceeded (120/min per key)" }), { status: 429, headers: jsonHeaders });
+      }
+      const candidates = (localDictionaryCandidates(q, 10).candidates ?? []).map((c) => ({ row: c.row, values: c.values }));
+      return new Response(JSON.stringify({ ok: true, query: q, count: candidates.length, results: candidates }), { status: 200, headers: jsonHeaders });
     }
 
     if (request.method === "POST" && url.pathname === "/voice-drive") {

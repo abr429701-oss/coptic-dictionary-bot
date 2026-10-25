@@ -129,3 +129,35 @@ npm run dev
 - **و. نقطة صحية /health JSON**: ترجع `{"status":"ready","records":N,"time":...,"usersStore":bool,"driveConfigured":bool}` للمراقبة (تبقى تحتوي كلمة "ready" للتوافق).
 - **ز. نسخة احتياطية /backup**: أمر أدمن يأخذ لقطة فورية من `records` ويرسلها كملف JSON مؤرشف بالتوقيت.
 - **ح. تحسين logging**: كل طلب webhook يُسجَّل بمدته ونوعه بشكل منظم (`console.log` JSON بمفاتيح موحدة: `ev`, `kind`, `update_id`, `dur_ms`)، بالإضافة إلى سجل `audit` لكل تعديل قاموس.
+
+## Admin Commands — الدفعة الأولى (13 ميزة)
+- **الإذاعة الجماعية /broadcast**: موجودة بالفعل (bcstart في UserStore + alarm بسرعة ~25 msg/sec + تخطي المحظورين + تقرير نهائي) + زر الحالة `ad|bcstatus`.
+- **إدارة المستخدمين**: `/users [بحث]` قائمة آخر المستخدمين، `/ban <id> [سبب]`، `/unban <id>`، `/userinfo <id>` (آخر عمليات بحث + تاريخ انضمام). المحظورون يُرفضون في بداية كل رسالة.
+- **حذف كلمة /deleteword**: بحث محلي → تأكيد مزدوج → `dictionary_delete` في Code.gs + حذف ناعم محلي (يحفظ السجل كاملًا في audit log).
+- **إحصائيات القاموس /dictstats**: الإجمالي، الناقصة صوتًا، التوزيع حسب kind/origin، آخر 10 مضافة.
+- **وضع الصيانة /maintenance on|off**: محفوظ في DO؛ المستخدمون العاديون يرون رسالة صيانة، الأدمن يفضل شغال. زر `ad|maintoggle`.
+- **محرر الترحيب /editwelcome <نص>** (استخدم `{name}`) و`/resetwelcome` للنص الأصلي؛ محفوظ في DO.
+- **إدارة الأدمنية /admins list|add <id>|remove <id>**: أدمن إضافيون في DO يُدمجون مع DEFAULT_ADMIN_IDS (كاش في الذاكرة، `isAdmin` يفحص الاثنين).
+- **سجل الأخطاء /errors**: يلتقط الاستثناءات في handleUpdate، آخر 20 خطأ في ذاكرة+DO.
+- **كشف المكررات /duplicates**: كلمات بنفس الكلمة القبطية بعد التطبيع، مع أرقام الصفوف.
+- **معاينة /preview <كلمة>**: تعرض الكلمة كما يراها المستخدم العادي.
+- **إعادة مزامنة قسرية /resync**: يعيد تحميل dictionary.json من GitHub raw ويمسح كاش فهرس البحث.
+- **صندوق الاقتراحات**: `/suggest <نص>` عام يحفظ الاقتراح في DO؛ الأدمن يشوفها بـ `/suggestions` مع أزرار موافقة (تضيف تلقائيًا عبر dictionary_append) / رفض.
+- **سجل بحث مستخدم /userhistory <id>**: آخر عمليات بحث (ring buffer في ذاكرة + لقطة دورية في DO).
+
+## Admin Commands — الدفعة الثانية (10 ميزات)
+- **محرر معلومات البوت**: `/setbotname`، `/setbotabout`، `/setbotdescription` (setMyName/setMyShortDescription/setMyDescription)، `/setcommands`.
+- **تعديل جماعي /bulkedit <عمود A-K> <قيمة>**: يملأ الخلايا الفاضية في ذلك العمود (حتى 50 صف) عبر dictionary_update، مع تقرير نجاح/فشل.
+- **نقاط ولوحة متصدرين /gamify on|off** + `/leaderboard` (عام): نقاط لكل بحث + سلسلة أيام، محفوظة في DO بلقطة دورية.
+- **مفاتيح API /apikey generate|list|revoke <key>** + endpoint عام للقراءة `GET /api/dictionary?key=...&q=...` (JSON، rate limit 120/min لكل مفتاح).
+- **تخصيص حدود السرعة /ratelimit <عدد>**: يضبط الحد العام محفوظًا في DO ويقرأه `checkRateLimit`.
+- **روابط دعائية /reflinks**: تتبع المستخدمين الجدد من `t.me/bot?start=campaign` (يُحفظ reflink في ملف المستخدم).
+- **رفع صوت نطق /uploadaudio <كلمة>**: الأدمن يرسل Voice/audio، البوت ينزله عبر getFile، يحوله base64، ويستدعي إجراء `upload` الموجود في Apps Script.
+- **تصدير Anki /exportanki**: CSV بتنسيق Anki (Front=قبطي، Back=المعنى+النطق+الأصل).
+- **زر القائمة /setmenubutton default|<url>**: ضبط setChatMenuButton.
+- **كشف سبام تلقائي /spamlist**: المستخدمون الذين يتجاوزون rate limit يُعلَمون مشبوهين ويظهرون للأدمن بضغطة زر مع اختصار /ban.
+
+### مميزات استُبعدت عمدًا
+- **تحرير مخطط الأعمدة (/addcolumn)**: يغيّر ثوابت DICTIONARY_LOCAL_FIELDS وبنية الشيت — خطر كسر البيانات.
+- **إصدارات القاموس /rollback**: القاموس 7MB فلا يصلح تخزين لقطات كاملة في DO؛ النسخ الاحتياطي الكامل متاح عبر `/backup` كملف.
+- **وضع الاختبار /quiz وكلمات مرتبطة /linkwords وصيانة مجدولة /schedmaint**: مؤجلة لتجنب التعقيد؛ الصيانة اليدوية متاحة عبر `/maintenance`.
