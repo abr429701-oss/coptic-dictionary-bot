@@ -36,10 +36,14 @@ function doPost(e) {
     const body = JSON.parse((e && e.postData && e.postData.contents) || "{}");
     if (body.action === "ping") return json_(ping_());
     if (body.action === "sync_github_audio") return json_(syncGithubAudio_(body));
-    if (body.action === "dictionary_get" || body.action === "dictionary_update") {
+    if (["dictionary_search", "dictionary_get", "dictionary_get_row", "dictionary_add", "dictionary_update"].indexOf(body.action) >= 0) {
       const dictionaryAdmin = body.by && body.by.id != null ? String(body.by.id) : "";
       if (dictionaryAdmin !== "813894692") return json_({ ok: false, error: "unauthorized" });
-      return json_(body.action === "dictionary_get" ? dictionaryGet_(body.word) : dictionaryUpdate_(body));
+      if (body.action === "dictionary_search") return json_(dictionarySearch_(body.word));
+      if (body.action === "dictionary_get") return json_(dictionaryGet_(body.word));
+      if (body.action === "dictionary_get_row") return json_(dictionaryGetRow_(body.row));
+      if (body.action === "dictionary_add") return json_(dictionaryAdd_(body.values));
+      return json_(dictionaryUpdate_(body));
     }
     if (body.action === "users") return json_(upsertUsers_(body.users));
     if (["sync", "reconcile", "delete", "delete_many", "delete_all"].indexOf(body.action) >= 0) {
@@ -121,40 +125,123 @@ function dictionarySheet_() {
 function normalizeDictionaryWord_(value) {
   return String(value || "").normalize("NFC").replace(/`/g, "").replace(/\s+/g, " ").trim().toLowerCase();
 }
-function dictionaryGet_(word) {
+function dictionaryHeaders_(sheet) {
+  const columns = Math.max(1, sheet.getLastColumn ? sheet.getLastColumn() : 1);
+  return { columns: columns, headers: sheet.getRange(1, 1, 1, columns).getValues()[0] };
+}
+function boundedWordDistance_(left, right, limit) {
+  if (Math.abs(String(left).length - String(right).length) > limit) return limit + 1;
+  const a = Array.from(left), b = Array.from(right);
+  if (Math.abs(a.length - b.length) > limit) return limit + 1;
+  let previous = Array.from({ length: b.length + 1 }, function (_, index) { return index; });
+  for (let i = 1; i <= a.length; i++) {
+    const current = [i];
+    let minimum = Infinity;
+    for (let j = 1; j <= b.length; j++) {
+      current[j] = Math.min(current[j - 1] + 1, previous[j] + 1, previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (current[j] < minimum) minimum = current[j];
+    }
+    if (minimum > limit) return limit + 1;
+    previous = current;
+  }
+  return previous[b.length];
+}
+function dictionarySearch_(word) {
   const wanted = normalizeDictionaryWord_(word);
   if (!wanted) return { ok: false, error: "word is required" };
   const sheet = dictionarySheet_();
-  const columns = Math.max(1, sheet.getLastColumn ? sheet.getLastColumn() : 11);
-  const headers = sheet.getRange(1, 1, 1, columns).getValues()[0];
+  const info = dictionaryHeaders_(sheet), columns = info.columns, headers = info.headers;
   const rows = sheet.getLastRow() > 1 ? sheet.getRange(2, 1, sheet.getLastRow() - 1, columns).getValues() : [];
-  let partial = null;
+  const bestByRow = {};
   for (let i = 0; i < rows.length; i++) {
     for (let column = 0; column < rows[i].length; column++) {
       const cell = normalizeDictionaryWord_(rows[i][column]);
       if (!cell) continue;
-      if (cell === wanted) return { ok: true, row: i + 2, matched_column: column, headers: headers, values: rows[i] };
-      if (!partial && (cell.indexOf(wanted) >= 0 || wanted.indexOf(cell) >= 0)) partial = { row: i + 2, matched_column: column, headers: headers, values: rows[i] };
+      let score = 0;
+      if (cell === wanted) score = 1000;
+      else if (cell.indexOf(wanted) === 0) score = 700;
+      else if (cell.indexOf(wanted) >= 0) score = 500;
+      else if (cell.length >= 3 && wanted.indexOf(cell) >= 0) score = 450;
+      const rowNumber = i + 2;
+      if (score && (!bestByRow[rowNumber] || score > bestByRow[rowNumber].score || (score === bestByRow[rowNumber].score && column < bestByRow[rowNumber].matched_column))) {
+        bestByRow[rowNumber] = { row: rowNumber, matched_column: column, score: score, headers: headers, values: rows[i] };
+      }
     }
   }
-  if (partial) return { ok: true, ...partial };
-  return { ok: false, error: "word not found" };
+  const matches = Object.keys(bestByRow).map(function (row) { return bestByRow[row]; });
+  matches.sort(function (a, b) { return b.score - a.score || a.row - b.row; });
+  if (matches.length) return { ok: true, matches: matches.slice(0, 12) };
+
+  // Only pay the edit-distance cost when there is no exact, prefix or substring hit.
+  // Most queries therefore stay on a single linear, allocation-light pass.
+  if (wanted.length < 3) return { ok: true, matches: [] };
+  const limit = wanted.length >= 6 ? 2 : 1;
+  const fuzzyByRow = {};
+  const fuzzyColumns = { 0: true, 2: true, 3: true, 4: true, 5: true, 6: true };
+  for (let i = 0; i < rows.length; i++) {
+    for (let column = 0; column < rows[i].length; column++) {
+      if (!fuzzyColumns[column]) continue;
+      const cell = normalizeDictionaryWord_(rows[i][column]);
+      if (!cell || Math.abs(cell.length - wanted.length) > limit) continue;
+      const distance = boundedWordDistance_(wanted, cell, limit);
+      if (distance <= limit) {
+        const rowNumber = i + 2;
+        const score = 300 - distance * 50;
+        if (!fuzzyByRow[rowNumber] || score > fuzzyByRow[rowNumber].score) {
+          fuzzyByRow[rowNumber] = { row: rowNumber, matched_column: column, score: score, headers: headers, values: rows[i] };
+        }
+      }
+    }
+  }
+  const fuzzy = Object.keys(fuzzyByRow).map(function (row) { return fuzzyByRow[row]; });
+  fuzzy.sort(function (a, b) { return b.score - a.score || a.row - b.row; });
+  return { ok: true, matches: fuzzy.slice(0, 12) };
+}
+function dictionaryGet_(word) {
+  const result = dictionarySearch_(word);
+  if (!result.ok) return result;
+  if (!result.matches.length) return { ok: false, error: "word not found" };
+  return { ok: true, ...result.matches[0] };
+}
+function dictionaryGetRow_(rowValue) {
+  const row = Number(rowValue);
+  if (!Number.isInteger(row) || row < 2) return { ok: false, error: "row is out of range" };
+  const sheet = dictionarySheet_();
+  if (row > sheet.getLastRow()) return { ok: false, error: "row is out of range" };
+  const info = dictionaryHeaders_(sheet);
+  return { ok: true, row: row, headers: info.headers, values: sheet.getRange(row, 1, 1, info.columns).getValues()[0] };
+}
+function dictionaryAdd_(inputValues) {
+  if (!Array.isArray(inputValues) || !normalizeDictionaryWord_(inputValues[0])) return { ok: false, error: "Coptic word is required" };
+  return withScriptLock_(function () {
+    const sheet = dictionarySheet_(), info = dictionaryHeaders_(sheet);
+    const values = Array.from({ length: info.columns }, function (_, index) {
+      return index < inputValues.length && inputValues[index] != null ? inputValues[index] : "";
+    });
+    if (!normalizeDictionaryWord_(values[0])) return { ok: false, error: "Coptic word is required" };
+    const row = sheet.getLastRow() + 1;
+    sheet.getRange(row, 1, 1, info.columns).setValues([values]);
+    SpreadsheetApp.flush();
+    return { ok: true, row: row, headers: info.headers, values: values };
+  });
 }
 function dictionaryUpdate_(body) {
   const row = Number(body.row);
   const expected = normalizeDictionaryWord_(body.expected_coptic);
   if (!Number.isInteger(row) || row < 2 || !expected || !Array.isArray(body.values)) return { ok: false, error: "row, expected_coptic and values are required" };
-  const sheet = dictionarySheet_();
-  const columns = Math.max(1, sheet.getLastColumn ? sheet.getLastColumn() : body.values.length);
-  if (row > sheet.getLastRow()) return { ok: false, error: "row is out of range" };
-  const current = sheet.getRange(row, 1, 1, columns).getValues()[0];
-  if (normalizeDictionaryWord_(current[0]) !== expected) return { ok: false, error: "row changed; search for the word again" };
-  const values = Array.from({ length: columns }, function (_, index) {
-    return index < body.values.length ? body.values[index] : current[index];
+  return withScriptLock_(function () {
+    const sheet = dictionarySheet_();
+    const info = dictionaryHeaders_(sheet), columns = info.columns;
+    if (row > sheet.getLastRow()) return { ok: false, error: "row is out of range" };
+    const current = sheet.getRange(row, 1, 1, columns).getValues()[0];
+    if (normalizeDictionaryWord_(current[0]) !== expected) return { ok: false, error: "row changed; search for the word again" };
+    const values = Array.from({ length: columns }, function (_, index) {
+      return index < body.values.length ? body.values[index] : current[index];
+    });
+    sheet.getRange(row, 1, 1, columns).setValues([values]);
+    SpreadsheetApp.flush();
+    return { ok: true, row: row, headers: info.headers, values: values };
   });
-  sheet.getRange(row, 1, 1, columns).setValues([values]);
-  SpreadsheetApp.flush();
-  return { ok: true, row: row, headers: sheet.getRange(1, 1, 1, columns).getValues()[0], values: values };
 }
 
 function normalizeAudioWord_(value) {

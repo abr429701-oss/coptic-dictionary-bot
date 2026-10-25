@@ -503,7 +503,11 @@ test("/start asks a new user for a letters-only name, then welcomes with a photo
 
   calls = await say(kvEnv, 21, "مينا");
   const photo = calls.find((call) => call.url.endsWith("/sendPhoto")).payload;
-  assert.equal(photo.caption, "مرحبًا بك مينا، في القاموس القبطي الناطق، تفضل الان بكتابة أي كلمة للبحث عنها.");
+  assert.match(photo.caption, /مرحبًا بك مينا، في القاموس القبطي الناطق/u);
+  assert.match(photo.caption, /<b>طريقة الاستخدام<\/b>/u);
+  assert.match(photo.caption, /\/keyboard/u);
+  assert.match(photo.caption, /\/help/u);
+  assert.ok(photo.caption.length < 1024, "Telegram photo captions are limited to 1024 characters");
   assert.ok(photo.photo instanceof Blob && photo.photo.size > 1000);
   assert.equal(photo.parse_mode, "HTML");
 });
@@ -731,9 +735,50 @@ async function adminCallback(kvEnv, id, data) {
   return calls;
 }
 
+async function chooseBroadcastAudience(kvEnv, id = ADMIN, audience = "all") {
+  return adminCallback(kvEnv, id, `bc|${audience}`);
+}
+
 function seedUsers(kvEnv, ids) {
   for (const id of ids) kvEnv.USERS.store.set(`user:${id}`, { name: `user ${id}` });
 }
+
+test("admin viewer can read dashboard reports but cannot start a broadcast", async () => {
+  const viewerEnv = { ...env, USERS: fakeKv(), ADMIN_VIEWER_IDS: "445566" };
+  const calls = await asUser(viewerEnv, 445566, { text: "/admin" });
+  const dashboard = sent(calls).find((item) => /لوحة تحكم الأدمن/u.test(item.text));
+  assert.ok(dashboard);
+  assert.ok(dashboard.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === "ad|missed"));
+  assert.ok(dashboard.reply_markup.inline_keyboard.flat().every((button) => !/dict|broadcast|sync|delete|record/u.test(button.callback_data)));
+  const denied = await asUser(viewerEnv, 445566, { text: "/broadcast" });
+  assert.match(sent(denied).at(-1).text, /صلاحية قراءة فقط/u);
+  assert.equal(viewerEnv.USERS.store.get("user:445566")?.bc, undefined);
+});
+
+test("configured full admins each receive their own scoped command menu", async () => {
+  const managerEnv = { ...env, USERS: fakeKv(), ADMIN_IDS: "445577,445588" };
+  for (const id of [445577, 445588]) {
+    const calls = await asUser(managerEnv, id, { text: "/start" });
+    const menu = calls.find((call) => call.url.endsWith("/setMyCommands"))?.payload;
+    assert.equal(menu.scope.chat_id, id);
+    assert.ok(menu.commands.some((command) => command.command === "admin"));
+  }
+});
+
+test("search misses are aggregated without user ids and reported to admins", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await say(kvEnv, 434343, "zzqzx-not-a-dictionary-word");
+  await say(kvEnv, 434343, "zzqzx-not-a-dictionary-word");
+  const missEntries = [...kvEnv.USERS.store].filter(([key]) => key.startsWith("miss:"));
+  assert.equal(missEntries.length, 1);
+  assert.equal(missEntries[0][1].count, 2);
+  assert.ok(!Object.keys(missEntries[0][1]).some((key) => /user|telegram|id/iu.test(key)));
+  const report = await asUser(kvEnv, ADMIN, { text: "/missed" });
+  const summary = sent(report).find((item) => /الكلمات التي لم تجد نتيجة/u.test(item.text));
+  assert.match(summary.text, /zzqzx-not-a-dictionary-word/u);
+  assert.match(summary.text, /مرتين|2/u);
+  assert.ok(summary.reply_markup.inline_keyboard[0][0].callback_data.startsWith("ad|misspick|"));
+});
 
 test("only the admin can start a broadcast", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
@@ -747,7 +792,10 @@ test("admin broadcast: prompt, capture any message, confirm, then deliver in bat
   seedUsers(kvEnv, [101, 102, 103, ADMIN]);
 
   let calls = await asUser(kvEnv, ADMIN, { text: "/broadcast" });
-  assert.match(sent(calls)[0].text, /أرسل الآن الرسالة/u);
+  assert.match(sent(calls)[0].text, /اختر الجمهور/u);
+  assert.deepEqual(sent(calls)[0].reply_markup.inline_keyboard.map((row) => row[0].callback_data), ["bc|all", "bc|registered", "bc|no"]);
+  calls = await chooseBroadcastAudience(kvEnv);
+  assert.match(edits(calls)[0].text, /كل المستخدمين غير المحظورين/u);
 
   calls = await asUser(kvEnv, ADMIN, { message_id: 77, photo: [{ file_id: "p" }], caption: "إعلان" });
   const confirm = sent(calls)[0];
@@ -769,10 +817,23 @@ test("admin broadcast: prompt, capture any message, confirm, then deliver in bat
   assert.equal(kvEnv.USERS.store.get("broadcast"), undefined);
 });
 
+test("registered-only broadcast counts only users who completed name registration", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  kvEnv.USERS.store.set("user:111", { name: "مينا جرجس" });
+  kvEnv.USERS.store.set("user:112", { awaitingName: true });
+  await asUser(kvEnv, ADMIN, { text: "/broadcast" });
+  await chooseBroadcastAudience(kvEnv, ADMIN, "registered");
+  const captured = await asUser(kvEnv, ADMIN, { message_id: 120, text: "إعلان للمسجلين" });
+  assert.match(sent(captured)[0].text, /إلى 1 مستخدم/u);
+  const cancel = await adminCallback(kvEnv, ADMIN, "bc|no");
+  assert.match(edits(cancel)[0].text, /تم إلغاء/u);
+});
+
 test("broadcast marks blocked users, skips them next time, and backs off on rate limits", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   seedUsers(kvEnv, [201, 202, 203]);
   await asUser(kvEnv, ADMIN, { text: "/broadcast" });
+  await chooseBroadcastAudience(kvEnv);
   await asUser(kvEnv, ADMIN, { message_id: 9, text: "مرحبا بالجميع" });
   await adminCallback(kvEnv, ADMIN, "bc|go");
 
@@ -801,6 +862,7 @@ test("broadcast marks blocked users, skips them next time, and backs off on rate
   assert.match(report, /وصلت إلى: 2[^]*تعذّر الإرسال: 1[^]*استُبعدت بسبب منع البوت \(403\): 1/u);
 
   await asUser(kvEnv, ADMIN, { text: "/broadcast" });
+  await chooseBroadcastAudience(kvEnv);
   const again = await asUser(kvEnv, ADMIN, { message_id: 10, text: "again" });
   assert.match(sent(again)[0].text, /إلى 2 مستخدم/u);
 });
@@ -809,6 +871,7 @@ test("a quiz poll that cannot be copied is recreated for each recipient with its
   const kvEnv = { ...env, USERS: fakeKv() };
   seedUsers(kvEnv, [501]);
   await asUser(kvEnv, ADMIN, { text: "/broadcast" });
+  await chooseBroadcastAudience(kvEnv);
   const poll = {
     id: "poll-id",
     question: "ما معنى الكلمة؟",
@@ -849,6 +912,7 @@ test("a content-related 400 failure is reported but does not mark recipients as 
   const kvEnv = { ...env, USERS: fakeKv() };
   seedUsers(kvEnv, [511]);
   await asUser(kvEnv, ADMIN, { text: "/broadcast" });
+  await chooseBroadcastAudience(kvEnv);
   await asUser(kvEnv, ADMIN, { message_id: 89, document: { file_id: "doc" } });
   await adminCallback(kvEnv, ADMIN, "bc|go");
 
@@ -874,6 +938,7 @@ test("voice and document broadcasts use Telegram's type-preserving copy method",
     const kvEnv = { ...env, USERS: fakeKv() };
     seedUsers(kvEnv, [521]);
     await asUser(kvEnv, ADMIN, { text: "/broadcast" });
+    await chooseBroadcastAudience(kvEnv);
     const captured = await asUser(kvEnv, ADMIN, { message_id: 90, ...payload });
     assert.match(sent(captured)[0].text, /هل تريد التأكيد/u);
     await adminCallback(kvEnv, ADMIN, "bc|go");
@@ -892,6 +957,7 @@ test("temporary network failures retry the same recipient and keep the broadcast
   const kvEnv = { ...env, USERS: fakeKv() };
   seedUsers(kvEnv, [531]);
   await asUser(kvEnv, ADMIN, { text: "/broadcast" });
+  await chooseBroadcastAudience(kvEnv);
   await asUser(kvEnv, ADMIN, { message_id: 91, text: "رسالة" });
   await adminCallback(kvEnv, ADMIN, "bc|go");
 
@@ -918,6 +984,7 @@ test("cancel and non-admin confirmation do nothing harmful", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   seedUsers(kvEnv, [301]);
   await asUser(kvEnv, ADMIN, { text: "/broadcast" });
+  await chooseBroadcastAudience(kvEnv);
   await asUser(kvEnv, ADMIN, { message_id: 5, text: "رسالة" });
 
   let calls = await adminCallback(kvEnv, 999, "bc|go");
@@ -1265,6 +1332,75 @@ test("/setdrive reset removes the override and falls back to APPS_SCRIPT_URL", a
   await adminSay(kvEnv, { message_id: 324, text: "/setdrive reset" });
   assert.equal(kvEnv.USERS.store.get("drive-config"), null);
   assert.ok(world.calls.some((call) => call.url === SCRIPT_URL && call.payload.action === "ping"));
+});
+
+test("admin can draft every dictionary column and save one new row after review", async () => {
+  const kvEnv = driveEnv();
+  const world = driveWorld();
+  const headers = ["coptic", "ipa", "meaning", "english", "french", "german", "greek", "unused_h", "unused_i", "origin", "kind"];
+  world.state.reply = (body) => {
+    if (body.action === "dictionary_get_row") return { ok: true, row: body.row, headers, values: ["ⲁⲛⲁⲩ", "anav", "نظر", "look", "", "", "", "", "", "", ""] };
+    if (body.action === "dictionary_add") return { ok: true, row: 4, headers, values: body.values };
+    if (body.action === "ping") return { ok: true, folder: { name: "test" }, sheet: { name: "dictionary" } };
+    return { ok: true };
+  };
+  const call = (update) => worker.fetch(updateRequest(update), kvEnv);
+  const callback = (data) => call({ callback_query: { id: `ad-${data}`, data, from: { id: ADMIN }, message: { message_id: 20, chat: { id: ADMIN }, text: "admin" } } });
+  const message = (text) => call({ message: { text, message_id: 21, chat: { id: ADMIN, type: "private" }, from: { id: ADMIN } } });
+
+  await callback("ad|dictadd");
+  assert.ok(world.calls.some((entry) => entry.payload?.action === "dictionary_get_row"));
+  await callback("ad|dictaddfield|0");
+  await message("ⲕⲁⲗⲟⲥ");
+  await callback("ad|dictaddfield|2");
+  await message("جميل");
+  const draft = kvEnv.USERS.store.get(`user:${ADMIN}`).adminFlow;
+  assert.equal(draft.kind, "dict_add");
+  assert.equal(draft.values[0], "ⲕⲁⲗⲟⲥ");
+  assert.equal(draft.values[2], "جميل");
+  assert.equal(draft.values[1], "");
+  await callback("ad|dictaddsave");
+
+  const add = world.calls.find((entry) => entry.payload?.action === "dictionary_add");
+  assert.ok(add);
+  assert.equal(add.payload.values.length, headers.length);
+  assert.deepEqual([add.payload.values[0], add.payload.values[2]], ["ⲕⲁⲗⲟⲥ", "جميل"]);
+  assert.equal(kvEnv.USERS.store.get(`user:${ADMIN}`).adminFlow, undefined);
+  assert.ok([...kvEnv.USERS.store.keys()].some((key) => key.startsWith("audit:")));
+  assert.ok(world.calls.some((entry) => /صف dictionary رقم 4/u.test(entry.payload?.text ?? "")));
+});
+
+test("admin dictionary search offers multiple matching rows and refreshes the selected row before editing", async () => {
+  const kvEnv = driveEnv();
+  const world = driveWorld();
+  const headers = ["coptic", "ipa", "meaning", "english"];
+  const valuesFor = (word, meaning) => [word, "", meaning, "look"];
+  world.state.reply = (body) => {
+    if (body.action === "dictionary_search") return { ok: true, matches: [
+      { row: 2, matched_column: 3, score: 1000, headers, values: valuesFor("ⲁⲛⲁⲩ", "نظر") },
+      { row: 3, matched_column: 3, score: 1000, headers, values: valuesFor("ⲭⲁⲓ", "رأى") },
+    ] };
+    if (body.action === "dictionary_get_row") return { ok: true, row: body.row, headers, values: valuesFor("ⲭⲁⲓ", "رأى") };
+    if (body.action === "dictionary_update") return { ok: true, row: body.row, headers, values: body.values };
+    return { ok: true };
+  };
+  const call = (update) => worker.fetch(updateRequest(update), kvEnv);
+  const callback = (data) => call({ callback_query: { id: `edit-${data}`, data, from: { id: ADMIN }, message: { message_id: 20, chat: { id: ADMIN }, text: "admin" } } });
+  const message = (text) => call({ message: { text, message_id: 21, chat: { id: ADMIN, type: "private" }, from: { id: ADMIN } } });
+
+  await callback("ad|dictedit");
+  await message("look");
+  const choices = world.calls.find((entry) => /نتائج البحث عن/u.test(entry.payload?.text ?? ""))?.payload;
+  assert.deepEqual(choices.reply_markup.inline_keyboard.slice(0, 2).map((row) => row[0].callback_data), ["ad|dictpick|2", "ad|dictpick|3"]);
+  await callback("ad|dictpick|3");
+  const editor = world.calls.find((entry) => /رقم الصف: 3/u.test(entry.payload?.text ?? ""))?.payload;
+  assert.ok(editor);
+  await callback("ad|dictfield|3|2");
+  await message("معنى محدّث");
+  const update = world.calls.find((entry) => entry.payload?.action === "dictionary_update");
+  assert.equal(update.payload.row, 3);
+  assert.equal(update.payload.expected_coptic, "ⲭⲁⲓ");
+  assert.equal(update.payload.values[2], "معنى محدّث");
 });
 
 test("/drive explains how to connect when nothing is configured, and only the admin can use these commands", async () => {
