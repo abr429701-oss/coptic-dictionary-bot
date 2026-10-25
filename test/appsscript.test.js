@@ -10,6 +10,7 @@ class FakeSheet {
   constructor(name, rows = []) { this.name = name; this.data = rows.map((row) => [...row]); }
   getName() { return this.name; }
   getLastRow() { return this.data.length; }
+  getLastColumn() { return this.data.reduce((maximum, row) => Math.max(maximum, row.length), 0); }
   appendRow(row) { this.data.push([...row]); }
   deleteRow(row) { this.data.splice(row - 1, 1); }
   getRange(row, col, numRows = 1, numCols = 1) {
@@ -188,6 +189,59 @@ test("dictionary_get finds a row by any translation column and returns its sheet
   assert.equal(arabic.ok, true);
   assert.equal(arabic.row, 2);
   assert.equal(arabic.values[0], "ⲁⲛⲁⲩ");
+});
+test("dictionary_search returns multiple candidates with exact, prefix, substring and row ordering", () => {
+  const world = build();
+  world.main.appendRow(["other1", "ⲁⲛⲁⲩ", "", "", "", "", "", "", "", "", ""]);
+  world.main.appendRow(["ⲁⲛⲁⲩⲛ", "", "", "", "", "", "", "", "", "", ""]);
+  world.main.appendRow(["other2ⲁⲛⲁⲩ", "", "", "", "", "", "", "", "", "", ""]);
+  world.main.appendRow(["other3ⲁⲛⲁⲩ", "", "", "", "", "", "", "", "", "", ""]);
+  const result = world.post({ action: "dictionary_search", word: "ⲁⲛⲁⲩ", by });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.matches.map((match) => match.row), [2, 3, 4, 5, 6]);
+  assert.deepEqual(result.matches.map((match) => match.score), [1000, 1000, 700, 500, 500]);
+  assert.equal(result.matches[1].matched_column, 1);
+  assert.deepEqual(result.matches[0].values, world.main.data[1]);
+});
+test("dictionary_search offers a bounded edit-distance candidate when exact and partial matches are absent", () => {
+  const world = build();
+  const result = world.post({ action: "dictionary_search", word: "loook", by });
+  assert.equal(result.ok, true);
+  assert.equal(result.matches[0].row, 2);
+  assert.equal(result.matches[0].matched_column, 3);
+  assert.equal(result.matches[0].score, 250);
+});
+test("dictionary_get_row returns the exact sheet row with headers and every column", () => {
+  const world = build();
+  const result = world.post({ action: "dictionary_get_row", row: 2, by });
+  assert.equal(result.ok, true);
+  assert.equal(result.row, 2);
+  assert.deepEqual(result.headers, world.main.data[0]);
+  assert.deepEqual(result.values, world.main.data[1]);
+  assert.equal(world.post({ action: "dictionary_get_row", row: 3, by }).ok, false);
+});
+test("dictionary_add writes all dictionary columns and returns the inserted row", () => {
+  const world = build();
+  const input = ["ⲕⲁⲗⲟⲥ", "kalos", "جيد"];
+  const result = world.post({ action: "dictionary_add", values: input, by });
+  assert.equal(result.ok, true);
+  assert.equal(result.row, 3);
+  assert.equal(result.headers.length, 11);
+  assert.deepEqual(result.values, ["ⲕⲁⲗⲟⲥ", "kalos", "جيد", "", "", "", "", "", "", "", ""]);
+  assert.deepEqual(world.main.data[2], result.values);
+});
+test("dictionary_add rejects a missing or blank Coptic word", () => {
+  const world = build();
+  assert.equal(world.post({ action: "dictionary_add", values: ["", "translation"], by }).ok, false);
+  assert.equal(world.post({ action: "dictionary_add", values: [], by }).ok, false);
+  assert.equal(world.main.data.length, 2);
+});
+test("all dictionary operations reject identities other than the authorized Telegram id", () => {
+  const world = build();
+  for (const action of ["dictionary_search", "dictionary_get", "dictionary_get_row", "dictionary_add", "dictionary_update"]) {
+    const result = world.post({ action, word: "ⲁⲛⲁⲩ", row: 2, expected_coptic: "ⲁⲛⲁⲩ", values: ["word"], by: { id: "1" } });
+    assert.deepEqual(result, { ok: false, error: "unauthorized" }, action);
+  }
 });
 test("delete_all trashes every file in the voice folder and clears upload", () => {
   const world = build();
