@@ -11,6 +11,202 @@ const DEFAULT_ADMIN_IDS = "813894692"; // owner chat id from data/owner_chat_id.
 const BROADCAST_BATCH_SIZE = 25;
 const BROADCAST_BATCH_DELAY_MS = 1200;
 const BROADCAST_MAX_TRANSIENT_RETRIES = 5;
+
+// ============================================================================
+// Batch 3 admin features: word of the day, favorites, keyword auto-replies,
+// daily search limits, usage alerts, broadcast templates, broadcast opt-out,
+// inactive-user purge, pin management, health check, per-admin notes, uptime,
+// group join/leave notices, contact admin, users CSV export, score reset.
+// ============================================================================
+const AUTO_REPLY_KEY = "autoreply:list";
+const SEARCH_LIMIT_KEY = "searchlimit:daily";
+const ALERTS_KEY = "alerts:config";
+const TEMPLATES_KEY = "templates:list";
+const OPTOUT_KEY = "optout:list";
+const NOTES_KEY = "admin:notes";
+const BOT_STARTED_AT = Date.now();
+const wodCache = { value: null, at: 0 };
+const autoReplyCache = { value: null, at: 0 };
+const searchLimitCache = { value: null, at: 0 };
+const alertsCache = { value: null, at: 0 };
+const templatesCache = { value: null, at: 0 };
+const optOutCache = { value: null, at: 0 };
+const notesCache = { value: null, at: 0 };
+const lastLookup = new Map(); // chatId -> last searched record summary (favorites source)
+const contactCooldown = new Map(); // userId -> last /contact timestamp
+const searchCounts = new Map(); // `${userId}:${day}` -> { day, count }
+
+// ---- Word of the day ----
+async function wordOfTheDayConfig(env) { return await cachedDoGet(env, "wod:config", wodCache, null); }
+async function setWordOfTheDay(env, value) {
+  if (env.USERS) await storeCall(env, { op: "put", key: "wod:config", value });
+  invalidateCache(wodCache);
+}
+// Sends the configured word once per UTC day, then marks the day as sent.
+async function sendWordOfTheDay(env, chatId, config) {
+  const matches = await findMatches(config.word, env);
+  if (matches[0] == null) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `⚠️ كلمة اليوم «${escapeHtml(String(config.word).slice(0, 60))}» غير موجودة في القاموس. اضبطها بـ /setwod <كلمة>.`, parse_mode: "HTML" });
+    return;
+  }
+  await setWordOfTheDay(env, { ...config, lastSent: utcDay() });
+  await sendRecord(env, chatId, matches[0], -1, "");
+}
+async function autoWordOfTheDay(env, chatId, ctx) {
+  try {
+    const config = await wordOfTheDayConfig(env);
+    if (!config?.word || !config?.chatId || Number(config.chatId) !== Number(chatId)) return;
+    if (config.lastSent === utcDay()) return;
+    await sendWordOfTheDay(env, chatId, config);
+  } catch (error) {
+    console.error("Word of the day auto-post failed", error instanceof Error ? error.message : "unknown error");
+  }
+}
+
+// ---- Keyword auto-replies ----
+async function autoReplies(env) { const v = await cachedDoGet(env, AUTO_REPLY_KEY, autoReplyCache, []); return Array.isArray(v) ? v : []; }
+async function setAutoReplies(env, list) { if (env.USERS) await storeCall(env, { op: "put", key: AUTO_REPLY_KEY, value: list.slice(-50) }); invalidateCache(autoReplyCache); }
+
+// ---- Daily search limit (0 = unlimited) ----
+async function dailySearchLimit(env) { const v = await cachedDoGet(env, SEARCH_LIMIT_KEY, searchLimitCache, 0); return Number(v) > 0 ? Number(v) : 0; }
+async function setDailySearchLimit(env, max) { if (env.USERS) await storeCall(env, { op: "put", key: SEARCH_LIMIT_KEY, value: Number(max) }); invalidateCache(searchLimitCache); }
+function bumpSearchCount(userId) {
+  const day = utcDay();
+  const key = `${userId}:${day}`;
+  const current = searchCounts.get(key);
+  if (current?.day === day) { current.count += 1; return current.count; }
+  searchCounts.set(key, { day, count: 1 });
+  if (searchCounts.size > 20000) for (const [k, v] of searchCounts) if (v.day !== day) searchCounts.delete(k);
+  return 1;
+}
+
+// ---- Usage alerts ----
+async function alertsConfig(env) { const v = await cachedDoGet(env, ALERTS_KEY, alertsCache, null); return v && typeof v === "object" ? v : { threshold: 0 }; }
+async function setAlertsConfig(env, value) { if (env.USERS) await storeCall(env, { op: "put", key: ALERTS_KEY, value }); invalidateCache(alertsCache); }
+async function maybeAlertUsage(env) {
+  try {
+    const config = await alertsConfig(env);
+    const threshold = Number(config?.threshold ?? 0);
+    if (!env.USERS || threshold <= 0 || config?.lastAlertDay === utcDay()) return;
+    const report = await storeCall(env, { op: "usageReport", limit: 1 });
+    const count = Number(report.days?.find((d) => d.day === utcDay())?.count ?? 0);
+    if (count < threshold) return;
+    await setAlertsConfig(env, { ...config, lastAlertDay: utcDay() });
+    await notifyAdmins(env, `🚨 <b>تنبيه استخدام</b>\nالطلبات اليوم: <b>${Number(count).toLocaleString("en-US")}</b>\nالحد المضبوط: ${Number(threshold).toLocaleString("en-US")}`);
+  } catch (error) {
+    console.error("Usage alert failed", error instanceof Error ? error.message : "unknown error");
+  }
+}
+
+// ---- Broadcast templates ----
+async function broadcastTemplates(env) { const v = await cachedDoGet(env, TEMPLATES_KEY, templatesCache, {}); return v && typeof v === "object" ? v : {}; }
+async function saveBroadcastTemplate(env, name, entry) {
+  const all = await broadcastTemplates(env);
+  all[String(name).slice(0, 40)] = entry;
+  if (env.USERS) await storeCall(env, { op: "put", key: TEMPLATES_KEY, value: all });
+  invalidateCache(templatesCache);
+}
+
+// ---- Broadcast opt-out (user choice, honored by every broadcast start) ----
+async function optOutList(env) { const v = await cachedDoGet(env, OPTOUT_KEY, optOutCache, []); return Array.isArray(v) ? v.map(String) : []; }
+async function setOptOut(env, userId, optedOut) {
+  const list = await optOutList(env);
+  const sid = String(userId);
+  const next = optedOut ? [...new Set([...list, sid])] : list.filter((x) => x !== sid);
+  if (env.USERS) await storeCall(env, { op: "put", key: OPTOUT_KEY, value: next });
+  invalidateCache(optOutCache);
+}
+
+// ---- Per-admin private notes ----
+async function adminNotes(env) { const v = await cachedDoGet(env, NOTES_KEY, notesCache, {}); return v && typeof v === "object" ? v : {}; }
+async function setAdminNote(env, userId, note) {
+  const all = await adminNotes(env);
+  const sid = String(userId);
+  if (note) all[sid] = { note: String(note).slice(0, 500), at: new Date().toISOString() };
+  else delete all[sid];
+  if (env.USERS) await storeCall(env, { op: "put", key: NOTES_KEY, value: all });
+  invalidateCache(notesCache);
+}
+
+function formatUptime(ms) {
+  const totalMinutes = Math.floor(ms / 60000);
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  return days > 0 ? `${days}ي ${hours}س ${minutes}د` : hours > 0 ? `${hours}س ${minutes}د` : `${minutes}د`;
+}
+
+// ---- Health check ----
+async function sendHealthCheck(env, chatId) {
+  const t0 = Date.now();
+  const [me, hook, stats] = await Promise.all([
+    telegram(env, "getMe", {}),
+    telegram(env, "getWebhookInfo", {}),
+    env.USERS ? storeCall(env, { op: "adminStats" }).catch(() => null) : Promise.resolve(null),
+  ]);
+  const info = hook?.result ?? {};
+  const lines = [
+    "❤️ <b>فحص صحة البوت</b>",
+    `🕒 زمن الاستجابة: <b>${Date.now() - t0}ms</b>`,
+    `🤖 الاتصال بـ Telegram: ${me?.ok ? "✅ سليم" : "❌ فشل"}`,
+    `🔗 الويب هوك: ${info.url ? "مضبوط ✅" : "غير مضبوط ❌"}`,
+    `📥 تحديثات معلّقة: ${Number(info.pending_update_count ?? 0)}`,
+    `⚠️ آخر خطأ ويب هوك: ${info.last_error_message ? escapeHtml(info.last_error_message) : "لا يوجد"}`,
+    `📚 سجلات القاموس: ${records.length.toLocaleString("en-US")}`,
+    `💾 التخزين: ${stats ? "✅ يستجيب" : "❌ غير متاح"}`,
+    `⏱ مدة تشغيل هذه النسخة: ${formatUptime(Date.now() - BOT_STARTED_AT)}`,
+  ];
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML" });
+}
+
+// ---- Contact admin (user) + admin reply ----
+async function handleContactAdmin(env, message, userId, text) {
+  const body = text.slice("/contact".length).trim();
+  if (!body) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /contact رسالتك — ستصل إلى مشرفي البوت." }); return; }
+  const last = contactCooldown.get(String(userId)) ?? 0;
+  if (Date.now() - last < 60000) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⏳ أرسلت رسالة للتو. انتظر دقيقة قبل رسالة أخرى." }); return; }
+  contactCooldown.set(String(userId), Date.now());
+  if (contactCooldown.size > 5000) contactCooldown.clear();
+  await notifyAdmins(env, [
+    "📬 <b>رسالة من مستخدم</b>",
+    `👤 ${escapeHtml(displayName(message.from))}${message.from?.username ? ` (@${escapeHtml(message.from.username)})` : ""}`,
+    `🆔 <code>${escapeHtml(String(userId))}</code>`,
+    `💬 ${escapeHtml(body.slice(0, 1000))}`,
+    "",
+    `↩️ للرد: /reply ${escapeHtml(String(userId))} نص الرد`,
+  ].join("\n"));
+  await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ وصلت رسالتك إلى المشرفين، سيتم الرد عليك قريبًا." });
+}
+async function handleAdminReply(env, message, text) {
+  const parts = text.split(/\s+/u);
+  const target = parts[1] ?? "";
+  const reply = text.slice("/reply".length + target.length + 1).trim();
+  if (!/^\d+$/u.test(target) || !reply) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /reply <user_id> <نص الرد>" }); return; }
+  const result = await telegram(env, "sendMessage", { chat_id: Number(target), text: `📬 رسالة من إدارة البوت:\n\n${escapeHtml(reply.slice(0, 2500))}`, parse_mode: "HTML" });
+  await telegram(env, "sendMessage", { chat_id: message.chat.id, text: result?.ok ? "✅ تم إرسال الرد." : "❌ تعذّر الإرسال — ربما حظر المستخدم البوت." });
+}
+
+// ---- Template broadcast confirmation (tpl| callbacks) ----
+async function handleTemplateCallback(env, callback) {
+  const answer = (extra = {}) => telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, ...extra });
+  const chatId = callback.message?.chat?.id;
+  if (!isAdmin(env, callback.from?.id) || !chatId) return answer();
+  const [, action, name = ""] = String(callback.data ?? "").split("|");
+  const templates = await broadcastTemplates(env);
+  const tpl = templates[name];
+  if (action === "no" || !tpl?.messageId) {
+    await answer();
+    await telegram(env, "editMessageText", { chat_id: chatId, message_id: callback.message.message_id, text: "تم الإلغاء." });
+    return;
+  }
+  const started = await storeCall(env, { op: "bcstart", exclude: [...adminIds(env), ...(await optOutList(env))], fromChat: tpl.chatId, messageId: tpl.messageId });
+  await answer();
+  await telegram(env, "editMessageText", {
+    chat_id: chatId,
+    message_id: callback.message.message_id,
+    text: started.busy ? "⏳ يوجد إرسال جماعي جارٍ بالفعل." : !started.started ? "لا يوجد مستخدمون لإرسال الرسالة إليهم." : `🚀 بدأ الإرسال إلى ${Number(started.total).toLocaleString("en-US")} مستخدم. سأرسل تقريرًا عند الانتهاء.`,
+  });
+}
 const FIRST_TIME_TEXT =
   "مرحبًا بك! يبدو أنك تستخدم البوت لأول مرة، الرجاء إدخال اسمك بدون رموز للبدء في استخدام القاموس القبطي الناطق.";
 const NAME_RETRY_TEXT = "الرجاء إدخال اسمك صحيحاً بالحروف فقط بدون رموز ولا أرقام.";
@@ -589,10 +785,15 @@ const USER_COMMANDS = [
   { command: "start", description: "بدء استخدام القاموس" },
   { command: "keyboard", description: "لوحة مفاتيح قبطية لكتابة الكلمات" },
   { command: "learn", description: "بوت تعلم اللغة القبطية من الصفر" },
+  { command: "contact", description: "إرسال رسالة إلى مشرفي البوت" },
 ];
 const ADMIN_COMMANDS = [
   ...USER_COMMANDS,
   { command: "admin", description: "لوحة تحكم الأدمن" },
+  { command: "health", description: "فحص صحة البوت" },
+  { command: "uptime", description: "مدة تشغيل البوت" },
+  { command: "note", description: "ملاحظة خاصة للأدمن" },
+  { command: "setwod", description: "ضبط كلمة اليوم" },
 ];
 const commandMenuReady = new Set();
 
@@ -1194,6 +1395,7 @@ async function sendOption(env, chatId, options, baseIndex, step, fallback = unde
   const selected = options[step] ?? fallback;
   const record = records[selected?.index];
   if (!record) return;
+  lastLookup.set(String(chatId), { index: selected.index, coptic: String(record.coptic ?? "").slice(0, 60), meaning: String(record.meaning ?? "").slice(0, 60), at: new Date().toISOString() });
   const cardLanguage = uiLanguage(searchKey);
   const media = lookupMedia(env, record, cardLanguage);
   const voiceRecord = voiceRecordForSearch(record, searchKey);
@@ -1529,6 +1731,41 @@ export class UserStore {
       return Response.json({ started: true, total: queue.length });
     }
     const userKey = `user:${userId}`;
+    if (op === "templates_get") return Response.json({ value: (await storage.get(TEMPLATES_KEY)) ?? {} });
+    if (op === "template_save") {
+      const all = (await storage.get(TEMPLATES_KEY)) ?? {};
+      all[String(key).slice(0, 40)] = { chatId: fromChat, messageId, at: new Date().toISOString() };
+      await storage.put(TEMPLATES_KEY, all);
+      return Response.json({ ok: true, count: Object.keys(all).length });
+    }
+    if (op === "optout_stats") {
+      const optOut = new Set(((await storage.get(OPTOUT_KEY)) ?? []).map(String));
+      const users = await storage.list({ prefix: "user:" });
+      let total = 0;
+      for (const [storedKey, record] of users) {
+        if (record?.blocked || optOut.has(storedKey.slice("user:".length))) continue;
+        total += 1;
+      }
+      return Response.json({ total, optOut: optOut.size });
+    }
+    if (op === "resetuser") {
+      const stored = (await storage.get(userKey)) ?? null;
+      if (!stored) return Response.json({ ok: false });
+      await storage.delete(userKey);
+      return Response.json({ ok: true, hadName: Boolean(stored.name) });
+    }
+    if (op === "purge_inactive") {
+      const days = Math.max(1, Number(limit ?? 30));
+      const cutoff = Date.now() - days * 86400000;
+      const users = await storage.list({ prefix: "user:" });
+      let purged = 0;
+      for (const [storedKey, record] of users) {
+        if (record?.blocked) continue;
+        const stamp = record?.registeredAt || record?.firstSeen || "";
+        if (stamp && new Date(stamp).getTime() < cutoff) { await storage.delete(storedKey); purged += 1; }
+      }
+      return Response.json({ purged, days });
+    }
     if (op === "kbstep") {
       // Read-modify-write inside the object so rapid taps never overwrite each other.
       const user = (await storage.get(userKey)) ?? {};
@@ -1636,6 +1873,15 @@ function buildCommandsHelpText(env, userId) {
     lines.push("/setdrive &lt;رابط&gt; — ضبط رابط Apps Script");
     lines.push("/setarchive &lt;here|id&gt; — ضبط مجموعة الأرشيف");
     lines.push("/voice_delete &lt;كلمة&gt; — حذف تسجيل صوتي");
+    lines.push("/health — فحص صحة البوت | /uptime — مدة التشغيل");
+    lines.push("/note — ملاحظة خاصة | /note حذف لمسحها");
+    lines.push("/setwod &lt;كلمة&gt; — كلمة اليوم التلقائية (/setwodtest للتجربة)");
+    lines.push("/autoreply كلمة = رد — ردود تلقائية (/autoreply للقائمة)");
+    lines.push("/searchlimit &lt;عدد&gt; — حد البحث اليومي | /usagealert &lt;عدد&gt; — تنبيه استخدام");
+    lines.push("/tplsave &lt;اسم&gt; — حفظ قالب بث | /tplsend &lt;اسم&gt; — إرساله");
+    lines.push("/optout — إحصاء خيار الخروج من البث | /purge &lt;أيام&gt; — حذف الخاملين");
+    lines.push("/resetuser &lt;id&gt; — تصفير مستخدم | /pin &lt;id&gt; / /pinhere / /unpin — تثبيت");
+    lines.push("/reply &lt;id&gt; &lt;نص&gt; — الرد على رسالة /contact | /exportuserscsv — تصدير المستخدمين");
   }
   return lines.join("\n");
 }
@@ -1885,7 +2131,57 @@ async function setArchiveChat(env, message, argument) {
   await reply("✅ تم الربط. كل تسجيل جديد سيُرسل أيضًا لهذه المجموعة.");
 }
 
-// Telegram turns a group into a supergroup (new -100... id) when, for example, an admin is added.
+// Notify admins when someone joins or leaves a group the bot is in.
+async function notifyGroupMembershipChange(env, message) {
+  const members = await telegram(env, "getChatMemberCount", { chat_id: message.chat.id });
+  if (message?.new_chat_members?.length) {
+    const notices = [];
+    for (const member of message.new_chat_members) {
+      if (member?.is_bot) continue;
+      notices.push(`👥 <b>انضم عضو جديد للمجموعة</b>\n👤 ${escapeHtml(displayNameOrEmpty(member) || "بدون اسم")}${member.username ? ` (@${escapeHtml(member.username)})` : ""}\n🆔 <code>${escapeHtml(String(member.id))}</code>${members?.result != null ? `\n👥 أعضاء المجموعة الآن: ${members.result}` : ""}`);
+    }
+    if (notices.length) await notifyAdmins(env, notices.join("\n\n"));
+    return;
+  }
+  const left = message?.left_chat_member;
+  if (left && !left.is_bot) {
+    await notifyAdmins(env, `👥 <b>غادر عضو المجموعة</b>\n👤 ${escapeHtml(displayNameOrEmpty(left) || "بدون اسم")}\n🆔 <code>${escapeHtml(String(left.id))}</code>${members?.result != null ? `\n👥 أعضاء المجموعة الآن: ${members.result}` : ""}`);
+    return;
+  }
+}
+
+async function beginBroadcastFromTemplate(env, chatId, userId, user, name, message) {
+  const templates = await broadcastTemplates(env);
+  const existing = templates[name];
+  if (existing?.messageId) {
+    await telegram(env, "sendMessage", {
+      chat_id: chatId,
+      text: `🧷 القالب «${escapeHtml(name)}» محفوظ مسبقًا. أرسل الرسالة الجديدة التي تريد حفظها مكانه، أو اضغط للإرسال الآن:`,
+      reply_markup: { inline_keyboard: [[{ text: "🚀 إرسال القالب الآن", callback_data: `tpl|go|${name}` }, { text: "❌ إلغاء", callback_data: "tpl|no" }]] },
+    });
+  }
+  await saveUser(env, userId, { ...user, bc: "await" });
+  await setAdminFlow(env, userId, { kind: "tpl_name", name, chatId });
+  if (!existing?.messageId) await telegram(env, "sendMessage", { chat_id: chatId, text: "📢 أرسل الآن رسالة القالب (نص، صورة، فيديو، Voice، استبيان…)." });
+}
+
+async function beginOptOutStats(env, chatId) {
+  const result = await storeCall(env, { op: "optout_stats" });
+  await telegram(env, "sendMessage", {
+    chat_id: chatId,
+    text: `📢 الإرسال الجماعي يستهدف حاليًا: <b>${Number(result?.total ?? 0).toLocaleString("en-US")}</b> مستخدم\n🔕 مستخدمون مُستثنون (خروج اختياري): <b>${Number(result?.optOut ?? 0).toLocaleString("en-US")}</b>\n\nالمستخدم يخرج بالأمر /stopbroadcast ويعود بـ /startbroadcast.`,
+    parse_mode: "HTML",
+  });
+}
+
+async function sendUptime(env, chatId) {
+  await telegram(env, "sendMessage", {
+    chat_id: chatId,
+    text: `⏱ مدة تشغيل هذه النسخة من البوت: <b>${formatUptime(Date.now() - BOT_STARTED_AT)}</b>\n📚 سجلات القاموس: ${records.length.toLocaleString("en-US")}\n🕒 وقت الفحص: ${new Date().toISOString()}`,
+    parse_mode: "HTML",
+  });
+}
+
 // The failed call then reports the new id: store it and retry once so the link keeps working.
 async function sendVoiceToArchive(env, chatId, payload) {
   let result = await telegram(env, "sendVoice", { ...payload, chat_id: chatId });
@@ -2234,7 +2530,7 @@ async function handleBroadcastCallback(env, callback) {
   }
   const started = await storeCall(env, {
     op: "bcstart",
-    exclude: adminIds(env),
+    exclude: [...adminIds(env), ...(await optOutList(env))],
     fromChat: chatId,
     messageId: user.bc.messageId,
     poll: user.bc.poll ?? null,
@@ -3403,7 +3699,13 @@ function adminMenuMarkup(page = "home") {
     [{ text: "📦 تصدير القاموس JSON", callback_data: "ad|exportdict" }, { text: "👥 تصدير المستخدمين CSV", callback_data: "ad|exportusers" }],
     [{ text: "💾 نسخة احتياطية", callback_data: "ad|backup" }, { text: "🔄 تحديث الأوامر", callback_data: "ad|commands" }],
     [{ text: "🖼 إخفاء بطاقة كلمة", callback_data: "ad|cardhide" }, { text: "🖼 إظهار بطاقة كلمة", callback_data: "ad|cardshow" }],
-    [{ text: "📢 حالة الإرسال", callback_data: "ad|bcstatus" }, { text: "🧹 مسح الجلسة", callback_data: "ad|clearflow" }], back,
+    [{ text: "📢 حالة الإرسال", callback_data: "ad|bcstatus" }, { text: "🧹 مسح الجلسة", callback_data: "ad|clearflow" }],
+    [{ text: "☀️ كلمة اليوم", callback_data: "ad|wod" }, { text: "🤖 ردود تلقائية", callback_data: "ad|autoreply" }],
+    [{ text: "⏳ حد بحث يومي", callback_data: "ad|searchlimit" }, { text: "🚨 تنبيه استخدام", callback_data: "ad|usagealert" }],
+    [{ text: "🧷 قوالب الإرسال", callback_data: "ad|tplsave" }, { text: "🔕 خيار الخروج من البث", callback_data: "ad|optout" }],
+    [{ text: "🧹 حذف الخاملين", callback_data: "ad|purge" }, { text: "🔄 تصفير مستخدم", callback_data: "ad|resetuser" }],
+    [{ text: "📌 أدوات التثبيت", callback_data: "ad|pinmenu" }, { text: "❤️ فحص الصحة", callback_data: "ad|health" }],
+    [{ text: "📝 ملاحظاتي", callback_data: "ad|mynotes" }, { text: "⏱ مدة التشغيل", callback_data: "ad|uptime" }], back,
   ] };
 }
 async function adminDashboardText(env, page = "home") {
@@ -3452,6 +3754,12 @@ async function handleAdminFlow(env, message, userId, user, text) {
   if (!flow || !text || text.startsWith("/")) return false;
   if (flow.kind === "dict_find") { await clearAdminFlow(env, userId); await beginDictionaryEdit(env, message.chat.id, userId, text); return true; }
   if (flow.kind === "delete_find") { await clearAdminFlow(env, userId); await beginDeleteWord(env, message.chat.id, userId, text); return true; }
+  if (flow.kind === "tpl_name") {
+    // The user pressed a template name; the actual content arrives via the broadcast flow.
+    await clearAdminFlow(env, userId);
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ أرسل الآن محتوى القالب ليُحفظ تحت هذا الاسم." });
+    return true;
+  }
   if (flow.kind === "dict_value" && Number.isInteger(flow.col) && flow.col >= 0) { await updateDictionaryField(env, message, userId, flow, text); return true; }
   if (flow.kind === "dict_new" && Number.isInteger(flow.col) && flow.col >= 0) { await updateDictionaryNewField(env, message, userId, flow, text); return true; }
   // A dictionary edit/add flow is active but no column was chosen yet: remind instead of clearing.
@@ -3554,6 +3862,40 @@ async function handleAdminDashboardCallback(env, callback, ctx) {
   if (action === "clearflow") { await clearAdminFlow(env, callback.from.id); await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ تم مسح أي جلسة إدخال معلّقة." }); return; }
   if (action === "usage") { await sendUsageReport(env, chatId); return; }
   if (action === "botinfo") { await sendBotInfo(env, chatId); return; }
+  // ---- Batch 3 dashboard actions ----
+  if (action === "wod") {
+    const config = await wordOfTheDayConfig(env);
+    await telegram(env, "sendMessage", { chat_id: chatId, text: config?.word ? `☀️ كلمة اليوم: «${escapeHtml(config.word)}» → ${config.chatId} (آخر إرسال: ${config.lastSent ?? "لم يُرسل بعد"})\nلتغييرها أرسل: /setwod <كلمة>\nللإرسال الآن فورًا: /setwodtest` : "☀️ كلمة اليوم غير مضبوطة.\nأرسل: /setwod <كلمة> — وستُرسل إلى هذه المحادثة يوميًا.", parse_mode: "HTML" });
+    return;
+  }
+  if (action === "autoreply") {
+    const list = await autoReplies(env);
+    await telegram(env, "sendMessage", { chat_id: chatId, text: list.length ? `🤖 الردود التلقائية (${list.length}):\n${list.map((r) => `• «${escapeHtml(r.trigger)}» → ${escapeHtml(r.reply.slice(0, 60))}`).join("\n")}\n\nإضافة: /autoreply تفعيل = الرد\nحذف: /autoreply حذف تفعيل` : "🤖 لا توجد ردود تلقائية.\nإضافة: /autoreply كلمة_التفويض = الرد", parse_mode: "HTML" });
+    return;
+  }
+  if (action === "searchlimit") { const v = await dailySearchLimit(env); await telegram(env, "sendMessage", { chat_id: chatId, text: `⏳ الحد اليومي للبحث: <b>${v || "بلا حد"}</b>\nتغيير: /searchlimit <عدد> (0 = بلا حد)`, parse_mode: "HTML" }); return; }
+  if (action === "usagealert") { const v = (await alertsConfig(env))?.threshold; await telegram(env, "sendMessage", { chat_id: chatId, text: `🚨 تنبيه الاستخدام: <b>${Number(v ?? 0) || "معطّل"}</b>\nتغيير: /usagealert <عدد> (0 = إيقاف)`, parse_mode: "HTML" }); return; }
+  if (action === "tplsave") { await telegram(env, "sendMessage", { chat_id: chatId, text: "🧷 لحفظ قالب إرسال: أرسل /tplsave <اسم> ثم أرسل رسالة القالب.\nللإرسال لاحقًا: /tplsend <اسم>" }); return; }
+  if (action === "optout") { await beginOptOutStats(env, chatId); return; }
+  if (action === "purge") { await telegram(env, "sendMessage", { chat_id: chatId, text: "🧹 لحذف المستخدمين الخاملين: /purge <عدد الأيام> — مثال /purge 30" }); return; }
+  if (action === "purgeconfirm") {
+    const days = Number(page);
+    const result = await storeCall(env, { op: "purge_inactive", limit: days });
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `🧹 تم حذف ${Number(result?.purged ?? 0).toLocaleString("en-US")} مستخدم خامل (أقدم من ${days} يومًا).` });
+    return;
+  }
+  if (action === "purgecancel") { await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ تم إلغاء حذف الخاملين." }); return; }
+  if (action === "resetuser") { await telegram(env, "sendMessage", { chat_id: chatId, text: "🔄 لتنظير مستخدم: /resetuser <user_id>" }); return; }
+  if (action === "pinmenu") { await telegram(env, "sendMessage", { chat_id: chatId, text: "📌 أدوات التثبيت (اجعل البوت مشرفًا أولًا):\n/pin <message_id> أو رد على رسالة بـ /pinhere\n/unpin — فك كل الرسائل المثبتة" }); return; }
+  if (action === "health") { await sendHealthCheck(env, chatId); return; }
+  if (action === "uptime") { await sendUptime(env, chatId); return; }
+  if (action === "mynotes") {
+    const all = await adminNotes(env);
+    const mine = all[String(callback.from.id)];
+    await telegram(env, "sendMessage", { chat_id: chatId, text: mine ? `📝 ملاحظتك:\n${escapeHtml(mine.note)}\n(${mine.at})` : "📝 لا توجد ملاحظة. احفظ واحدة: /note نص الملاحظة", parse_mode: "HTML" });
+    return;
+  }
+  if (action === "exportuserscsv") { await exportUsersCsv(env, chatId); return; }
 }
 async function handleUpdate(update, env, ctx) {
   if (update.inline_query) {
@@ -3564,6 +3906,10 @@ async function handleUpdate(update, env, ctx) {
   }
   if (update.callback_query) {
     const callback = update.callback_query;
+    if (String(callback.data ?? "").startsWith("tpl|")) {
+      await handleTemplateCallback(env, callback);
+      return;
+    }
     if (String(callback.data ?? "").startsWith("bc|")) {
       await handleBroadcastCallback(env, callback);
       return;
@@ -3695,6 +4041,25 @@ async function handleUpdate(update, env, ctx) {
   if (!isAdmin(env, userId) && maint) {
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🔧 البوت حاليًا تحت الصيانة. عُد لاحقًا بعد قليل، شكرًا لتفهمك." });
     return;
+  }
+  // Batch 3: notify admins of group joins/leaves, then let the daily features tick.
+  if (["group", "supergroup"].includes(message.chat.type) && (message.new_chat_members || message.left_chat_member)) {
+    await notifyGroupMembershipChange(env, message);
+    return;
+  }
+  inBackground(ctx, maybeAlertUsage(env));
+  inBackground(ctx, autoWordOfTheDay(env, message.chat.id, ctx));
+  // Batch 3: keyword auto-replies and the daily search limit apply to non-admin text searches.
+  if (!isAdmin(env, userId) && text && !text.startsWith("/")) {
+    const replies = await autoReplies(env);
+    const normalizedText = normalize(text);
+    const hit = replies.find((r) => { const t = normalize(r.trigger); return t && (normalizedText === t || normalizedText.startsWith(`${t} `)); });
+    if (hit) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: String(hit.reply).slice(0, 3000) }); return; }
+    const limit = await dailySearchLimit(env);
+    if (limit) {
+      const used = bumpSearchCount(userId);
+      if (used > limit) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `⏳ وصلت إلى الحد اليومي للبحث (${limit} بحثًا). حاول غدًا أو تواصل مع المشرف عبر /contact.` }); return; }
+    }
   }
   if (text === "/" || text === "/start" || text.startsWith("/start ") || text === "/admin") inBackground(ctx, ensureCommandMenu(env, userId));
   const cachedRegistration = registeredCache.get(userId);
@@ -3971,6 +4336,122 @@ async function handleUpdate(update, env, ctx) {
       await inBackground(ctx, syncUsersBatch(env, message.chat.id));
       return;
     }
+    // ---- Batch 3 admin commands ----
+    if (text === "/setwod" || text.startsWith("/setwod ")) {
+      const word = text.slice("/setwod".length).trim();
+      if (!word) {
+        const config = await wordOfTheDayConfig(env);
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: config?.word ? `☀️ كلمة اليوم مضبوطة على «${escapeHtml(config.word)}» وتُرسل إلى ${config.chatId} يوميًا (آخر إرسال: ${config.lastSent ?? "لم يُرسل بعد"}).\nالاستخدام: /setwod <كلمة>` : "✏️ الاستخدام: /setwod <كلمة> — لتلقي كلمة اليوم تلقائيًا هنا كل يوم. نفّذها داخل المجموعة لإرسالها هناك.", parse_mode: "HTML" });
+        return;
+      }
+      await setWordOfTheDay(env, { word: word.slice(0, 80), chatId: message.chat.id, lastSent: null });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم ضبط كلمة اليوم على «${escapeHtml(word.slice(0, 80))}» وستُرسل إلى هذه المحادثة تلقائيًا كل يوم.\nلإلغائها: /setwod off`, parse_mode: "HTML" });
+      return;
+    }
+    if (text === "/autoreply" || text.startsWith("/autoreply ")) {
+      const arg = text.slice("/autoreply".length).trim();
+      if (!arg) {
+        const list = await autoReplies(env);
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: list.length ? `🤖 الردود التلقائية الحالية (${list.length}):\n${list.map((r) => `• «${escapeHtml(r.trigger)}» → ${escapeHtml(r.reply.slice(0, 60))}`).join("\n")}\n\nلإضافة: /autoreply كلمة_التفويض = الرد\nللحذف: /autoreply حذف كلمة_التفويض` : "لا توجد ردود تلقائية.\nلإضافة: /autoreply كلمة_التفويض = الرد", parse_mode: "HTML" });
+        return;
+      }
+      const removeMatch = /^حذف\s+(.+)$/u.exec(arg);
+      if (removeMatch) {
+        const trigger = normalize(removeMatch[1]);
+        await setAutoReplies(env, (await autoReplies(env)).filter((r) => normalize(r.trigger) !== trigger));
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم حذف الرد التلقائي." });
+        return;
+      }
+      const sep = arg.includes("=") ? "=" : arg.includes("|") ? "|" : null;
+      const [trigger, ...rest] = sep ? arg.split(sep) : [];
+      if (!sep || !trigger.trim() || !rest.join("=").trim()) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /autoreply كلمة_التفويض = الرد" }); return; }
+      const list = (await autoReplies(env)).filter((r) => normalize(r.trigger) !== normalize(trigger));
+      list.push({ trigger: trigger.trim().slice(0, 60), reply: rest.join("=").trim().slice(0, 400) });
+      await setAutoReplies(env, list);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم حفظ الرد التلقائي لـ «${escapeHtml(trigger.trim())}».`, parse_mode: "HTML" });
+      return;
+    }
+    if (text === "/searchlimit" || text.startsWith("/searchlimit ")) {
+      const arg = text.slice("/searchlimit".length).trim();
+      if (!/^\d+$/u.test(arg)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `الحد اليومي الحالي للبحث: <b>${await dailySearchLimit(env) || "بلا حد"}</b>\nالاستخدام: /searchlimit <عدد> (0 = بلا حد)`, parse_mode: "HTML" }); return; }
+      await setDailySearchLimit(env, Number(arg));
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: Number(arg) ? `✅ تم ضبط الحد اليومي لعمليات البحث إلى ${Number(arg).toLocaleString("en-US")} بحث لكل مستخدم (الأدمن استثناء).` : "✅ تم إلغاء الحد اليومي." });
+      return;
+    }
+    if (text === "/usagealert" || text.startsWith("/usagealert ")) {
+      const arg = text.slice("/usagealert".length).trim();
+      if (!/^\d+$/u.test(arg)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `تنبيه الاستخدام الحالي: <b>${Number((await alertsConfig(env))?.threshold ?? 0) || "معطّل"}</b>\nالاستخدام: /usagealert <عدد> (0 = إيقاف)`, parse_mode: "HTML" }); return; }
+      await setAlertsConfig(env, { threshold: Number(arg) });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: Number(arg) ? `🚨 سيصلك تنبيه عندما تتجاوز طلبات اليوم ${Number(arg).toLocaleString("en-US")}.` : "✅ تم إيقاف تنبيهات الاستخدام." });
+      return;
+    }
+    if (text === "/tplsave" || text.startsWith("/tplsave ")) {
+      const name = text.slice("/tplsave".length).trim() || "افتراضي";
+      await beginBroadcastFromTemplate(env, message.chat.id, userId, admin ?? {}, name, message);
+      return;
+    }
+    if (text === "/tplsend" || text.startsWith("/tplsend ")) {
+      const name = text.slice("/tplsend".length).trim() || "افتراضي";
+      const templates = await broadcastTemplates(env);
+      const tpl = templates[name];
+      if (!tpl?.messageId) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `❌ لا يوجد قالب باسم «${escapeHtml(name)}». احفظ واحدًا بـ /tplsave ${name}.`, parse_mode: "HTML" }); return; }
+      await telegram(env, "sendMessage", {
+        chat_id: message.chat.id,
+        text: `🧷 إرسال القالب «${escapeHtml(name)}» (المحفوظ) إلى المستخدمين؟`,
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: [[{ text: "🚀 إرسال الآن", callback_data: `tpl|go|${name}` }, { text: "❌ إلغاء", callback_data: "tpl|no" }]] },
+      });
+      return;
+    }
+    if (text === "/setwodtest") {
+      const config = await wordOfTheDayConfig(env);
+      if (!config?.word) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "☀️ كلمة اليوم غير مضبوطة. اضبطها أولًا بـ /setwod <كلمة>." }); return; }
+      await sendWordOfTheDay(env, message.chat.id, { ...config, lastSent: null });
+      return;
+    }
+    if (text === "/optout" || text === "/optoutstats") { await beginOptOutStats(env, message.chat.id); return; }
+    if (text === "/purge" || text.startsWith("/purge ")) {
+      const days = Number(text.slice("/purge".length).trim()) || 30;
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `🗑 تأكيد: حذف كل المستخدمين المسجلين قبل أكثر من ${days} يومًا (غير المحظورين)؟`, reply_markup: { inline_keyboard: [[{ text: `✅ نعم، احذف الخاملين (${days} يوم)`, callback_data: `ad|purgeconfirm|${days}` }, { text: "❌ إلغاء", callback_data: "ad|purgecancel" }]] } });
+      return;
+    }
+    if (text === "/resetuser" || text.startsWith("/resetuser ")) {
+      const id = text.slice("/resetuser".length).trim();
+      if (!/^\d+$/u.test(id)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /resetuser <user_id> — يحذف بيانات المستخدم ليعيد التسجيل من الصفر." }); return; }
+      const result = await storeCall(env, { op: "resetuser", userId: id });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: result?.ok ? `✅ تم تصفير بيانات المستخدم <code>${escapeHtml(id)}</code>${result.hadName ? " (كان مسجلاً باسم)" : ""}؛ سيعيد التسجيل في أول رسالة.` : "❌ المستخدم غير موجود في التخزين.", parse_mode: "HTML" });
+      return;
+    }
+    if (text === "/pinhere" || text.startsWith("/pin ")) {
+      const target = text === "/pinhere" ? message.reply_to_message : null;
+      const idToPin = target?.message_id ?? Number(text.slice("/pin ".length).trim());
+      if (!idToPin) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /pin <message_id>، أو رد على رسالة بـ /pinhere. أضف البوت مشرفًا في المجموعة بصلاحية التثبيت." }); return; }
+      const result = await telegram(env, "pinChatMessage", { chat_id: message.chat.id, message_id: idToPin, disable_notification: false });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: result?.ok ? "📌 تم تثبيت الرسالة." : `❌ تعذّر التثبيت: ${result?.description ?? "خطأ غير معروف"}` });
+      return;
+    }
+    if (text === "/unpin") {
+      const result = await telegram(env, "unpinAllChatMessages", { chat_id: message.chat.id });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: result?.ok ? "📌 تم فك كل الرسائل المثبتة." : `❌ تعذّر: ${result?.description ?? "خطأ"}` });
+      return;
+    }
+    if (text === "/health" || text === "/healthcheck") { await sendHealthCheck(env, message.chat.id); return; }
+    if (text === "/uptime") { await sendUptime(env, message.chat.id); return; }
+    if (text === "/note" || text.startsWith("/note ")) {
+      const note = text.slice("/note".length).trim();
+      if (!note) {
+        const all = await adminNotes(env);
+        const mine = all[String(userId)];
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: mine ? `📝 ملاحظتك المحفوظة:\n${escapeHtml(mine.note)}\n(${mine.at})\nللحذف: /note حذف` : "لا توجد ملاحظة محفوظة.\n✏️ الاستخدام: /note نص الملاحظة", parse_mode: "HTML" });
+        return;
+      }
+      if (/^حذف$/u.test(note)) { await setAdminNote(env, userId, null); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم حذف ملاحظتك." }); return; }
+      await setAdminNote(env, userId, note);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم حفظ ملاحظتك. اعرضها بـ /note" });
+      return;
+    }
+    if (text === "/exportuserscsv") { await exportUsersCsv(env, message.chat.id); return; }
+    if (text === "/reply" || text.startsWith("/reply ")) { await handleAdminReply(env, message, text); return; }
     if (text === "/card_hide" || text.startsWith("/card_hide ")) {
       await setCardVisibility(env, message.chat.id, text.slice("/card_hide".length), false);
       return;
@@ -4026,6 +4507,15 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     if (admin?.bc === "await" && !text.startsWith("/")) {
+      // tpl_name flow: capture the message as a broadcast template content, then confirm.
+      if (admin?.adminFlow?.kind === "tpl_name") {
+        const name = String(admin.adminFlow.name ?? "افتراضي");
+        await storeCall(env, { op: "template_save", key: name, fromChat: message.chat.id, messageId: message.message_id });
+        await clearAdminFlow(env, userId);
+        await saveUser(env, userId, { ...(admin ?? {}), bc: undefined });
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `🧷 تم حفظ القالب «${escapeHtml(name)}». أرسله للمستخدمين في أي وقت بـ /tplsend ${name}.`, parse_mode: "HTML" });
+        return;
+      }
       await captureBroadcast(env, message, userId, admin);
       return;
     }
@@ -4062,6 +4552,17 @@ async function handleUpdate(update, env, ctx) {
   if (text === "/random" || text.startsWith("/random ")) {
     const index = Math.floor(Math.random() * records.length);
     await sendRecord(env, message.chat.id, index, -1, "");
+    return;
+  }
+  if (text === "/contact" || text.startsWith("/contact ")) { await handleContactAdmin(env, message, userId, text); return; }
+  if (text === "/stopbroadcast") {
+    await setOptOut(env, userId, true);
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🔕 تم تسجيل خروجك من الرسائل الجماعية. يمكنك العودة في أي وقت بأمر /startbroadcast." });
+    return;
+  }
+  if (text === "/startbroadcast") {
+    await setOptOut(env, userId, false);
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🔔 تم إعادة تسجيلك لاستقبال الرسائل الجماعية." });
     return;
   }
   if (text === "/suggest" || text.startsWith("/suggest ")) {
