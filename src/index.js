@@ -2407,7 +2407,7 @@ async function stopVoiceRecording(env, chatId, userId, user) {
 
 // ---- User directory in the spreadsheet ("User" tab, written by the Apps Script) ----
 const USERS_SYNC_CURSOR = "users-sync-cursor";
-const USERS_SYNC_BATCH = 100;
+const USERS_SYNC_BATCH = 200;
 
 function userSheetRow(id, record, from = {}) {
   const tgName = record?.tgName || displayNameOrEmpty(from);
@@ -4636,32 +4636,42 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     if (text === "/syncall") {
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⏳ بدأت مزامنة جميع المستخدمين إلى الشيت في الخلفية (مزامنة متوازية سريعة). سأرسل تقريرًا عند الانتهاء." });
+      const dc = await driveConfig(env);
+      if (!dc) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ لم يتم ربط Apps Script بعد. تأكد من وجود سر APPS_SCRIPT_URL في GitHub وأعد النشر بـ setup_webhook=true." }); return; }
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⏳ بدأت مزامنة جميع المستخدمين إلى الشيت في الخلفية. سأبلغك بتقدم كل جولة وأرسل تقريرًا نهائيًا." });
       await inBackground(ctx, (async () => {
-        if (env.USERS) await storeCall(env, { op: "put", key: USERS_SYNC_CURSOR, value: null });
-        let rounds = 0, total = 0;
-        for (let i = 0; i < 80; i += 1) {
-          const cursor = (await storeCall(env, { op: "get", key: USERS_SYNC_CURSOR })).value ?? null;
-          const page = await storeCall(env, { op: "userpage", cursor, limit: USERS_SYNC_BATCH });
-          if (!(page.users ?? []).length) break;
-          const rows = await Promise.all(page.users.map(async (item) => {
-            let record = item.record ?? {};
-            if (!record.tgName && !record.username) {
-              const chat = await telegram(env, "getChat", { chat_id: item.id }).catch(() => null);
-              if (chat?.ok && chat.result) {
-                record = { ...record, tgName: displayNameOrEmpty(chat.result), username: chat.result.username ?? "" };
-                await saveUser(env, item.id, record).catch(() => null);
+        try {
+          if (env.USERS) await storeCall(env, { op: "put", key: USERS_SYNC_CURSOR, value: null });
+          let rounds = 0, total = 0, failedRounds = 0, lastError = "";
+          for (let i = 0; i < 80; i += 1) {
+            const cursor = (await storeCall(env, { op: "get", key: USERS_SYNC_CURSOR })).value ?? null;
+            const page = await storeCall(env, { op: "userpage", cursor, limit: USERS_SYNC_BATCH });
+            if (!(page.users ?? []).length) break;
+            const rows = await Promise.all(page.users.map(async (item) => {
+              let record = item.record ?? {};
+              if (!record.tgName && !record.username) {
+                const chat = await telegram(env, "getChat", { chat_id: item.id }).catch(() => null);
+                if (chat?.ok && chat.result) {
+                  record = { ...record, tgName: displayNameOrEmpty(chat.result), username: chat.result.username ?? "" };
+                  await saveUser(env, item.id, record).catch(() => null);
+                }
               }
-            }
-            return userSheetRow(item.id, record);
-          }));
-          await pushUsers(env, rows).catch(() => null);
-          total += rows.length; rounds += 1;
-          if (page.next) await storeCall(env, { op: "put", key: USERS_SYNC_CURSOR, value: page.next });
-          else { await storeCall(env, { op: "put", key: USERS_SYNC_CURSOR, value: null }); break; }
-          await new Promise((r) => setTimeout(r, 500));
+              return userSheetRow(item.id, record);
+            }));
+            const outcome = await pushUsers(env, rows).catch((e) => ({ ok: false, error: String(e) }));
+            if (outcome.ok) { total += rows.length; }
+            else { failedRounds += 1; lastError = outcome?.error ?? "unknown"; }
+            rounds += 1;
+            if (rounds % 5 === 0) await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `⏳ تقدم: ${total} متزامن / ${failedRounds} جولات فشلت…` }).catch(() => null);
+            if (page.next) await storeCall(env, { op: "put", key: USERS_SYNC_CURSOR, value: page.next });
+            else { await storeCall(env, { op: "put", key: USERS_SYNC_CURSOR, value: null }); break; }
+            await new Promise((r) => setTimeout(r, 200));
+          }
+          const summary = `✅ اكتملت المزامنة الشاملة:\n• متزامن بنجاح: ${total} مستخدم\n• عدد الجولات: ${rounds}\n• جولات فاشلة: ${failedRounds}${lastError ? `\n• آخر خطأ: ${escapeHtml(lastError)}` : ""}\nتحقق من تبويب "users" في الشيت.`;
+          await telegram(env, "sendMessage", { chat_id: message.chat.id, text: summary });
+        } catch (error) {
+          await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `❌ فشلت المزامنة: ${escapeHtml(error instanceof Error ? error.message : String(error))}` }).catch(() => null);
         }
-        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ اكتملت المزامنة الشاملة: ${total} مستخدم في ${rounds} جولة. تحقق من تبويب User في الشيت.` });
       })());
       return;
     }
