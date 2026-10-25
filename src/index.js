@@ -1986,6 +1986,7 @@ function buildCommandsHelpText(env, userId) {
     lines.push("/testbroadcast — إرسال تجريبي | /bcpause | /bcresume | /bccancel — التحكم في البث");
     lines.push("/importusers — استيراد قائمة معرّفات مستخدمين قديمة دفعة واحدة");
     lines.push("/importsheet <رابط> [تبويب] — استيراد المعرّفات من ورقة Google مباشرة");
+    lines.push("/syncall — مزامنة جميع المستخدمين للشيت (يكمل من حيث توقف) | /syncreset — تصفير المؤشر");
   }
   return lines.join("\n");
 }
@@ -2462,18 +2463,23 @@ async function syncUsersBatch(env, chatId) {
   }
   const cursor = (await storeCall(env, { op: "get", key: USERS_SYNC_CURSOR })).value ?? null;
   const page = await storeCall(env, { op: "userpage", cursor, limit: USERS_SYNC_BATCH });
-  // Parallel profile lookup — all getChat calls fire at once (was serial, causing timeouts & lost users).
-  const rows = await Promise.all(page.users.map(async (item) => {
-    let record = item.record ?? {};
-    if (!record.tgName && !record.username) {
-      const chat = await telegram(env, "getChat", { chat_id: item.id }).catch(() => null);
-      if (chat?.ok && chat.result) {
-        record = { ...record, tgName: displayNameOrEmpty(chat.result), username: chat.result.username ?? "" };
-        await saveUser(env, item.id, record).catch(() => null);
+  // Limited parallelism (10 at a time) to avoid Telegram 429 rate-limit on getChat.
+  const rows = [];
+  for (let c = 0; c < page.users.length; c += 10) {
+    const chunk = page.users.slice(c, c + 10);
+    const chunkRows = await Promise.all(chunk.map(async (item) => {
+      let record = item.record ?? {};
+      if (!record.tgName && !record.username) {
+        const chat = await telegram(env, "getChat", { chat_id: item.id }).catch(() => null);
+        if (chat?.ok && chat.result) {
+          record = { ...record, tgName: displayNameOrEmpty(chat.result), username: chat.result.username ?? "" };
+          await saveUser(env, item.id, record).catch(() => null);
+        }
       }
-    }
-    return userSheetRow(item.id, record);
-  }));
+      return userSheetRow(item.id, record);
+    }));
+    rows.push(...chunkRows);
+  }
   const outcome = await pushUsers(env, rows);
   if (!outcome.ok) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ تعذّرت مزامنة المستخدمين: ${outcome.error ?? "الربط غير مفعّل"}` });
@@ -4635,42 +4641,55 @@ async function handleUpdate(update, env, ctx) {
       await inBackground(ctx, syncUsersBatch(env, message.chat.id));
       return;
     }
+    if (text === "/syncreset") {
+      if (env.USERS) await storeCall(env, { op: "put", key: USERS_SYNC_CURSOR, value: null });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم تصفير مؤشر المزامنة. المزامنة التالية ستبدأ من أول مستخدم." });
+      return;
+    }
     if (text === "/syncall") {
       const dc = await driveConfig(env);
       if (!dc) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ لم يتم ربط Apps Script بعد. تأكد من وجود سر APPS_SCRIPT_URL في GitHub وأعد النشر بـ setup_webhook=true." }); return; }
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⏳ بدأت مزامنة جميع المستخدمين إلى الشيت في الخلفية. سأبلغك بتقدم كل جولة وأرسل تقريرًا نهائيًا." });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⏳ بدأت المزامنة (متواصلة من حيث توقفت). سأبلغك بعد كل جولة. أعد تشغيل /syncall إذا توقفت في منتصف الطريق." });
       await inBackground(ctx, (async () => {
         try {
-          if (env.USERS) await storeCall(env, { op: "put", key: USERS_SYNC_CURSOR, value: null });
           let rounds = 0, total = 0, failedRounds = 0, lastError = "";
-          for (let i = 0; i < 80; i += 1) {
+          for (let i = 0; i < 30; i += 1) { // ~30 rounds × 50 = 1500 users per run; re-run to continue
             const cursor = (await storeCall(env, { op: "get", key: USERS_SYNC_CURSOR })).value ?? null;
-            const page = await storeCall(env, { op: "userpage", cursor, limit: USERS_SYNC_BATCH });
+            const page = await storeCall(env, { op: "userpage", cursor, limit: 50 });
             if (!(page.users ?? []).length) break;
-            const rows = await Promise.all(page.users.map(async (item) => {
-              let record = item.record ?? {};
-              if (!record.tgName && !record.username) {
-                const chat = await telegram(env, "getChat", { chat_id: item.id }).catch(() => null);
-                if (chat?.ok && chat.result) {
-                  record = { ...record, tgName: displayNameOrEmpty(chat.result), username: chat.result.username ?? "" };
-                  await saveUser(env, item.id, record).catch(() => null);
+            // Limited parallelism (10 at a time) to avoid Telegram 429 rate-limit on getChat.
+            const rows = [];
+            for (let c = 0; c < page.users.length; c += 10) {
+              const chunk = page.users.slice(c, c + 10);
+              const chunkRows = await Promise.all(chunk.map(async (item) => {
+                let record = item.record ?? {};
+                if (!record.tgName && !record.username) {
+                  const chat = await telegram(env, "getChat", { chat_id: item.id }).catch(() => null);
+                  if (chat?.ok && chat.result) {
+                    record = { ...record, tgName: displayNameOrEmpty(chat.result), username: chat.result.username ?? "" };
+                    await saveUser(env, item.id, record).catch(() => null);
+                  }
                 }
-              }
-              return userSheetRow(item.id, record);
-            }));
+                return userSheetRow(item.id, record);
+              }));
+              rows.push(...chunkRows);
+            }
             const outcome = await pushUsers(env, rows).catch((e) => ({ ok: false, error: String(e) }));
             if (outcome.ok) { total += rows.length; }
             else { failedRounds += 1; lastError = outcome?.error ?? "unknown"; }
             rounds += 1;
-            if (rounds % 5 === 0) await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `⏳ تقدم: ${total} متزامن / ${failedRounds} جولات فشلت…` }).catch(() => null);
+            await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `⏳ جولة ${rounds}: ${total} متزامن حتى الآن${failedRounds ? ` (${failedRounds} فشل)` : ""}${lastError ? `\nآخر خطأ: ${escapeHtml(lastError)}` : ""}` }).catch(() => null);
             if (page.next) await storeCall(env, { op: "put", key: USERS_SYNC_CURSOR, value: page.next });
             else { await storeCall(env, { op: "put", key: USERS_SYNC_CURSOR, value: null }); break; }
-            await new Promise((r) => setTimeout(r, 200));
+            await new Promise((r) => setTimeout(r, 300));
           }
-          const summary = `✅ اكتملت المزامنة الشاملة:\n• متزامن بنجاح: ${total} مستخدم\n• عدد الجولات: ${rounds}\n• جولات فاشلة: ${failedRounds}${lastError ? `\n• آخر خطأ: ${escapeHtml(lastError)}` : ""}\nتحقق من تبويب "users" في الشيت.`;
+          const cursorNow = (await storeCall(env, { op: "get", key: USERS_SYNC_CURSOR })).value;
+          const summary = cursorNow
+            ? `⏸️ توقفت مؤقتًا بعد ${total} مستخدم (${rounds} جولات).\nأعد تشغيل /syncall للمتابعة من حيث توقف.${failedRounds ? `\nجولات فاشلة: ${failedRounds}${lastError ? ` — ${escapeHtml(lastError)}` : ""}` : ""}`
+            : `✅ اكتملت المزامنة: ${total} مستخدم في ${rounds} جولة.${failedRounds ? `\nجولات فاشلة: ${failedRounds}${lastError ? ` — ${escapeHtml(lastError)}` : ""}` : ""}\nتحقق من تبويب "users" في الشيت.`;
           await telegram(env, "sendMessage", { chat_id: message.chat.id, text: summary });
         } catch (error) {
-          await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `❌ فشلت المزامنة: ${escapeHtml(error instanceof Error ? error.message : String(error))}` }).catch(() => null);
+          await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `❌ فشلت المزامنة: ${escapeHtml(error instanceof Error ? error.message : String(error))}\nأعد تشغيل /syncall — سيكمل من حيث توقف.` }).catch(() => null);
         }
       })());
       return;
