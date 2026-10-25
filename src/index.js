@@ -1988,6 +1988,7 @@ function buildCommandsHelpText(env, userId) {
     lines.push("/slowmode on|off|&lt;ثواني&gt; — الوضع البطيء | /clearcache — مسح الكاش");
     lines.push("/testbroadcast — إرسال تجريبي | /bcpause | /bcresume | /bccancel — التحكم في البث");
     lines.push("/importusers — استيراد قائمة معرّفات مستخدمين قديمة دفعة واحدة");
+    lines.push("/importsheet <رابط> [تبويب] — استيراد المعرّفات من ورقة Google مباشرة");
   }
   return lines.join("\n");
 }
@@ -3414,6 +3415,31 @@ async function importUserIds(env, chatId, rawText) {
   await logAdminAction(env, chatId, "importusers", `${ids.length} ids`);
   if (result?.error) { await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ فشل الاستيراد: ${result.error}` }); return; }
   await telegram(env, "sendMessage", { chat_id: chatId, text: `✅ تم الاستيراد: ${result?.imported ?? ids.length} مستخدم جديد${result?.skipped ? ` (تم تخطي ${result.skipped} مسجلين مسبقًا)` : ""}.\nالآن يمكنك استخدام /broadcast وسيصل لجميعهم.` });
+}
+async function importFromSheet(env, chatId, arg) {
+  if (!env.USERS) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تخزين المستخدمين غير مفعّل." }); return; }
+  const parts = arg.split(/\s+/u);
+  const url = parts[0];
+  const sheetName = parts.slice(1).join(" ") || "bot";
+  const sheetIdMatch = url.match(/\/spreadsheets\/d\/([A-Za-z0-9_-]+)/);
+  if (!sheetIdMatch) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ رابط الورقة غير صالح. استخدم رابط docs.google.com/spreadsheets/d/..." }); return; }
+  const sheetId = sheetIdMatch[1];
+  const csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(sheetName)}`;
+  await telegram(env, "sendMessage", { chat_id: chatId, text: `⏳ جارٍ جلب الورقة «${escapeHtml(sheetName)}»…` });
+  try {
+    const resp = await fetch(csvUrl, { signal: AbortSignal.timeout(30000) });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const csvText = await resp.text();
+    const ids = [...new Set((csvText.match(/^"?(\d{5,})"?/gm) ?? []).map((m) => m.replace(/"/g, "").trim()))].slice(0, 5000);
+    if (!ids.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ لم أجد أي معرّفات في العمود الأول. تأكد من اسم التبويب." }); return; }
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `⏳ تم العثور على ${ids.length} معرّف. جارٍ التسجيل…` });
+    const result = await storeCall(env, { op: "bulk_import_users", ids }).catch((e) => ({ error: String(e) }));
+    await logAdminAction(env, chatId, "importsheet", `${ids.length} ids from ${sheetId}/${sheetName}`);
+    if (result?.error) { await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ فشل الاستيراد: ${result.error}` }); return; }
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `✅ تم الاستيراد من الورقة: ${result?.imported ?? ids.length} مستخدم جديد${result?.skipped ? ` (تم تخطي ${result.skipped} مسجلين مسبقًا)` : ""}.\nالآن يمكنك استخدام /broadcast وسيصل لجميعهم.` });
+  } catch (error) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ فشل جلب الورقة: ${error instanceof Error ? error.message : "unknown"}.\nتأكد أن الورقة عامة (أي شخص لديه الرابط يمكنه الاطلاع).` });
+  }
 }
 async function featureFlagsText(env) {
   const flags = await featureFlags(env);
@@ -4884,6 +4910,13 @@ async function handleUpdate(update, env, ctx) {
       if (arg) { await importUserIds(env, message.chat.id, arg); return; }
       await setAdminFlow(env, userId, { kind: "importusers" });
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "📥 أرسل الآن قائمة معرّفات المستخدمين (رقم في كل سطر أو مفصولة بفواصل/مسافات).\nستُسجّل دفعة واحدة في قاعدة بيانات البوت للإرسال الجماعي." });
+      return;
+    }
+    if (text === "/importsheet" || text.startsWith("/importsheet ")) {
+      if (!env.USERS) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ تخزين المستخدمين غير مفعّل." }); return; }
+      const arg = text.slice("/importsheet".length).trim();
+      if (!arg) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /importsheet <رابط_الورقة> [اسم_التبويب]\nمثال: /importsheet https://docs.google.com/spreadsheets/d/XXXX/edit bot\nيستورد المعرّفات من العمود الأول." }); return; }
+      await importFromSheet(env, message.chat.id, arg);
       return;
     }
   }
