@@ -36,10 +36,12 @@ function doPost(e) {
     const body = JSON.parse((e && e.postData && e.postData.contents) || "{}");
     if (body.action === "ping") return json_(ping_());
     if (body.action === "sync_github_audio") return json_(syncGithubAudio_(body));
-    if (body.action === "dictionary_get" || body.action === "dictionary_update") {
+    if (body.action === "dictionary_get" || body.action === "dictionary_update" || body.action === "dictionary_append") {
       const dictionaryAdmin = body.by && body.by.id != null ? String(body.by.id) : "";
       if (dictionaryAdmin !== "813894692") return json_({ ok: false, error: "unauthorized" });
-      return json_(body.action === "dictionary_get" ? dictionaryGet_(body.word) : dictionaryUpdate_(body));
+      if (body.action === "dictionary_get") return json_(dictionaryGet_(body.word));
+      if (body.action === "dictionary_update") return json_(dictionaryUpdate_(body));
+      return json_(dictionaryAppend_(body));
     }
     if (body.action === "users") return json_(upsertUsers_(body.users));
     if (["sync", "reconcile", "delete", "delete_many", "delete_all"].indexOf(body.action) >= 0) {
@@ -151,6 +153,19 @@ function dictionaryUpdate_(body) {
   if (normalizeDictionaryWord_(current[0]) !== expected) return { ok: false, error: "row changed; search for the word again" };
   const values = Array.from({ length: columns }, function (_, index) {
     return index < body.values.length ? body.values[index] : current[index];
+  });
+  sheet.getRange(row, 1, 1, columns).setValues([values]);
+  SpreadsheetApp.flush();
+  return { ok: true, row: row, headers: sheet.getRange(1, 1, 1, columns).getValues()[0], values: values };
+}
+// Appends a new row to the dictionary sheet and returns the added row number + values.
+function dictionaryAppend_(body) {
+  if (!Array.isArray(body.values) || !body.values.length) return { ok: false, error: "values are required" };
+  const sheet = dictionarySheet_();
+  const columns = Math.max(1, sheet.getLastColumn ? sheet.getLastColumn() : body.values.length);
+  const row = sheet.getLastRow() + 1;
+  const values = Array.from({ length: columns }, function (_, index) {
+    return index < body.values.length ? body.values[index] : "";
   });
   sheet.getRange(row, 1, 1, columns).setValues([values]);
   SpreadsheetApp.flush();

@@ -514,7 +514,13 @@ test("/start greets a returning user by the saved name with the photo", async ()
   const calls = await say(kvEnv, 22, "/start");
   const photo = calls.find((call) => call.url.endsWith("/sendPhoto")).payload;
   assert.match(photo.caption, /مرحبًا بك بيشوي مجدي فرج، في القاموس القبطي الناطق/u);
-  assert.ok(!calls.some((call) => call.url.endsWith("/sendMessage")));
+  // After the welcome photo, a separate organized commands menu is sent (caption limit is 1024 chars).
+  const help = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload;
+  assert.ok(help, "commands menu message was sent after the welcome photo");
+  assert.match(help.text, /الأوامر/u);
+  assert.match(help.text, /\/start/);
+  assert.match(help.text, /\/random/);
+  assert.doesNotMatch(help.text, /للأدمن فقط/u);
 });
 
 test("if the photo cannot be sent the welcome falls back to text", async () => {

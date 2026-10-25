@@ -1607,6 +1607,40 @@ async function sendWelcome(env, chatId, name) {
   await telegram(env, "sendMessage", { chat_id: chatId, text: caption, parse_mode: "HTML", reply_markup: userReplyKeyboardMarkup() });
 }
 
+// Organized commands menu (sent as a separate text message because photo captions are limited to 1024 chars).
+function buildCommandsHelpText(env, userId) {
+  const admin = isAdmin(env, userId);
+  const lines = [
+    "📖 <b>القاموس القبطي الناطق — الأوامر</b>",
+    "",
+    "🔹 <b>عامة</b>",
+    "/start — بدء الاستخدام وإظهار القائمة",
+    "/keyboard — لوحة مفاتيح قبطية",
+    "/learn — تعلم اللغة القبطية",
+    "/random — كلمة عشوائية من القاموس",
+    "💡 اكتب أي كلمة مباشرة للبحث: قبطي / عربي / إنجليزي / يوناني / فرنسي / ألماني.",
+  ];
+  if (admin) {
+    lines.push("", "🔹 <b>للأدمن فقط</b>");
+    lines.push("/admin — لوحة تحكم الأدمن");
+    lines.push("/usage — تقرير استخدام البوت اليومي");
+    lines.push("/analytics — تحليلات البحث وأكثر الكلمات بحثًا");
+    lines.push("/auditlog — سجل تدقيق تعديلات القاموس");
+    lines.push("/export — تصدير القاموس كملف JSON");
+    lines.push("/backup — نسخة احتياطية من القاموس");
+    lines.push("/broadcast — إرسال جماعي للمستخدمين");
+    lines.push("/syncdrive — مزامنة الأصوات مع Drive");
+    lines.push("/syncusers — مزامنة المستخدمين مع الشيت");
+    lines.push("/record — تسجيل نطق كلمة جديدة");
+    lines.push("/card_hide &lt;كلمة&gt; — إخفاء بطاقة كلمة");
+    lines.push("/card_show &lt;كلمة&gt; — إظهار بطاقة كلمة");
+    lines.push("/setdrive &lt;رابط&gt; — ضبط رابط Apps Script");
+    lines.push("/setarchive &lt;here|id&gt; — ضبط مجموعة الأرشيف");
+    lines.push("/voice_delete &lt;كلمة&gt; — حذف تسجيل صوتي");
+  }
+  return lines.join("\n");
+}
+
 function adminIds(env) {
   // The owner explicitly requested a single fixed administrator identity.
   return [DEFAULT_ADMIN_IDS];
@@ -2209,6 +2243,132 @@ const USAGE_FLUSH_EVERY = 20;
 const USAGE_FLUSH_MS = 60000;
 const usageState = { day: "", pending: 0, flushedAt: 0 };
 
+// ---- Pro feature: per-user rate limiting (sliding window, in-memory) ----
+const RATE_LIMIT_WINDOW_MS = 10000;
+const RATE_LIMIT_MAX = 30; // messages per window for regular users
+const RATE_LIMIT_ADMIN_MULTIPLIER = 5;
+const RATE_WARN_COOLDOWN_MS = 30000;
+const rateBuckets = new Map(); // userId -> { windowStart, count }
+const rateLastWarn = new Map(); // userId -> last warning timestamp
+function checkRateLimit(userId, admin) {
+  const now = Date.now();
+  const max = admin ? RATE_LIMIT_MAX * RATE_LIMIT_ADMIN_MULTIPLIER : RATE_LIMIT_MAX;
+  const key = String(userId);
+  let bucket = rateBuckets.get(key);
+  if (!bucket || now - bucket.windowStart >= RATE_LIMIT_WINDOW_MS) {
+    bucket = { windowStart: now, count: 0 };
+    rateBuckets.set(key, bucket);
+  }
+  bucket.count += 1;
+  if (rateBuckets.size > 20000) {
+    const cutoff = now - RATE_LIMIT_WINDOW_MS;
+    for (const [k, v] of rateBuckets) if (v.windowStart < cutoff) rateBuckets.delete(k);
+  }
+  const lastWarn = rateLastWarn.get(key) ?? 0;
+  const shouldWarn = bucket.count > max && now - lastWarn > RATE_WARN_COOLDOWN_MS;
+  if (shouldWarn) rateLastWarn.set(key, now);
+  return { allowed: bucket.count <= max, count: bucket.count, max, shouldWarn };
+}
+
+// ---- Pro feature: usage analytics (searches/commands/inline + top searched words) ----
+// Kept in memory and snapshotted to the Durable Object periodically so it survives cold starts.
+const ANALYTICS_FLUSH_EVERY = 50;
+const ANALYTICS_FLUSH_MS = 120000;
+const analyticsState = { searches: 0, commands: 0, inline: 0, topWords: new Map(), lastFlush: Date.now(), pending: 0 };
+function trackUsage(kind, word) {
+  if (kind === "search") {
+    analyticsState.searches += 1;
+    if (word) {
+      const key = normalize(String(word)).slice(0, 80);
+      if (key) analyticsState.topWords.set(key, (analyticsState.topWords.get(key) ?? 0) + 1);
+    }
+  } else if (kind === "command") {
+    analyticsState.commands += 1;
+  } else if (kind === "inline") {
+    analyticsState.inline += 1;
+  }
+  analyticsState.pending += 1;
+}
+async function flushAnalyticsSnapshot(env) {
+  if (!env.USERS) return;
+  const now = Date.now();
+  if (analyticsState.pending < ANALYTICS_FLUSH_EVERY && now - analyticsState.lastFlush < ANALYTICS_FLUSH_MS) return;
+  analyticsState.pending = 0;
+  analyticsState.lastFlush = now;
+  const top = [...analyticsState.topWords.entries()].sort((a, b) => b[1] - a[1]).slice(0, 100);
+  try {
+    const previous = (await storeCall(env, { op: "get", key: "analytics:snapshot" })).value ?? { searches: 0, commands: 0, inline: 0, topWords: [] };
+    const mergedTop = new Map(previous.topWords ?? []);
+    for (const [word, count] of top) mergedTop.set(word, (mergedTop.get(word) ?? 0) + count);
+    const merged = {
+      searches: (previous.searches ?? 0) + analyticsState.searches,
+      commands: (previous.commands ?? 0) + analyticsState.commands,
+      inline: (previous.inline ?? 0) + analyticsState.inline,
+      topWords: [...mergedTop.entries()].sort((a, b) => b[1] - a[1]).slice(0, 100),
+      updatedAt: new Date().toISOString(),
+    };
+    analyticsState.searches = 0; analyticsState.commands = 0; analyticsState.inline = 0; analyticsState.topWords.clear();
+    await storeCall(env, { op: "put", key: "analytics:snapshot", value: merged });
+  } catch (error) {
+    console.error("Analytics snapshot failed", error instanceof Error ? error.message : "unknown error");
+  }
+}
+async function readAnalyticsReport(env) {
+  const persisted = env.USERS ? ((await storeCall(env, { op: "get", key: "analytics:snapshot" })).value ?? null) : null;
+  const top = new Map(persisted?.topWords ?? []);
+  for (const [word, count] of analyticsState.topWords) top.set(word, (top.get(word) ?? 0) + count);
+  return {
+    searches: (persisted?.searches ?? 0) + analyticsState.searches,
+    commands: (persisted?.commands ?? 0) + analyticsState.commands,
+    inline: (persisted?.inline ?? 0) + analyticsState.inline,
+    topWords: [...top.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15),
+    updatedAt: persisted?.updatedAt ?? null,
+  };
+}
+
+// ---- Pro feature: audit log for dictionary edits/appends (ring buffer + DO snapshot) ----
+const AUDIT_MAX_MEMORY = 200;
+const auditLog = [];
+function logAudit(entry) {
+  const record = { at: new Date().toISOString(), ...entry };
+  auditLog.push(record);
+  if (auditLog.length > AUDIT_MAX_MEMORY) auditLog.shift();
+  console.log(JSON.stringify({ ev: "audit", ...entry }));
+}
+async function flushAuditLog(env) {
+  if (!env.USERS || !auditLog.length) return;
+  try {
+    const previous = (await storeCall(env, { op: "get", key: "auditlog:recent" })).value ?? [];
+    const merged = [...previous, ...auditLog].slice(-AUDIT_MAX_MEMORY);
+    auditLog.length = 0;
+    await storeCall(env, { op: "put", key: "auditlog:recent", value: merged });
+  } catch (error) {
+    console.error("Audit log flush failed", error instanceof Error ? error.message : "unknown error");
+  }
+}
+async function readAuditLog(env) {
+  const persisted = env.USERS ? ((await storeCall(env, { op: "get", key: "auditlog:recent" })).value ?? []) : [];
+  return [...persisted, ...auditLog].slice(-30).reverse();
+}
+
+// ---- Pro feature: send a JSON/CSV file as a Telegram document (used by export & backup) ----
+async function sendTextFile(env, chatId, filename, text, caption, mime = "application/json") {
+  try {
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    form.append("caption", String(caption ?? ""));
+    form.append("parse_mode", "HTML");
+    form.append("document", new Blob([text], { type: mime }), filename);
+    const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendDocument`, { method: "POST", body: form });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.ok) console.error("Telegram sendDocument failed", result.description ?? response.status);
+    return result;
+  } catch (error) {
+    console.error("sendTextFile failed", error instanceof Error ? error.message : "unknown error");
+    return { ok: false, error: error instanceof Error ? error.message : "unknown error" };
+  }
+}
+
 function utcDay(date = new Date()) {
   return date.toISOString().slice(0, 10);
 }
@@ -2276,6 +2436,71 @@ async function sendUsageReport(env, chatId) {
   ];
   await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML" });
 }
+
+// ---- Pro feature: usage analytics report (searches/commands/inline + top searched words) ----
+async function sendAnalyticsReport(env, chatId) {
+  const report = await readAnalyticsReport(env);
+  const fmt = (value) => Number(value).toLocaleString("en-US");
+  const topLines = report.topWords.length
+    ? report.topWords.map(([word, count], i) => `${i + 1}. ${escapeHtml(word.slice(0, 50))} — ${fmt(count)}`).join("\n")
+    : "لا توجد عمليات بحث مسجلة بعد.";
+  const lines = [
+    "📈 <b>تحليلات الاستخدام</b>",
+    `عمليات البحث: <b>${fmt(report.searches)}</b>`,
+    `الأوامر: <b>${fmt(report.commands)}</b>`,
+    `Inline: <b>${fmt(report.inline)}</b>`,
+    "",
+    "<b>أكثر الكلمات بحثًا:</b>",
+    topLines,
+  ];
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML" });
+}
+
+// ---- Pro feature: dictionary audit log report ----
+async function sendAuditLogReport(env, chatId) {
+  const entries = await readAuditLog(env);
+  if (!entries.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: "📋 سجل التدقيق فارغ؛ لم تتم أي تعديلات على القاموس بعد." }); return; }
+  const lines = ["📋 <b>سجل تدقيق تعديلات القاموس</b> (آخر 30):", ""];
+  for (const entry of entries) {
+    const action = entry.action === "dictionary_append" ? "➕ إضافة صف" : "✏️ تعديل عمود";
+    const detail = entry.action === "dictionary_append"
+      ? `صف ${entry.row}: ${escapeHtml(String(entry.coptic ?? "").slice(0, 40))}`
+      : `صف ${entry.row} [${escapeHtml(String(entry.coptic ?? "").slice(0, 30))}] — ${escapeHtml(String(entry.column ?? ""))}: «${escapeHtml(String(entry.old ?? "").slice(0, 25))}» → «${escapeHtml(String(entry.new ?? "").slice(0, 25))}»`;
+    lines.push(`• ${entry.at?.slice(0, 19) ?? ""} ${action} (${entry.userId ?? "?"})\n  ${detail}`);
+  }
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
+}
+
+// ---- Pro feature: export dictionary.json / users CSV as files ----
+async function exportDictionary(env, chatId) {
+  const snapshot = JSON.stringify(records, null, 1);
+  const stamp = new Date().toISOString().slice(0, 10);
+  await sendTextFile(env, chatId, `dictionary-${stamp}.json`, snapshot, `📦 تصدير القاموس: ${records.length.toLocaleString("en-US")} سجل.`);
+}
+async function exportUsersCsv(env, chatId) {
+  if (!env.USERS) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تخزين المستخدمين غير مفعّل." }); return; }
+  const rows = [["user_id", "name", "username", "first_seen", "registered_at", "blocked"]];
+  let cursor = null;
+  for (;;) {
+    const page = await storeCall(env, { op: "userpage", limit: 200, ...(cursor ? { cursor } : {}) });
+    for (const { id, record } of page.users ?? []) {
+      rows.push([id, record?.name ?? "", record?.username ?? "", record?.firstSeen ?? "", record?.registeredAt ?? "", record?.blocked ? "yes" : "no"]);
+    }
+    cursor = page.next;
+    if (!cursor || rows.length > 5000) break;
+  }
+  const csv = rows.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(",")).join("\n");
+  const stamp = new Date().toISOString().slice(0, 10);
+  await sendTextFile(env, chatId, `users-${stamp}.csv`, csv, `👥 تصدير المستخدمين: ${rows.length - 1} مستخدم.`, "text/csv");
+}
+
+// ---- Pro feature: backup snapshot of the dictionary (sent as file to admin) ----
+async function sendBackup(env, chatId) {
+  const stamp = new Date().toISOString().replace(/[:.]/gu, "-");
+  const payload = { backedUpAt: new Date().toISOString(), recordsCount: records.length, records };
+  await sendTextFile(env, chatId, `backup-dictionary-${stamp}.json`, JSON.stringify(payload), `💾 نسخة احتياطية من القاموس (${records.length.toLocaleString("en-US")} سجل).`);
+}
+
 async function sendBroadcastStatus(env, chatId) {
   const status = env.USERS ? await storeCall(env, { op: "bcstatus" }) : { running: false };
   await telegram(env, "sendMessage", {
@@ -2407,31 +2632,91 @@ async function sendBotInfo(env, chatId) {
 
 const DICTIONARY_LOCAL_FIELDS = ["coptic", "pronunciation", "meaning", "english", "translation_fr", "translation_de", "greek", null, null, "origin", "kind"];
 const DICTIONARY_LOCAL_HEADERS = ["coptic", "ipa", "meaning", "english", "french", "german", "greek", "unused_h", "unused_i", "origin", "kind"];
-function localDictionaryLookup(word) {
+// Bounded Levenshtein distance for fuzzy matching; returns Infinity when beyond `max`.
+function levenshtein(a, b, max) {
+  if (a === b) return 0;
+  if (!a.length) return b.length <= max ? b.length : Infinity;
+  if (!b.length) return a.length <= max ? a.length : Infinity;
+  // Early exit when length difference alone exceeds the budget.
+  if (Math.abs(a.length - b.length) > max) return Infinity;
+  let prev = [];
+  let curr = [];
+  for (let j = 0; j <= b.length; j += 1) prev[j] = j;
+  for (let i = 1; i <= a.length; i += 1) {
+    curr[0] = i;
+    let rowMin = curr[0];
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+      if (curr[j] < rowMin) rowMin = curr[j];
+    }
+    if (rowMin > max) return Infinity;
+    [prev, curr] = [curr, prev];
+  }
+  return prev[b.length] <= max ? prev[b.length] : Infinity;
+}
+
+// Local, in-memory candidate search (instant). Returns up to ~8 candidates ranked:
+// exact match first, then partial (contains/contained), then fuzzy (bounded Levenshtein).
+// Each candidate: { row, matched_column, headers, values, score, matchType }.
+function localDictionaryCandidates(word, limit = 8) {
   const wanted = normalize(word);
-  if (!wanted) return { ok: false, error: "word is required" };
-  let partial = null;
+  if (!wanted) return { ok: false, error: "word is required", candidates: [] };
+  const exact = [];
+  const partial = [];
+  const fuzzy = [];
+  const fuzzyMax = wanted.length <= 4 ? 1 : wanted.length <= 8 ? 2 : 3;
+  const seenRows = new Set();
+  const pushCandidate = (bucket, index, column, values, matchType, score) => {
+    const row = index + 2;
+    if (seenRows.has(row)) return;
+    seenRows.add(row);
+    bucket.push({ row, matched_column: column, headers: DICTIONARY_LOCAL_HEADERS, values, matchType, score });
+  };
   for (let index = 0; index < records.length; index += 1) {
     const record = records[index];
-    const values = DICTIONARY_LOCAL_FIELDS.map((field) => field ? String(record?.[field] ?? "") : "");
+    const values = DICTIONARY_LOCAL_FIELDS.map((field) => (field ? String(record?.[field] ?? "") : ""));
     for (let column = 0; column < values.length; column += 1) {
       const cell = normalize(values[column]);
       if (!cell) continue;
-      if (cell === wanted) return { ok: true, sheet: "dictionary", row: index + 2, matched_column: column, headers: DICTIONARY_LOCAL_HEADERS, values };
-      if (!partial && (cell.includes(wanted) || wanted.includes(cell))) partial = { ok: true, sheet: "dictionary", row: index + 2, matched_column: column, headers: DICTIONARY_LOCAL_HEADERS, values };
+      if (cell === wanted) { pushCandidate(exact, index, column, values, "exact", 0); break; }
+      if (cell.includes(wanted) || wanted.includes(cell)) {
+        const score = Math.abs(cell.length - wanted.length);
+        pushCandidate(partial, index, column, values, "partial", score);
+      } else {
+        const dist = levenshtein(cell, wanted, fuzzyMax);
+        if (dist !== Infinity) pushCandidate(fuzzy, index, column, values, "fuzzy", dist);
+      }
     }
+    if (exact.length >= limit) break;
   }
-  return partial ?? { ok: false, error: "word not found" };
+  partial.sort((a, b) => a.score - b.score);
+  fuzzy.sort((a, b) => a.score - b.score);
+  const candidates = [...exact, ...partial, ...fuzzy].slice(0, limit);
+  return { ok: candidates.length > 0, candidates, exactCount: exact.length };
 }
+
+// Backward-compatible single-result lookup: returns the best candidate as the old shape.
+function localDictionaryLookup(word) {
+  const result = localDictionaryCandidates(word, 1);
+  const best = result.candidates?.[0];
+  if (!best) return { ok: false, error: result.error ?? "word not found" };
+  return { ok: true, sheet: "dictionary", ...best };
+}
+
+// Local-first: search the in-memory records instantly. Only hit the Apps Script sheet
+// when nothing is found locally (fallback). Returns { ok, source, candidates, ...best }.
 async function dictionaryGetFromSheet(env, word) {
+  const local = localDictionaryCandidates(word, 8);
+  if (local.ok) return { ok: true, source: "local", candidates: local.candidates, exactCount: local.exactCount, ...local.candidates[0] };
   const config = await driveConfig(env);
-  if (!config) return localDictionaryLookup(word);
+  if (!config) return { ok: false, source: "local", candidates: [], error: "word not found" };
   try {
     const result = await callAppsScript(config, { action: "dictionary_get", word, by: { id: "813894692" } });
-    return result.ok ? result : localDictionaryLookup(word);
+    if (result.ok) return { ok: true, source: "sheet", candidates: [result], exactCount: 1, ...result };
+    return { ok: false, source: "sheet", candidates: [], error: result.error ?? "word not found" };
   } catch (error) {
-    const fallback = localDictionaryLookup(word);
-    return fallback.ok ? fallback : { ok: false, error: error instanceof Error ? error.message : "تعذّر الاتصال بالشيت" };
+    return { ok: false, source: "sheet", candidates: [], error: error instanceof Error ? error.message : "تعذّر الاتصال بالشيت" };
   }
 }
 function dictionaryFieldName(headers, index) {
@@ -2444,15 +2729,62 @@ function dictionaryEditMarkup(row, headers) {
   rows.push([{ text: "⬅️ قسم تعديل القاموس", callback_data: "ad|page|dictionary" }]);
   return { inline_keyboard: rows };
 }
+// Opens the edit UI for a specific dictionary row (used after picking a suggestion).
+async function openDictionaryEditByRow(env, chatId, userId, row, matchedColumn = null) {
+  const index = Number(row) - 2;
+  const record = records[index];
+  if (!record) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ لم أجد هذا الصف محليًا؛ ابحث عن الكلمة مرة أخرى." }); return; }
+  const values = DICTIONARY_LOCAL_FIELDS.map((field) => (field ? String(record?.[field] ?? "") : ""));
+  const headers = DICTIONARY_LOCAL_HEADERS;
+  await setAdminFlow(env, userId, { kind: "dict_value", row: Number(row), expectedCoptic: values[0] ?? "", values, headers, col: null });
+  const matched = Number.isInteger(matchedColumn) ? `\n🔎 تطابقت مع: <b>${escapeHtml(dictionaryFieldName(headers, matchedColumn))}</b>` : "";
+  const lines = [`📄 <b>الورقة: dictionary</b>\n🔢 <b>رقم الصف: ${row}</b>${matched}`, "اختر أي عمود لتعديله. التعديل يُحفظ فورًا في نفس الصف:", ""];
+  for (let i = 0; i < headers.length; i += 1) lines.push(`<b>${String.fromCharCode(65 + i)} — ${escapeHtml(dictionaryFieldName(headers, i))}:</b> ${escapeHtml(values[i] ?? "")}`);
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML", reply_markup: dictionaryEditMarkup(Number(row), headers) });
+}
+
+// Inline keyboard shown when several candidates match the admin's search word.
+function dictionaryCandidatesMarkup(candidates, word) {
+  const rows = [];
+  for (const candidate of candidates) {
+    const coptic = String(candidate.values?.[0] ?? "—").replaceAll("`", "").trim().slice(0, 32);
+    const meaning = String(candidate.values?.[2] ?? "").replace(/\s+/gu, " ").trim().slice(0, 28);
+    rows.push([{ text: `${coptic}${meaning ? ` — ${meaning}` : ""}`, callback_data: `ad|dictpick|${candidate.row}|${candidate.matched_column ?? -1}` }]);
+  }
+  rows.push([{ text: "➕ إضافة كلمة جديدة", callback_data: "ad|dictnew" }]);
+  rows.push([{ text: "⬅️ قسم تعديل القاموس", callback_data: "ad|page|dictionary" }]);
+  return { inline_keyboard: rows };
+}
+
 async function beginDictionaryEdit(env, chatId, userId, word) {
   const result = await dictionaryGetFromSheet(env, word);
-  if (!result.ok) { await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ ${result.error || "لم أجد الكلمة في ورقة dictionary."}` }); return; }
-  const headers = result.headers ?? [];
-  await setAdminFlow(env, userId, { kind: "dict_value", row: result.row, expectedCoptic: result.values?.[0] ?? word, values: result.values ?? [], headers, col: null });
-  const matched = Number.isInteger(result.matched_column) ? `\n🔎 تطابقت مع: <b>${escapeHtml(dictionaryFieldName(headers, result.matched_column))}</b>` : "";
-  const lines = [`📄 <b>الورقة: dictionary</b>\n🔢 <b>رقم الصف: ${result.row}</b>${matched}`, "اختر أي عمود لتعديله. التعديل يُحفظ فورًا في نفس الصف:", ""];
-  for (let i = 0; i < headers.length; i += 1) lines.push(`<b>${String.fromCharCode(65 + i)} — ${escapeHtml(dictionaryFieldName(headers, i))}:</b> ${escapeHtml(result.values?.[i] ?? "")}`);
-  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML", reply_markup: dictionaryEditMarkup(result.row, headers) });
+  if (!result.ok) {
+    await telegram(env, "sendMessage", {
+      chat_id: chatId,
+      text: `❌ ${result.error || "لم أجد الكلمة في ورقة dictionary."}\nيمكنك إضافتها ككلمة جديدة بالزر أدناه.`,
+      reply_markup: { inline_keyboard: [[{ text: "➕ إضافة كلمة جديدة", callback_data: "ad|dictnew" }], [{ text: "⬅️ قسم تعديل القاموس", callback_data: "ad|page|dictionary" }]] },
+    });
+    return;
+  }
+  const candidates = result.candidates ?? [];
+  // Single exact match (or a single sheet result): open the edit UI directly — instant, no round trip.
+  if (candidates.length === 1 || result.exactCount === 1) {
+    const best = candidates[0];
+    const headers = best.headers ?? [];
+    await setAdminFlow(env, userId, { kind: "dict_value", row: best.row, expectedCoptic: best.values?.[0] ?? word, values: best.values ?? [], headers, col: null });
+    const matched = Number.isInteger(best.matched_column) ? `\n🔎 تطابقت مع: <b>${escapeHtml(dictionaryFieldName(headers, best.matched_column))}</b>` : "";
+    const lines = [`📄 <b>الورقة: dictionary</b>\n🔢 <b>رقم الصف: ${best.row}</b>${matched}`, "اختر أي عمود لتعديله. التعديل يُحفظ فورًا في نفس الصف:", ""];
+    for (let i = 0; i < headers.length; i += 1) lines.push(`<b>${String.fromCharCode(65 + i)} — ${escapeHtml(dictionaryFieldName(headers, i))}:</b> ${escapeHtml(best.values?.[i] ?? "")}`);
+    await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML", reply_markup: dictionaryEditMarkup(best.row, headers) });
+    return;
+  }
+  // Several candidates: let the admin pick the right row (with an "add new" escape hatch).
+  await telegram(env, "sendMessage", {
+    chat_id: chatId,
+    text: `🔎 وجدت <b>${candidates.length}</b> مرشحًا محتملاً لكلمة «${escapeHtml(String(word).slice(0, 60))}».\nاختر الصف المطلوب لتعديله، أو أضف كلمة جديدة:`,
+    parse_mode: "HTML",
+    reply_markup: dictionaryCandidatesMarkup(candidates, word),
+  });
 }
 async function chooseDictionaryField(env, callback) {
   const userId = callback.from.id;
@@ -2460,7 +2792,8 @@ async function chooseDictionaryField(env, callback) {
   const flow = user?.adminFlow;
   const row = Number(callback.data.split("|")[2]);
   const col = Number(callback.data.split("|")[3]);
-  if (!flow || flow.kind !== "dict_value" || flow.row !== row || !Number.isInteger(col) || col < 0 || col >= flow.headers.length) {
+  const isNew = flow?.kind === "dict_new";
+  if (!flow || (flow.kind !== "dict_value" && !isNew) || (isNew ? flow.row !== 0 : flow.row !== row) || !Number.isInteger(col) || col < 0 || col >= flow.headers.length) {
     await telegram(env, "sendMessage", { chat_id: callback.message.chat.id, text: "انتهت جلسة التعديل. ابدأ من /admin ثم تعديل القاموس مرة أخرى." });
     return;
   }
@@ -2479,9 +2812,73 @@ async function updateDictionaryField(env, message, userId, flow, text) {
   if (!result.ok) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `❌ لم يتم الحفظ: ${result.error || "خطأ غير معروف"}\nجلسة نفس الكلمة ما زالت مفتوحة.` }); return; }
   const index = records.findIndex((record) => normalize(record.coptic) === normalize(flow.expectedCoptic));
   const localField = DICTIONARY_LOCAL_FIELDS[flow.col];
+  const oldValue = index >= 0 && localField ? String(records[index]?.[localField] ?? "") : "";
   if (index >= 0 && localField) records[index][localField] = values[flow.col];
+  logAudit({ action: "dictionary_update", userId: String(userId), row: flow.row, coptic: flow.expectedCoptic, column: dictionaryFieldName(flow.headers, flow.col), old: oldValue, new: values[flow.col] });
   await setAdminFlow(env, userId, { ...flow, values: result.values ?? values, col: null });
   await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم تعديل «${dictionaryFieldName(flow.headers, flow.col)}» في صف dictionary رقم ${flow.row} فورًا.\nجلسة نفس الكلمة ما زالت مفتوحة؛ اضغط زر عمود آخر من رسالة الصف لتكمل التعديل.` });
+}
+
+// ---- New-word (append) flow: 11 empty columns, written locally, then appended to the sheet ----
+function dictionaryNewMarkup(headers) {
+  const buttons = (headers ?? []).map((header, index) => ({ text: `✏️ ${String.fromCharCode(65 + index)}: ${String(header || "بدون عنوان").slice(0, 22)}`, callback_data: `ad|dictfield|0|${index}` }));
+  const rows = [];
+  for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
+  rows.push([{ text: "💾 حفظ وإضافة الصف", callback_data: "ad|dictsave" }, { text: "❌ إلغاء", callback_data: "ad|dictcancel" }]);
+  return { inline_keyboard: rows };
+}
+function dictionaryNewText(values, headers) {
+  const lines = ["➕ <b>إضافة كلمة جديدة إلى القاموس</b>", "اضغط أي عمود لكتابة قيمته، ثم «حفظ وإضافة الصف» في النهاية:", ""];
+  for (let i = 0; i < headers.length; i += 1) lines.push(`<b>${String.fromCharCode(65 + i)} — ${escapeHtml(dictionaryFieldName(headers, i))}:</b> ${escapeHtml(values?.[i] ?? "")}`);
+  return lines.join("\n");
+}
+async function beginDictionaryNew(env, chatId, userId) {
+  const headers = DICTIONARY_LOCAL_HEADERS;
+  const values = new Array(headers.length).fill("");
+  await setAdminFlow(env, userId, { kind: "dict_new", row: 0, values, headers, col: null });
+  await telegram(env, "sendMessage", { chat_id: chatId, text: dictionaryNewText(values, headers), parse_mode: "HTML", reply_markup: dictionaryNewMarkup(headers) });
+}
+// Writes one column of the in-progress new row locally (no sheet call until final save).
+async function updateDictionaryNewField(env, message, userId, flow, text) {
+  const values = [...(flow.values ?? [])];
+  while (values.length < flow.headers.length) values.push("");
+  values[flow.col] = text === "-" ? "" : text;
+  await setAdminFlow(env, userId, { ...flow, values, col: null });
+  await telegram(env, "sendMessage", {
+    chat_id: message.chat.id,
+    text: `✅ تم تعيين «${dictionaryFieldName(flow.headers, flow.col)}» محليًا.\n${dictionaryNewText(values, flow.headers)}`,
+    parse_mode: "HTML",
+    reply_markup: dictionaryNewMarkup(flow.headers),
+  });
+}
+// Local id for freshly appended rows: a large number that never collides with existing permanent ids.
+let tempIdCounter = 1000000;
+function nextTempId() { tempIdCounter += 1; return tempIdCounter; }
+async function saveDictionaryNew(env, callback) {
+  const userId = callback.from.id;
+  const chatId = callback.message?.chat?.id;
+  const user = await getUser(env, userId);
+  const flow = user?.adminFlow;
+  if (!flow || flow.kind !== "dict_new") { await telegram(env, "sendMessage", { chat_id: chatId, text: "انتهت جلسة الإضافة. ابدأ من /admin ثم «إضافة كلمة جديدة»." }); return; }
+  const values = [...(flow.values ?? [])];
+  while (values.length < flow.headers.length) values.push("");
+  if (!String(values[0] ?? "").trim()) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ العمود A (الكلمة القبطية) مطلوب قبل الحفظ. اضغط عمود A وأدخل الكلمة." }); return; }
+  const config = await driveConfig(env);
+  if (!config) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ لم يتم ربط Google Sheets؛ لا يمكن إضافة الصف." }); return; }
+  let result;
+  try { result = await callAppsScript(config, { action: "dictionary_append", values, by: { id: "813894692" } }); }
+  catch (error) { result = { ok: false, error: error instanceof Error ? error.message : "تعذّر الاتصال بالشيت" }; }
+  if (!result.ok) { await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ لم تتم الإضافة: ${result.error || "خطأ غير معروف"}` }); return; }
+  // Add the new record to the in-memory array so it is immediately searchable.
+  const record = { id: nextTempId() };
+  for (let i = 0; i < DICTIONARY_LOCAL_FIELDS.length; i += 1) {
+    const field = DICTIONARY_LOCAL_FIELDS[i];
+    if (field) record[field] = result.values?.[i] ?? values[i] ?? "";
+  }
+  records.push(record);
+  logAudit({ action: "dictionary_append", userId: String(userId), row: result.row, coptic: values[0], values });
+  await clearAdminFlow(env, userId);
+  await telegram(env, "sendMessage", { chat_id: chatId, text: `✅ تمت إضافة الصف رقم <b>${result.row}</b> إلى ورقة dictionary.\nالكلمة: <b>${escapeHtml(String(values[0]).slice(0, 80))}</b>\nأصبحت قابلة للبحث فورًا.`, parse_mode: "HTML" });
 }
 function adminMenuMarkup(page = "home") {
   const back = [{ text: "⬅️ الرئيسية", callback_data: "ad|page|home" }];
@@ -2513,13 +2910,17 @@ function adminMenuMarkup(page = "home") {
   ] };
   if (page === "dictionary") return { inline_keyboard: [
     [{ text: "✏️ تعديل كلمة / صف كامل", callback_data: "ad|dictedit" }],
+    [{ text: "➕ إضافة كلمة جديدة", callback_data: "ad|dictnew" }],
+    [{ text: "📋 سجل تدقيق التعديلات", callback_data: "ad|auditlog" }],
     [{ text: "🔄 فتح قسم آخر", callback_data: "ad|page|home" }],
   ] };
   return { inline_keyboard: [
     [{ text: "🤖 معلومات البوت", callback_data: "ad|botinfo" }, { text: "📈 تقرير الاستخدام", callback_data: "ad|usage" }],
+    [{ text: "📊 تحليلات البحث", callback_data: "ad|analytics" }, { text: "📋 سجل التدقيق", callback_data: "ad|auditlog" }],
+    [{ text: "📦 تصدير القاموس JSON", callback_data: "ad|exportdict" }, { text: "👥 تصدير المستخدمين CSV", callback_data: "ad|exportusers" }],
+    [{ text: "💾 نسخة احتياطية", callback_data: "ad|backup" }, { text: "🔄 تحديث الأوامر", callback_data: "ad|commands" }],
     [{ text: "🖼 إخفاء بطاقة كلمة", callback_data: "ad|cardhide" }, { text: "🖼 إظهار بطاقة كلمة", callback_data: "ad|cardshow" }],
-    [{ text: "📢 حالة الإرسال", callback_data: "ad|bcstatus" }, { text: "🔄 تحديث الأوامر", callback_data: "ad|commands" }],
-    [{ text: "📦 إعداد الأرشيف", callback_data: "ad|setarchive" }, { text: "🧹 مسح الجلسة", callback_data: "ad|clearflow" }], back,
+    [{ text: "📢 حالة الإرسال", callback_data: "ad|bcstatus" }, { text: "🧹 مسح الجلسة", callback_data: "ad|clearflow" }], back,
   ] };
 }
 async function adminDashboardText(env, page = "home") {
@@ -2568,6 +2969,12 @@ async function handleAdminFlow(env, message, userId, user, text) {
   if (!flow || !text || text.startsWith("/")) return false;
   if (flow.kind === "dict_find") { await clearAdminFlow(env, userId); await beginDictionaryEdit(env, message.chat.id, userId, text); return true; }
   if (flow.kind === "dict_value" && Number.isInteger(flow.col) && flow.col >= 0) { await updateDictionaryField(env, message, userId, flow, text); return true; }
+  if (flow.kind === "dict_new" && Number.isInteger(flow.col) && flow.col >= 0) { await updateDictionaryNewField(env, message, userId, flow, text); return true; }
+  // A dictionary edit/add flow is active but no column was chosen yet: remind instead of clearing.
+  if (flow.kind === "dict_value" || flow.kind === "dict_new") {
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ اضغط أولاً على زر العمود المطلوب من رسالة الصف، ثم أرسل القيمة الجديدة." });
+    return true;
+  }
   await clearAdminFlow(env, userId);
   if (flow === "setdrive") await setDriveConfig(env, message, text);
   else if (flow === "setarchive") await setArchiveChat(env, message, text);
@@ -2596,6 +3003,20 @@ async function handleAdminDashboardCallback(env, callback, ctx) {
   if (action === "deleteall") { await askDeleteManyVoices(env, chatId, callback.from.id, await getUser(env, callback.from.id) ?? {}, "", true); return; }
   if (action === "dictedit") { await setAdminFlow(env, callback.from.id, { kind: "dict_find" }); await telegram(env, "sendMessage", { chat_id: chatId, text: "📖 أرسل الكلمة القبطية كما تظهر في القاموس للبحث عن صفها." }); return; }
   if (action === "dictfield") { await chooseDictionaryField(env, callback); return; }
+  if (action === "dictpick") {
+    const row = Number(parts[2]);
+    const col = Number(parts[3] ?? -1);
+    await openDictionaryEditByRow(env, chatId, callback.from.id, row, col >= 0 ? col : null);
+    return;
+  }
+  if (action === "dictnew") { await beginDictionaryNew(env, chatId, callback.from.id); return; }
+  if (action === "dictsave") { await saveDictionaryNew(env, callback); return; }
+  if (action === "dictcancel") { await clearAdminFlow(env, callback.from.id); await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ تم إلغاء إضافة الكلمة الجديدة." }); return; }
+  if (action === "analytics") { await sendAnalyticsReport(env, chatId); return; }
+  if (action === "auditlog") { await sendAuditLogReport(env, chatId); return; }
+  if (action === "exportdict") { await exportDictionary(env, chatId); return; }
+  if (action === "exportusers") { await exportUsersCsv(env, chatId); return; }
+  if (action === "backup") { await sendBackup(env, chatId); return; }
   const prompts = { deleteone: ["🗑 أرسل كلمة واحدة لحذف تسجيلها:", "deleteone"], deletemany: ["🗑 أرسل الكلمات مفصولة بعلامة | أو فاصلة:", "deletemany"], setdrive: ["🔗 أرسل رابط Apps Script المنتهي بـ /exec:", "setdrive"], setarchive: ["📦 أرسل رقم المجموعة، أو off لإيقاف الأرشيف:", "setarchive"], cardhide: ["🖼 أرسل الكلمة لإخفاء بطاقتها:", "cardhide"], cardshow: ["🖼 أرسل الكلمة لإظهار بطاقتها:", "cardshow"] };
   if (prompts[action]) { await setAdminFlow(env, callback.from.id, prompts[action][1]); await telegram(env, "sendMessage", { chat_id: chatId, text: prompts[action][0] }); return; }
   if (action === "resetdrive") { await setDriveConfig(env, { chat: { id: chatId } }, "reset"); return; }
@@ -2608,6 +3029,8 @@ async function handleAdminDashboardCallback(env, callback, ctx) {
 }
 async function handleUpdate(update, env, ctx) {
   if (update.inline_query) {
+    trackUsage("inline");
+    inBackground(ctx, flushAnalyticsSnapshot(env));
     await answerInline(env, update.inline_query);
     return;
   }
@@ -2717,6 +3140,17 @@ async function handleUpdate(update, env, ctx) {
   let text = String(message.text ?? "").trim();
   const userId = message.from?.id ?? message.chat.id;
   const isPrivate = (message.chat.type ?? "private") === "private";
+  // Pro feature: per-user rate limit (sliding window). Admins get a higher limit.
+  const rate = checkRateLimit(userId, isAdmin(env, userId));
+  if (!rate.allowed) {
+    if (rate.shouldWarn) {
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `⏳ أرسلت طلبات كثيرة جدًا (${rate.count} من ${rate.max} خلال ${RATE_LIMIT_WINDOW_MS / 1000} ثوانٍ). ابتهد قليلًا ثم عاود المحاولة.` });
+    }
+    return;
+  }
+  if (text) trackUsage(text.startsWith("/") ? "command" : "search", text.startsWith("/") ? undefined : text);
+  inBackground(ctx, flushAnalyticsSnapshot(env));
+  inBackground(ctx, flushAuditLog(env));
   if (text === "/" || text === "/start" || text.startsWith("/start ") || text === "/admin") inBackground(ctx, ensureCommandMenu(env, userId));
   const cachedRegistration = registeredCache.get(userId);
   const cacheIsFresh = cachedRegistration && Date.now() - cachedRegistration.at < REGISTERED_CACHE_MS;
@@ -2773,6 +3207,24 @@ async function handleUpdate(update, env, ctx) {
     }
     if (text === "/usage") {
       await sendUsageReport(env, message.chat.id);
+      return;
+    }
+    if (text === "/analytics") {
+      await sendAnalyticsReport(env, message.chat.id);
+      return;
+    }
+    if (text === "/auditlog") {
+      await sendAuditLogReport(env, message.chat.id);
+      return;
+    }
+    if (text === "/export" || text.startsWith("/export ")) {
+      const arg = text.slice("/export".length).trim();
+      if (arg === "users") await exportUsersCsv(env, message.chat.id);
+      else await exportDictionary(env, message.chat.id);
+      return;
+    }
+    if (text === "/backup") {
+      await sendBackup(env, message.chat.id);
       return;
     }
     if (text === "/syncusers") {
@@ -2843,6 +3295,7 @@ async function handleUpdate(update, env, ctx) {
     const user = known ?? await getUser(env, userId);
     if (user?.name) {
       await sendWelcome(env, message.chat.id, user.name);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: buildCommandsHelpText(env, userId), parse_mode: "HTML", disable_web_page_preview: true });
       return;
     }
     await saveUser(env, userId, { ...user, awaitingName: true });
@@ -2854,6 +3307,11 @@ async function handleUpdate(update, env, ctx) {
       chat_id: message.chat.id,
       text: "هذا هو بوت تعلم اللغة القبطية من الصفر: https://t.me/Coptic2_bot",
     });
+    return;
+  }
+  if (text === "/random" || text.startsWith("/random ")) {
+    const index = Math.floor(Math.random() * records.length);
+    await sendRecord(env, message.chat.id, index, -1, "");
     return;
   }
   if (message.voice || message.audio) {
@@ -2888,6 +3346,7 @@ async function handleUpdate(update, env, ctx) {
       await saveUser(env, userId, completed);
       await inBackground(ctx, pushUsers(env, [userSheetRow(userId, completed, message.from)]));
       await sendWelcome(env, message.chat.id, name);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: buildCommandsHelpText(env, userId), parse_mode: "HTML", disable_web_page_preview: true });
       if (!isAdmin(env, userId)) {
         await notifyAdmins(env, `✅ أكمل التسجيل: <b>${escapeHtml(name)}</b> (🆔 <code>${escapeHtml(userId)}</code>)`);
       }
@@ -2907,8 +3366,18 @@ export default {
     if (speech && (request.method === "GET" || request.method === "HEAD") && records[Number(speech[1])]) {
       return serveSpeech(request, ctx, env, Number(speech[1]));
     }
-    if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
+    if (request.method === "GET" && url.pathname === "/") {
       return new Response("Coptic dictionary bot is ready.", { status: 200 });
+    }
+    if (request.method === "GET" && url.pathname === "/health") {
+      return Response.json({
+        status: "ready",
+        bot: "coptic-dictionary-bot",
+        records: records.length,
+        time: new Date().toISOString(),
+        usersStore: Boolean(env.USERS),
+        driveConfigured: Boolean(await driveConfig(env).catch(() => null)),
+      });
     }
 
     if (request.method === "POST" && url.pathname === "/voice-drive") {
@@ -2951,8 +3420,13 @@ export default {
     }
 
     try {
+      const t0 = Date.now();
       const update = await request.json();
       await handleUpdate(update, env, ctx);
+      // Pro feature: structured request logging (duration + update type).
+      const durMs = Date.now() - t0;
+      const kind = update.inline_query ? "inline" : update.callback_query ? "callback" : update.message ? "message" : "other";
+      console.log(JSON.stringify({ ev: "webhook", kind, update_id: update.update_id ?? null, dur_ms: durMs }));
       return new Response("ok", { status: 200 });
     } catch (error) {
       console.error("Webhook update failed", error instanceof Error ? error.message : "unknown error");
