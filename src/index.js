@@ -4575,7 +4575,7 @@ async function handleUpdate(update, env, ctx) {
     return;
   }
   if (!adminNow && maint) {
-    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: maintMsg || "🔧 البوت حاليًا تحت الصيانة. عُد لاحقًا بعد قليل، شكرًا لتفهمك." });
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: maintMsg || "🔧 بوت القاموس القبطي الناطق تحت الصيانة حالياً نظراً للاضافة الكبيرة القادمة قريباً، وسيتم تنبيهك عند الاتاحة الكاملة، شكرًا لتفهمك." });
     return;
   }
   // Batch 4 slow mode: global cooldown between searches for non-admins.
