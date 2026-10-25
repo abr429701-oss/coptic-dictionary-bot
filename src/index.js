@@ -1638,7 +1638,7 @@ export class UserStore {
 
   async fetch(request) {
     const body = await request.json();
-    const { op, key, value, userId, input, kb, exclude, fromChat, messageId, poll, id, fileId, drive, limit, profile, cursor, language } = body;
+    const { op, key, value, userId, input, kb, exclude, fromChat, messageId, poll, id, fileId, drive, limit, profile, cursor, language, ids } = body;
     const storage = this.state.storage;
     if (op === "get") return Response.json({ value: (await storage.get(key)) ?? null });
     if (op === "put") {
@@ -1667,6 +1667,20 @@ export class UserStore {
       }
       if (user !== existing) await storage.put(`user:${userId}`, user);
       return Response.json({ created: false, user, changed });
+    }
+    if (op === "bulk_import_users") {
+      const list = Array.isArray(ids) ? ids.map(String) : [];
+      let imported = 0, skipped = 0;
+      const now = new Date().toISOString();
+      for (const id of list) {
+        if (!/^\d{5,}$/.test(id)) continue;
+        const key = `user:${id}`;
+        const existing = await storage.get(key);
+        if (existing) { skipped += 1; continue; }
+        await storage.put(key, { firstSeen: now, imported: true });
+        imported += 1;
+      }
+      return Response.json({ imported, skipped, total: list.length });
     }
     if (op === "userpage") {
       const size = limit ?? 40;
@@ -1973,6 +1987,7 @@ function buildCommandsHelpText(env, userId) {
     lines.push("/setbanmsg &lt;نص&gt; — رسالة الحظر | /setmaintmsg &lt;نص&gt; — رسالة الصيانة");
     lines.push("/slowmode on|off|&lt;ثواني&gt; — الوضع البطيء | /clearcache — مسح الكاش");
     lines.push("/testbroadcast — إرسال تجريبي | /bcpause | /bcresume | /bccancel — التحكم في البث");
+    lines.push("/importusers — استيراد قائمة معرّفات مستخدمين قديمة دفعة واحدة");
   }
   return lines.join("\n");
 }
@@ -3390,6 +3405,16 @@ async function resetAnalyticsData(env, chatId) {
   recentSearches.length = 0;
   await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ تم تصفير التحليلات وسجل البحث المباشر." });
 }
+async function importUserIds(env, chatId, rawText) {
+  if (!env.USERS) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تخزين المستخدمين غير مفعّل." }); return; }
+  const ids = [...new Set((rawText.match(/\d{5,}/g) ?? []).map(String))].slice(0, 5000);
+  if (!ids.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ لم أجد أي معرّفات صالحة (أرقام من 5 أرقام فأكثر)." }); return; }
+  await telegram(env, "sendMessage", { chat_id: chatId, text: `⏳ جارٍ استيراد ${ids.length} مستخدم…` });
+  const result = await storeCall(env, { op: "bulk_import_users", ids }).catch((e) => ({ error: String(e) }));
+  await logAdminAction(env, chatId, "importusers", `${ids.length} ids`);
+  if (result?.error) { await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ فشل الاستيراد: ${result.error}` }); return; }
+  await telegram(env, "sendMessage", { chat_id: chatId, text: `✅ تم الاستيراد: ${result?.imported ?? ids.length} مستخدم جديد${result?.skipped ? ` (تم تخطي ${result.skipped} مسجلين مسبقًا)` : ""}.\nالآن يمكنك استخدام /broadcast وسيصل لجميعهم.` });
+}
 async function featureFlagsText(env) {
   const flags = await featureFlags(env);
   const lines = ["🎚 <b>مفاتيح الميزات</b>", ""];
@@ -3983,6 +4008,7 @@ async function handleAdminFlow(env, message, userId, user, text) {
   else if (flow === "cardhide") await setCardVisibility(env, message.chat.id, text, false);
   else if (flow === "cardshow") await setCardVisibility(env, message.chat.id, text, true);
   else if (flow === "findempty_wait") { await clearAdminFlow(env, userId); await sendFindEmptyReport(env, message.chat.id, text); return true; }
+  else if (flow === "importusers") { await clearAdminFlow(env, userId); await importUserIds(env, message.chat.id, text); return true; }
   return true;
 }
 async function handleAdminDashboardCallback(env, callback, ctx) {
@@ -4851,6 +4877,14 @@ async function handleUpdate(update, env, ctx) {
       if (env.USERS) await storeCall(env, { op: "put", key: BROADCAST_CTRL_KEY, value: { paused: true, cancel: true } });
       await logAdminAction(env, userId, "bccancel");
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🛑 تم طلب إلغاء الإرسال الجماعي. سيتوقف قريبًا." }); return;
+    }
+    if (text === "/importusers" || text.startsWith("/importusers")) {
+      if (!env.USERS) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ تخزين المستخدمين غير مفعّل." }); return; }
+      const arg = text.slice("/importusers".length).trim();
+      if (arg) { await importUserIds(env, message.chat.id, arg); return; }
+      await setAdminFlow(env, userId, { kind: "importusers" });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "📥 أرسل الآن قائمة معرّفات المستخدمين (رقم في كل سطر أو مفصولة بفواصل/مسافات).\nستُسجّل دفعة واحدة في قاعدة بيانات البوت للإرسال الجماعي." });
+      return;
     }
   }
   if (text === "/start" || text.startsWith("/start ")) {
