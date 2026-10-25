@@ -36,11 +36,13 @@ function doPost(e) {
     const body = JSON.parse((e && e.postData && e.postData.contents) || "{}");
     if (body.action === "ping") return json_(ping_());
     if (body.action === "sync_github_audio") return json_(syncGithubAudio_(body));
-    if (body.action === "dictionary_get" || body.action === "dictionary_update" || body.action === "dictionary_append") {
+    if (body.action === "dictionary_get" || body.action === "dictionary_update" || body.action === "dictionary_append" || body.action === "dictionary_delete" || body.action === "dictionary_append_batch") {
       const dictionaryAdmin = body.by && body.by.id != null ? String(body.by.id) : "";
       if (dictionaryAdmin !== "813894692") return json_({ ok: false, error: "unauthorized" });
       if (body.action === "dictionary_get") return json_(dictionaryGet_(body.word));
       if (body.action === "dictionary_update") return json_(dictionaryUpdate_(body));
+      if (body.action === "dictionary_delete") return json_(dictionaryDelete_(body));
+      if (body.action === "dictionary_append_batch") return json_(dictionaryAppendBatch_(body));
       return json_(dictionaryAppend_(body));
     }
     if (body.action === "users") return json_(upsertUsers_(body.users));
@@ -174,6 +176,32 @@ function dictionaryAppend_(body) {
   sheet.getRange(row, 1, 1, columns).setValues([values]);
   SpreadsheetApp.flush();
   return { ok: true, row: row, headers: sheet.getRange(1, 1, 1, columns).getValues()[0], values: values };
+}
+// Deletes a dictionary row by number (verifies expected coptic in column A first).
+function dictionaryDelete_(body) {
+  const row = Number(body.row);
+  const expected = normalizeDictionaryWord_(body.expected_coptic);
+  if (!Number.isInteger(row) || row < 2) return { ok: false, error: "row is required" };
+  const sheet = dictionarySheet_();
+  if (row > sheet.getLastRow()) return { ok: false, error: "row is out of range" };
+  const current = sheet.getRange(row, 1, 1, 1).getValue();
+  if (expected && normalizeDictionaryWord_(current) !== expected) return { ok: false, error: "row changed; search again" };
+  sheet.deleteRow(row);
+  SpreadsheetApp.flush();
+  return { ok: true, deletedRow: row };
+}
+// Appends many rows at once (bulk import). Each row must be an array of values.
+function dictionaryAppendBatch_(body) {
+  if (!Array.isArray(body.rows) || !body.rows.length) return { ok: false, error: "rows are required" };
+  const sheet = dictionarySheet_();
+  const columns = Math.max(1, sheet.getLastColumn ? sheet.getLastColumn() : 11);
+  const startRow = sheet.getLastRow() + 1;
+  const normalized = body.rows.slice(0, 500).map(function (row) {
+    return Array.from({ length: columns }, function (_, index) { return index < (row || []).length ? row[index] : ""; });
+  });
+  sheet.getRange(startRow, 1, normalized.length, columns).setValues(normalized);
+  SpreadsheetApp.flush();
+  return { ok: true, startRow: startRow, count: normalized.length, headers: sheet.getRange(1, 1, 1, columns).getValues()[0] };
 }
 
 function normalizeAudioWord_(value) {

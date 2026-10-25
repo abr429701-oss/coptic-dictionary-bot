@@ -1586,8 +1586,7 @@ function userReplyKeyboardMarkup() {
 }
 
 async function sendWelcome(env, chatId, name) {
-  const caption =
-    `مرحبًا بك ${escapeHtml(name)}، في القاموس القبطي الناطق، تفضل الان بكتابة أي كلمة للبحث عنها.`;
+  const caption = await getWelcomeCaption(env, name);
   try {
     const bytes = Uint8Array.from(atob(welcomeImageBase64), (char) => char.charCodeAt(0));
     const form = new FormData();
@@ -1641,9 +1640,20 @@ function buildCommandsHelpText(env, userId) {
   return lines.join("\n");
 }
 
+// Extra admins are kept in a sync cache (refreshed in the background) so the hot
+// isAdmin() path stays synchronous. addExtraAdmin/removeExtraAdmin invalidate it.
+let extraAdminsSync = [];
+let extraAdminsSyncAt = 0;
+async function refreshExtraAdmins(env) {
+  if (!env.USERS) return;
+  const now = Date.now();
+  if (now - extraAdminsSyncAt < ADMIN_CACHE_TTL) return;
+  extraAdminsSyncAt = now;
+  try { extraAdminsSync = ((await storeCall(env, { op: "get", key: "admins:list" })).value ?? []).map(String); } catch { extraAdminsSync = []; }
+}
 function adminIds(env) {
-  // The owner explicitly requested a single fixed administrator identity.
-  return [DEFAULT_ADMIN_IDS];
+  // The fixed owner identity plus any DO-stored extra admins.
+  return [DEFAULT_ADMIN_IDS, ...extraAdminsSync];
 }
 
 function isAdmin(env, userId) {
@@ -2373,6 +2383,203 @@ function utcDay(date = new Date()) {
   return date.toISOString().slice(0, 10);
 }
 
+// ============================================================================
+// Admin feature suite: cached DO state + helpers (bans, extra admins,
+// maintenance mode, editable welcome, error log, search history, suggestions)
+// ============================================================================
+const ADMIN_CACHE_TTL = 60000;
+const extraAdminsCache = { value: null, at: 0 };
+const bansCache = { value: null, at: 0 };
+const maintCache = { value: null, at: 0 };
+const welcomeCache = { value: null, at: 0 };
+async function cachedDoGet(env, key, cache, fallback = null) {
+  const now = Date.now();
+  if (cache.value !== null || now - cache.at < ADMIN_CACHE_TTL) {
+    if (cache.value !== null) return cache.value;
+  }
+  let value = fallback;
+  if (env.USERS) { try { value = (await storeCall(env, { op: "get", key })).value ?? fallback; } catch { value = fallback; } }
+  cache.value = value; cache.at = now; return value;
+}
+function invalidateCache(cache) { cache.value = null; cache.at = 0; }
+
+// ---- Extra admins (merged with the fixed DEFAULT_ADMIN_IDS) ----
+async function extraAdminIds(env) {
+  const list = await cachedDoGet(env, "admins:list", extraAdminsCache, []);
+  return Array.isArray(list) ? list.map(String) : [];
+}
+async function addExtraAdmin(env, id) {
+  const list = await extraAdminIds(env);
+  const sid = String(id);
+  if (!list.includes(sid)) list.push(sid);
+  if (env.USERS) await storeCall(env, { op: "put", key: "admins:list", value: list });
+  invalidateCache(extraAdminsCache); extraAdminsSyncAt = 0;
+}
+async function removeExtraAdmin(env, id) {
+  const list = (await extraAdminIds(env)).filter((x) => x !== String(id));
+  if (env.USERS) await storeCall(env, { op: "put", key: "admins:list", value: list });
+  invalidateCache(extraAdminsCache); extraAdminsSyncAt = 0;
+}
+
+// ---- Bans ----
+async function bannedSet(env) {
+  const obj = await cachedDoGet(env, "bans:list", bansCache, {});
+  return obj && typeof obj === "object" ? obj : {};
+}
+async function isBanned(env, userId) {
+  return Boolean((await bannedSet(env))[String(userId)]);
+}
+async function banUser(env, userId, reason = "") {
+  const set = await bannedSet(env);
+  set[String(userId)] = { at: new Date().toISOString(), reason: String(reason).slice(0, 120) };
+  if (env.USERS) await storeCall(env, { op: "put", key: "bans:list", value: set });
+  invalidateCache(bansCache);
+  const user = (await getUser(env, userId)) ?? {};
+  if (env.USERS && user) await saveUser(env, userId, { ...user, blocked: true, bannedAt: new Date().toISOString() });
+}
+async function unbanUser(env, userId) {
+  const set = await bannedSet(env);
+  delete set[String(userId)];
+  if (env.USERS) await storeCall(env, { op: "put", key: "bans:list", value: set });
+  invalidateCache(bansCache);
+  const user = (await getUser(env, userId)) ?? {};
+  if (env.USERS && user) { const { blocked, blockedReason, bannedAt, ...rest } = user; await saveUser(env, userId, rest); }
+}
+
+// ---- Maintenance mode ----
+async function maintenanceOn(env) { return Boolean(await cachedDoGet(env, "maintenance:on", maintCache, false)); }
+async function setMaintenance(env, on) {
+  if (env.USERS) await storeCall(env, { op: "put", key: "maintenance:on", value: Boolean(on) });
+  invalidateCache(maintCache);
+}
+
+// ---- Editable welcome caption ----
+const DEFAULT_WELCOME_CAPTION = (name) => `مرحبًا بك ${escapeHtml(name)}، في القاموس القبطي الناطق، تفضل الان بكتابة أي كلمة للبحث عنها.`;
+async function getWelcomeCaption(env, name) {
+  const custom = await cachedDoGet(env, "welcome:caption", welcomeCache, null);
+  if (typeof custom === "string" && custom.trim()) return custom.replaceAll("{name}", escapeHtml(name));
+  return DEFAULT_WELCOME_CAPTION(name);
+}
+async function setWelcomeCaption(env, text) {
+  if (env.USERS) await storeCall(env, { op: "put", key: "welcome:caption", value: String(text ?? "").slice(0, 900) });
+  invalidateCache(welcomeCache);
+}
+async function resetWelcomeCaption(env) {
+  if (env.USERS) await storeCall(env, { op: "delete", key: "welcome:caption" });
+  invalidateCache(welcomeCache);
+}
+
+// ---- Error log (ring buffer + DO snapshot) ----
+const errorLog = [];
+const ERROR_LOG_MAX = 50;
+function logError(env, error, context = {}) {
+  const entry = { at: new Date().toISOString(), message: error instanceof Error ? error.message : String(error ?? "unknown"), stack: error instanceof Error ? String(error.stack ?? "").slice(0, 400) : "", ...context };
+  errorLog.push(entry);
+  if (errorLog.length > ERROR_LOG_MAX) errorLog.shift();
+  console.error("captured error", JSON.stringify(entry).slice(0, 500));
+}
+async function flushErrorLog(env) {
+  if (!env.USERS || !errorLog.length) return;
+  try {
+    const previous = (await storeCall(env, { op: "get", key: "errors:recent" })).value ?? [];
+    const merged = [...previous, ...errorLog].slice(-ERROR_LOG_MAX);
+    errorLog.length = 0;
+    await storeCall(env, { op: "put", key: "errors:recent", value: merged });
+  } catch {}
+}
+async function readErrorLog(env) {
+  const persisted = env.USERS ? ((await storeCall(env, { op: "get", key: "errors:recent" })).value ?? []) : [];
+  return [...persisted, ...errorLog].slice(-20).reverse();
+}
+
+// ---- Per-user search history (in-memory ring + DO snapshot) ----
+const userHistory = new Map();
+const USER_HISTORY_MAX = 30;
+function trackSearchHistory(userId, query) {
+  const key = String(userId);
+  const arr = userHistory.get(key) ?? [];
+  arr.push({ q: String(query).slice(0, 80), at: new Date().toISOString() });
+  if (arr.length > USER_HISTORY_MAX) arr.shift();
+  userHistory.set(key, arr);
+  if (userHistory.size > 8000) { const first = userHistory.keys().next().value; if (first) userHistory.delete(first); }
+}
+async function flushUserHistory(env) {
+  if (!env.USERS || !userHistory.size) return;
+  try {
+    const previous = (await storeCall(env, { op: "get", key: "history:snapshot" })).value ?? {};
+    for (const [key, arr] of userHistory) previous[key] = [...(previous[key] ?? []), ...arr].slice(-USER_HISTORY_MAX);
+    userHistory.clear();
+    await storeCall(env, { op: "put", key: "history:snapshot", value: previous });
+  } catch {}
+}
+async function getUserHistory(env, userId) {
+  const key = String(userId);
+  const persisted = env.USERS ? (((await storeCall(env, { op: "get", key: "history:snapshot" })).value ?? {})[key] ?? []) : [];
+  return [...persisted, ...(userHistory.get(key) ?? [])].slice(-20).reverse();
+}
+
+// ---- Word suggestion box (public /suggest, admin approve/reject) ----
+async function listSuggestions(env) {
+  if (!env.USERS) return [];
+  return (await storeCall(env, { op: "get", key: "suggestions:pending" })).value ?? [];
+}
+async function addSuggestion(env, userId, text) {
+  if (!env.USERS) return null;
+  const list = await listSuggestions(env);
+  const entry = { id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`, userId: String(userId), text: String(text).slice(0, 400), at: new Date().toISOString() };
+  list.push(entry);
+  await storeCall(env, { op: "put", key: "suggestions:pending", value: list.slice(-100) });
+  return entry;
+}
+async function takeSuggestion(env, id) {
+  if (!env.USERS) return null;
+  const list = await listSuggestions(env);
+  const idx = list.findIndex((s) => s.id === id);
+  if (idx < 0) return null;
+  const [entry] = list.splice(idx, 1);
+  await storeCall(env, { op: "put", key: "suggestions:pending", value: list });
+  return entry;
+}
+
+// ---- Dictionary stats ----
+function dictionaryStats(voiceIds = new Set()) {
+  const byKind = new Map(); const byOrigin = new Map(); let missingVoice = 0; let withVoice = 0;
+  for (const record of records) {
+    if (record._deleted) continue;
+    byKind.set(String(record.kind ?? "—"), (byKind.get(String(record.kind ?? "—")) ?? 0) + 1);
+    byOrigin.set(String(record.origin ?? "—"), (byOrigin.get(String(record.origin ?? "—")) ?? 0) + 1);
+    if (record.id != null && voiceIds.has(Number(record.id))) withVoice += 1; else missingVoice += 1;
+  }
+  const top = [...records].filter((r) => !r._deleted).sort((a, b) => Number(b.id ?? 0) - Number(a.id ?? 0)).slice(0, 10);
+  return { total: records.filter((r) => !r._deleted).length, byKind: [...byKind.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8), byOrigin: [...byOrigin.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8), withVoice, missingVoice, recent: top };
+}
+
+// ---- Duplicate detection (exact normalized coptic + exact normalized meaning) ----
+function findDuplicates() {
+  const byCoptic = new Map();
+  for (let i = 0; i < records.length; i += 1) {
+    const record = records[i];
+    if (record._deleted) continue;
+    const key = normalize(record.coptic);
+    if (!key) continue;
+    (byCoptic.get(key) ?? byCoptic.set(key, []).get(key)).push({ index: i, coptic: record.coptic, meaning: String(record.meaning ?? "").slice(0, 40), row: i + 2 });
+  }
+  return [...byCoptic.values()].filter((g) => g.length > 1).sort((a, b) => b.length - a.length).slice(0, 15);
+}
+
+// ---- Force resync: refetch dictionary.json from GitHub raw and repopulate records ----
+const DICTIONARY_RAW_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/data/dictionary.json`;
+async function resyncDictionary(env) {
+  const response = await fetch(DICTIONARY_RAW_URL, { headers: { "user-agent": "coptic-dictionary-bot" } });
+  if (!response.ok) throw new Error(`GitHub raw returned ${response.status}`);
+  const fetched = await response.json();
+  if (!Array.isArray(fetched) || !fetched.length) throw new Error("fetched dictionary is empty");
+  records.length = 0;
+  records.push(...fetched);
+  SEARCH_INDEX_CACHE.clear();
+  return { count: fetched.length };
+}
+
 async function flushUsage(env, day, count) {
   try {
     const result = await storeCall(env, { op: "usage", profile: { day }, limit: count });
@@ -2499,6 +2706,140 @@ async function sendBackup(env, chatId) {
   const stamp = new Date().toISOString().replace(/[:.]/gu, "-");
   const payload = { backedUpAt: new Date().toISOString(), recordsCount: records.length, records };
   await sendTextFile(env, chatId, `backup-dictionary-${stamp}.json`, JSON.stringify(payload), `💾 نسخة احتياطية من القاموس (${records.length.toLocaleString("en-US")} سجل).`);
+}
+
+// ---- Admin feature: users list / user info ----
+async function sendUsersList(env, chatId, query) {
+  if (!env.USERS) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تخزين المستخدمين غير مفعّل." }); return; }
+  const q = normalize(query);
+  const page = await storeCall(env, { op: "userpage", limit: 60 });
+  const bans = await bannedSet(env);
+  const lines = [`👥 <b>المستخدمون</b> (آخر ${page.users.length} من إجمالي أكبر):`, ""];
+  for (const { id, record } of page.users ?? []) {
+    if (q && !normalize(`${record?.name ?? ""} ${record?.username ?? ""} ${id}`).includes(q)) continue;
+    const bannedTag = bans[id] || record?.blocked ? " 🚫" : "";
+    lines.push(`• <code>${escapeHtml(id)}</code> — ${escapeHtml(String(record?.name ?? record?.tgName ?? "بدون اسم").slice(0, 30))}${record?.username ? ` (@${escapeHtml(record.username)})` : ""}${bannedTag}`);
+  }
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
+}
+async function sendUserInfo(env, chatId, id) {
+  if (!/^\d+$/u.test(id)) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ الاستخدام: /userinfo <user_id>" }); return; }
+  const user = await getUser(env, id);
+  const history = await getUserHistory(env, id);
+  const bans = await bannedSet(env);
+  const lines = [
+    `👤 <b>معلومات المستخدم</b> <code>${escapeHtml(id)}</code>`,
+    `الاسم: ${escapeHtml(String(user?.name ?? "—"))}`,
+    `Username: ${user?.username ? "@" + escapeHtml(user.username) : "—"}`,
+    `انضم: ${escapeHtml(String(user?.firstSeen ?? user?.registeredAt ?? "—"))}`,
+    `محظور: ${bans[id] || user?.blocked ? "🚫 نعم" : "لا"}`,
+    `آخر عمليات البحث (${history.length}):`,
+    ...history.slice(0, 10).map((h) => `• ${h.at?.slice(11, 16) ?? ""} ${escapeHtml(String(h.q ?? "").slice(0, 50))}`),
+  ];
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML" });
+}
+
+// ---- Admin feature: dictionary stats ----
+async function sendDictStats(env, chatId) {
+  const voiceIds = env.USERS ? new Set((await storeCall(env, { op: "voiceIds" })).ids ?? []) : new Set();
+  const stats = dictionaryStats(voiceIds);
+  const fmt = (n) => Number(n).toLocaleString("en-US");
+  const lines = [
+    "📚 <b>إحصائيات القاموس</b>",
+    `إجمالي الكلمات: <b>${fmt(stats.total)}</b>`,
+    `لها صوت: <b>${fmt(stats.withVoice)}</b>`,
+    `ناقصة صوت: <b>${fmt(stats.missingVoice)}</b>`,
+    "",
+    "<b>التوزيع حسب النوع (kind):</b>",
+    ...stats.byKind.map(([k, v]) => `• ${escapeHtml(k)}: ${fmt(v)}`),
+    "",
+    "<b>آخر 10 كلمات مضافة (حسب المعرّف):</b>",
+    ...stats.recent.map((r) => `• ${escapeHtml(String(r.coptic ?? "—").slice(0, 30))} — ${escapeHtml(String(r.meaning ?? "").slice(0, 30))}`),
+  ];
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
+}
+
+// ---- Admin feature: error log report ----
+async function sendErrorLogReport(env, chatId) {
+  const entries = await readErrorLog(env);
+  if (!entries.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ سجل الأخطاء فارغ." }); return; }
+  const lines = ["⚠️ <b>آخر الأخطاء الملتقطة:</b>", ""];
+  for (const e of entries) lines.push(`• ${e.at?.slice(0, 19) ?? ""} [${escapeHtml(String(e.where ?? "?"))}] ${escapeHtml(String(e.message ?? "").slice(0, 120))}`);
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
+}
+
+// ---- Admin feature: duplicate words report ----
+async function sendDuplicatesReport(env, chatId) {
+  const groups = findDuplicates();
+  if (!groups.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ لم أجد كلمات مكررة (بناءً على الكلمة القبطية بعد التطبيع)." }); return; }
+  const lines = [`🔁 <b>كلمات مكررة محتملة</b> (${groups.length} مجموعة):`, ""];
+  for (const group of groups.slice(0, 10)) {
+    lines.push(`<b>مجموعة ${group.length} كلمات:</b>`);
+    for (const item of group) lines.push(`• صف ${item.row}: ${escapeHtml(String(item.coptic).slice(0, 30))} — ${escapeHtml(item.meaning)}`);
+    lines.push("");
+  }
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
+}
+
+// ---- Admin feature: suggestion box review ----
+async function sendSuggestionsList(env, chatId) {
+  const list = await listSuggestions(env);
+  if (!list.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: "📭 لا توجد اقتراحات معلّقة." }); return; }
+  const rows = list.slice(0, 15).map((s) => [{ text: `✅ موافقة: ${String(s.text).slice(0, 30)}`, callback_data: `ad|sugapp|${s.id}` }, { text: "❌ رفض", callback_data: `ad|sugrej|${s.id}` }]);
+  const lines = ["💡 <b>اقتراحات المستخدمين المعلّقة:</b>", ""];
+  for (const s of list.slice(0, 15)) lines.push(`• ${escapeHtml(String(s.text).slice(0, 80))} (من ${escapeHtml(s.userId)})`);
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3000), parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
+}
+async function sendUserHistoryReport(env, chatId, id) {
+  if (!/^\d+$/u.test(id)) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ الاستخدام: /userhistory <user_id>" }); return; }
+  const history = await getUserHistory(env, id);
+  const lines = [`🕘 <b>آخر عمليات بحث المستخدم</b> <code>${escapeHtml(id)}</code> (${history.length}):`, "", ...history.map((h) => `• ${h.at?.slice(0, 19) ?? ""} — ${escapeHtml(String(h.q ?? "").slice(0, 60))}`)];
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
+}
+
+// ---- Admin feature: delete a word (local candidates -> confirm -> sheet delete + soft local delete) ----
+async function beginDeleteWord(env, chatId, userId, word) {
+  const result = localDictionaryCandidates(word, 6);
+  if (!result.ok || !result.candidates.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ لم أجد هذه الكلمة محليًا." }); return; }
+  if (result.candidates.length === 1 || result.exactCount === 1) {
+    const c = result.candidates[0];
+    await setAdminFlow(env, userId, { kind: "delete_pending", row: c.row, coptic: c.values?.[0] ?? word });
+    await telegram(env, "sendMessage", {
+      chat_id: chatId,
+      text: `🗑 تأكيد حذف الصف <b>${c.row}</b>؟\nالكلمة: <b>${escapeHtml(String(c.values?.[0] ?? "").slice(0, 60))}</b>\nالمعنى: ${escapeHtml(String(c.values?.[2] ?? "").slice(0, 80))}\nسيُحذف من Google Sheet ويُخفى محليًا (يُحفظ في سجل التدقيق).`,
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: [[{ text: "✅ نعم، احذف الصف", callback_data: `ad|delconfirm|${c.row}` }, { text: "❌ إلغاء", callback_data: "ad|delcancel" }]] },
+    });
+    return;
+  }
+  const rows = result.candidates.map((c) => [{ text: `${String(c.values?.[0] ?? "—").slice(0, 30)} — صف ${c.row}`, callback_data: `ad|delpick|${c.row}` }]);
+  await telegram(env, "sendMessage", { chat_id: chatId, text: "اختر الكلمة المراد حذفها:", reply_markup: { inline_keyboard: rows } });
+}
+async function confirmDeleteWord(env, callback, row) {
+  const chatId = callback.message?.chat?.id;
+  const userId = callback.from.id;
+  const index = Number(row) - 2;
+  const record = records[index];
+  if (!record || record._deleted) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ الصف غير موجود أو تم حذفه." }); return; }
+  const config = await driveConfig(env);
+  if (!config) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ لم يتم ربط Google Sheets." }); return; }
+  let result;
+  try { result = await callAppsScript(config, { action: "dictionary_delete", row: Number(row), expected_coptic: String(record.coptic ?? ""), by: { id: "813894692" } }); }
+  catch (error) { result = { ok: false, error: error instanceof Error ? error.message : "تعذّر الاتصال بالشيت" }; }
+  if (!result.ok) {
+    const err = String(result.error ?? "");
+    if (err.includes("unknown action") || err.includes("audio_base64")) {
+      await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ نسخة Apps Script المنشورة قديمة. انشر Code.gs مرة أخرى (New deployment) لدعم حذف الصفوف." });
+    } else {
+      await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ لم يتم الحذف: ${err}` });
+    }
+    return;
+  }
+  // Soft-delete locally (preserves indices for voice lookups); skipped in search candidates.
+  record._deleted = true;
+  logAudit({ action: "dictionary_delete", userId: String(userId), row: Number(row), deletedRecord: { ...record } });
+  await clearAdminFlow(env, userId);
+  await telegram(env, "sendMessage", { chat_id: chatId, text: `🗑 تم حذف صف ${row} (${escapeHtml(String(record.coptic ?? "").slice(0, 60))}) من الشيت وأُخفي محليًا.` });
 }
 
 async function sendBroadcastStatus(env, chatId) {
@@ -2675,6 +3016,7 @@ function localDictionaryCandidates(word, limit = 8) {
   };
   for (let index = 0; index < records.length; index += 1) {
     const record = records[index];
+    if (record._deleted) continue;
     const values = DICTIONARY_LOCAL_FIELDS.map((field) => (field ? String(record?.[field] ?? "") : ""));
     for (let column = 0; column < values.length; column += 1) {
       const cell = normalize(values[column]);
@@ -2921,13 +3263,16 @@ function adminMenuMarkup(page = "home") {
   ] };
   if (page === "dictionary") return { inline_keyboard: [
     [{ text: "✏️ تعديل كلمة / صف كامل", callback_data: "ad|dictedit" }],
-    [{ text: "➕ إضافة كلمة جديدة", callback_data: "ad|dictnew" }],
+    [{ text: "➕ إضافة كلمة جديدة", callback_data: "ad|dictnew" }, { text: "🗑 حذف كلمة", callback_data: "ad|deleteword" }],
+    [{ text: "📊 إحصائيات القاموس", callback_data: "ad|dictstats" }, { text: "🔁 كلمات مكررة", callback_data: "ad|duplicates" }],
     [{ text: "📋 سجل تدقيق التعديلات", callback_data: "ad|auditlog" }],
     [{ text: "🔄 فتح قسم آخر", callback_data: "ad|page|home" }],
   ] };
   return { inline_keyboard: [
     [{ text: "🤖 معلومات البوت", callback_data: "ad|botinfo" }, { text: "📈 تقرير الاستخدام", callback_data: "ad|usage" }],
     [{ text: "📊 تحليلات البحث", callback_data: "ad|analytics" }, { text: "📋 سجل التدقيق", callback_data: "ad|auditlog" }],
+    [{ text: "👥 المستخدمون", callback_data: "ad|users" }, { text: "💡 اقتراحات الكلمات", callback_data: "ad|suggestions" }],
+    [{ text: "⚠️ سجل الأخطاء", callback_data: "ad|errors" }, { text: "🔧 وضع الصيانة", callback_data: "ad|maintoggle" }],
     [{ text: "📦 تصدير القاموس JSON", callback_data: "ad|exportdict" }, { text: "👥 تصدير المستخدمين CSV", callback_data: "ad|exportusers" }],
     [{ text: "💾 نسخة احتياطية", callback_data: "ad|backup" }, { text: "🔄 تحديث الأوامر", callback_data: "ad|commands" }],
     [{ text: "🖼 إخفاء بطاقة كلمة", callback_data: "ad|cardhide" }, { text: "🖼 إظهار بطاقة كلمة", callback_data: "ad|cardshow" }],
@@ -2979,11 +3324,12 @@ async function handleAdminFlow(env, message, userId, user, text) {
   const flow = user?.adminFlow;
   if (!flow || !text || text.startsWith("/")) return false;
   if (flow.kind === "dict_find") { await clearAdminFlow(env, userId); await beginDictionaryEdit(env, message.chat.id, userId, text); return true; }
+  if (flow.kind === "delete_find") { await clearAdminFlow(env, userId); await beginDeleteWord(env, message.chat.id, userId, text); return true; }
   if (flow.kind === "dict_value" && Number.isInteger(flow.col) && flow.col >= 0) { await updateDictionaryField(env, message, userId, flow, text); return true; }
   if (flow.kind === "dict_new" && Number.isInteger(flow.col) && flow.col >= 0) { await updateDictionaryNewField(env, message, userId, flow, text); return true; }
   // A dictionary edit/add flow is active but no column was chosen yet: remind instead of clearing.
-  if (flow.kind === "dict_value" || flow.kind === "dict_new") {
-    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ اضغط أولاً على زر العمود المطلوب من رسالة الصف، ثم أرسل القيمة الجديدة." });
+  if (flow.kind === "dict_value" || flow.kind === "dict_new" || flow.kind === "delete_pending") {
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ اضغط أولاً على زر الإجراء المطلوب من الرسالة (عمود / تأكيد حذف)، ثم أرسل القيمة." });
     return true;
   }
   await clearAdminFlow(env, userId);
@@ -3028,6 +3374,50 @@ async function handleAdminDashboardCallback(env, callback, ctx) {
   if (action === "exportdict") { await exportDictionary(env, chatId); return; }
   if (action === "exportusers") { await exportUsersCsv(env, chatId); return; }
   if (action === "backup") { await sendBackup(env, chatId); return; }
+  if (action === "delpick") {
+    const row = Number(parts[2]);
+    const record = records[row - 2];
+    if (!record) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ الصف غير موجود." }); return; }
+    await setAdminFlow(env, callback.from.id, { kind: "delete_pending", row });
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `🗑 تأكيد حذف الصف <b>${row}</b>؟\nالكلمة: <b>${escapeHtml(String(record.coptic ?? "").slice(0, 60))}</b>\nالمعنى: ${escapeHtml(String(record.meaning ?? "").slice(0, 80))}`, parse_mode: "HTML", reply_markup: { inline_keyboard: [[{ text: "✅ نعم، احذف الصف", callback_data: `ad|delconfirm|${row}` }, { text: "❌ إلغاء", callback_data: "ad|delcancel" }]] } });
+    return;
+  }
+  if (action === "delconfirm") { await confirmDeleteWord(env, callback, Number(parts[2])); return; }
+  if (action === "delcancel") { await clearAdminFlow(env, callback.from.id); await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ تم إلغاء الحذف." }); return; }
+  if (action === "sugapp" || action === "sugrej") {
+    const entry = await takeSuggestion(env, parts[2]);
+    if (!entry) { await telegram(env, "sendMessage", { chat_id: chatId, text: "⚠️ الاقتراح لم يعد موجودًا (تمت معالجته مسبقًا)." }); return; }
+    if (action === "sugrej") { await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ تم رفض الاقتراح: ${escapeHtml(String(entry.text).slice(0, 80))}` }); return; }
+    // Approve: parse "coptic — meaning" and append to the sheet.
+    const split = String(entry.text).split(/\s*[—\-]\s*/u, 2);
+    const values = new Array(11).fill("");
+    values[0] = (split[0] ?? entry.text).trim().slice(0, 80);
+    values[2] = (split[1] ?? entry.text).trim().slice(0, 200);
+    const config = await driveConfig(env);
+    if (!config) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ لم يتم ربط Google Sheets." }); return; }
+    let result;
+    try { result = await callAppsScript(config, { action: "dictionary_append", values, by: { id: "813894692" } }); }
+    catch (error) { result = { ok: false, error: error instanceof Error ? error.message : "تعذّر الاتصال" }; }
+    if (!result.ok) {
+      const err = String(result.error ?? "");
+      if (err.includes("unknown action") || err.includes("audio_base64")) await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ نسخة Apps Script قديمة — انشر Code.gs مرة أخرى لإضافة الاقتراح." });
+      else await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ فشلت الإضافة: ${err}` });
+      return;
+    }
+    const rec = { id: nextTempId() };
+    for (let i = 0; i < DICTIONARY_LOCAL_FIELDS.length; i += 1) { const f = DICTIONARY_LOCAL_FIELDS[i]; if (f) rec[f] = result.values?.[i] ?? values[i] ?? ""; }
+    records.push(rec);
+    logAudit({ action: "dictionary_append", source: "suggestion", userId: entry.userId, row: result.row, values });
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `✅ تمت إضافة الاقتراح كصف رقم <b>${result.row}</b>.` });
+    return;
+  }
+  if (action === "deleteword") { await setAdminFlow(env, callback.from.id, { kind: "delete_find" }); await telegram(env, "sendMessage", { chat_id: chatId, text: "🗑 أرسل الكلمة المراد حذفها من القاموس." }); return; }
+  if (action === "duplicates") { await sendDuplicatesReport(env, chatId); return; }
+  if (action === "dictstats") { await sendDictStats(env, chatId); return; }
+  if (action === "users") { await sendUsersList(env, chatId, ""); return; }
+  if (action === "errors") { await sendErrorLogReport(env, chatId); return; }
+  if (action === "suggestions") { await sendSuggestionsList(env, chatId); return; }
+  if (action === "maintoggle") { const on = !(await maintenanceOn(env)); await setMaintenance(env, on); await telegram(env, "sendMessage", { chat_id: chatId, text: on ? "🔧 تم تفعيل وضع الصيانة." : "✅ تم إيقاف وضع الصيانة." }); return; }
   const prompts = { deleteone: ["🗑 أرسل كلمة واحدة لحذف تسجيلها:", "deleteone"], deletemany: ["🗑 أرسل الكلمات مفصولة بعلامة | أو فاصلة:", "deletemany"], setdrive: ["🔗 أرسل رابط Apps Script المنتهي بـ /exec:", "setdrive"], setarchive: ["📦 أرسل رقم المجموعة، أو off لإيقاف الأرشيف:", "setarchive"], cardhide: ["🖼 أرسل الكلمة لإخفاء بطاقتها:", "cardhide"], cardshow: ["🖼 أرسل الكلمة لإظهار بطاقتها:", "cardshow"] };
   if (prompts[action]) { await setAdminFlow(env, callback.from.id, prompts[action][1]); await telegram(env, "sendMessage", { chat_id: chatId, text: prompts[action][0] }); return; }
   if (action === "resetdrive") { await setDriveConfig(env, { chat: { id: chatId } }, "reset"); return; }
@@ -3162,6 +3552,20 @@ async function handleUpdate(update, env, ctx) {
   if (text) trackUsage(text.startsWith("/") ? "command" : "search", text.startsWith("/") ? undefined : text);
   inBackground(ctx, flushAnalyticsSnapshot(env));
   inBackground(ctx, flushAuditLog(env));
+  inBackground(ctx, refreshExtraAdmins(env));
+  inBackground(ctx, flushErrorLog(env));
+  inBackground(ctx, flushUserHistory(env));
+  if (text && !text.startsWith("/")) trackSearchHistory(userId, text);
+  // Admin feature: banned users get no response; maintenance mode blocks non-admins.
+  const [banned, maint] = await Promise.all([isBanned(env, userId), maintenanceOn(env)]);
+  if (banned) {
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🚫 تم حظرك من استخدام البوت. إذا كنت تعتقد أن ذلك خطأ، تواصل مع المشرف." });
+    return;
+  }
+  if (!isAdmin(env, userId) && maint) {
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🔧 البوت حاليًا تحت الصيانة. عُد لاحقًا بعد قليل، شكرًا لتفهمك." });
+    return;
+  }
   if (text === "/" || text === "/start" || text.startsWith("/start ") || text === "/admin") inBackground(ctx, ensureCommandMenu(env, userId));
   const cachedRegistration = registeredCache.get(userId);
   const cacheIsFresh = cachedRegistration && Date.now() - cachedRegistration.at < REGISTERED_CACHE_MS;
@@ -3236,6 +3640,79 @@ async function handleUpdate(update, env, ctx) {
     }
     if (text === "/backup") {
       await sendBackup(env, message.chat.id);
+      return;
+    }
+    if (text === "/users" || text.startsWith("/users ")) {
+      await sendUsersList(env, message.chat.id, text.slice("/users".length).trim());
+      return;
+    }
+    if (text === "/ban" || text.startsWith("/ban ")) {
+      const arg = text.slice("/ban".length).trim();
+      const id = arg.split(/\s+/u)[0];
+      if (!/^\d+$/u.test(id)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ الاستخدام: /ban <user_id> [سبب]" }); return; }
+      await banUser(env, id, arg.slice(id.length).trim());
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `🚫 تم حظر المستخدم <code>${escapeHtml(id)}</code>.` });
+      return;
+    }
+    if (text === "/unban" || text.startsWith("/unban ")) {
+      const id = text.slice("/unban".length).trim();
+      if (!/^\d+$/u.test(id)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ الاستخدام: /unban <user_id>" }); return; }
+      await unbanUser(env, id);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم رفع الحظر عن المستخدم <code>${escapeHtml(id)}</code>.` });
+      return;
+    }
+    if (text === "/userinfo" || text.startsWith("/userinfo ")) {
+      await sendUserInfo(env, message.chat.id, text.slice("/userinfo".length).trim());
+      return;
+    }
+    if (text === "/deleteword" || text.startsWith("/deleteword ")) {
+      const word = text.slice("/deleteword".length).trim();
+      if (word) { await beginDeleteWord(env, message.chat.id, userId, word); return; }
+      await setAdminFlow(env, userId, { kind: "delete_find" });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🗑 أرسل الكلمة المراد حذفها من القاموس." });
+      return;
+    }
+    if (text === "/dictstats") { await sendDictStats(env, message.chat.id); return; }
+    if (text === "/maintenance" || text.startsWith("/maintenance ")) {
+      const arg = text.slice("/maintenance".length).trim().toLowerCase();
+      if (arg === "on") { await setMaintenance(env, true); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🔧 تم تفعيل وضع الصيانة. المستخدمون العاديون سيرون رسالة الصيانة." }); }
+      else if (arg === "off") { await setMaintenance(env, false); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إيقاف وضع الصيانة. البوت يعمل طبيعيًا." }); }
+      else await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `الوضع الحالي: ${(await maintenanceOn(env)) ? "🔧 مفعّل" : "✅ متوقف"}\nالاستخدام: /maintenance on  أو  /maintenance off` });
+      return;
+    }
+    if (text === "/editwelcome" || text.startsWith("/editwelcome ")) {
+      const custom = text.slice("/editwelcome".length).trim();
+      if (!custom) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /editwelcome النص الجديد. استخدم {name} ليظهر اسم المستخدم. /resetwelcome للنص الأصلي." }); return; }
+      await setWelcomeCaption(env, custom);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم تحديث نص الترحيب:\n${escapeHtml(custom)}` });
+      return;
+    }
+    if (text === "/resetwelcome") { await resetWelcomeCaption(env); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تمت إعادة نص الترحيب إلى الأصلي." }); return; }
+    if (text === "/admins" || text.startsWith("/admins ")) {
+      const parts = text.split(/\s+/u);
+      const sub = parts[1] ?? "list";
+      if (sub === "add" && /^\d+$/u.test(parts[2] ?? "")) { await addExtraAdmin(env, parts[2]); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ أُضيف الأدمن <code>${escapeHtml(parts[2])}</code>.` }); }
+      else if (sub === "remove" && /^\d+$/u.test(parts[2] ?? "")) { if (parts[2] === DEFAULT_ADMIN_IDS) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ لا يمكن إزالة الأدمن الرئيسي الثابت." }); } else { await removeExtraAdmin(env, parts[2]); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ أُزيل الأدمن <code>${escapeHtml(parts[2])}</code>.` }); } }
+      else await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `👥 الأدمن الحاليون: ${adminIds(env).map((id) => `<code>${escapeHtml(id)}</code>`).join(", ")}\nالاستخدام: /admins add &lt;id&gt;  |  /admins remove &lt;id&gt;`, parse_mode: "HTML" });
+      return;
+    }
+    if (text === "/errors") { await sendErrorLogReport(env, message.chat.id); return; }
+    if (text === "/duplicates") { await sendDuplicatesReport(env, message.chat.id); return; }
+    if (text === "/preview" || text.startsWith("/preview ")) {
+      const word = text.slice("/preview".length).trim();
+      if (!word) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "👁 الاستخدام: /preview <كلمة> — تعرض الكلمة كما يراها المستخدم العادي." }); return; }
+      await sendSearch(env, message.chat.id, word, 0, undefined, ctx);
+      return;
+    }
+    if (text === "/resync") {
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🔄 إعادة تحميل القاموس من GitHub raw…" });
+      try { const r = await resyncDictionary(env); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تمت إعادة التحميل: ${r.count.toLocaleString("en-US")} سجل. تم مسح كاش فهرس البحث.` }); }
+      catch (error) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `❌ فشل التحميل: ${error instanceof Error ? error.message : "unknown"}` }); }
+      return;
+    }
+    if (text === "/suggestions") { await sendSuggestionsList(env, message.chat.id); return; }
+    if (text === "/userhistory" || text.startsWith("/userhistory ")) {
+      await sendUserHistoryReport(env, message.chat.id, text.slice("/userhistory".length).trim());
       return;
     }
     if (text === "/syncusers") {
@@ -3323,6 +3800,16 @@ async function handleUpdate(update, env, ctx) {
   if (text === "/random" || text.startsWith("/random ")) {
     const index = Math.floor(Math.random() * records.length);
     await sendRecord(env, message.chat.id, index, -1, "");
+    return;
+  }
+  if (text === "/suggest" || text.startsWith("/suggest ")) {
+    const suggestion = text.slice("/suggest".length).trim();
+    if (!suggestion) {
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "💡 أرسل اقتراحك بهذا الشكل: /suggest الكلمة القبطية — المعنى (بالعربية أو الإنجليزية). سيُراجعها الأدمن ويضيفها للقاموس." });
+      return;
+    }
+    const entry = await addSuggestion(env, userId, suggestion);
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: entry ? "✅ تم استلام اقتراحك وسيُراجعه الأدمن قريبًا. شكرًا لمساهمتك!" : "⚠️ تعذّر حفظ الاقتراح حاليًا، جرّب لاحقًا." });
     return;
   }
   if (message.voice || message.audio) {
@@ -3440,6 +3927,7 @@ export default {
       console.log(JSON.stringify({ ev: "webhook", kind, update_id: update.update_id ?? null, dur_ms: durMs }));
       return new Response("ok", { status: 200 });
     } catch (error) {
+      logError(env, error, { where: "webhook" });
       console.error("Webhook update failed", error instanceof Error ? error.message : "unknown error");
       // Return 200 so Telegram does not retry a malformed update indefinitely.
       return new Response("ok", { status: 200 });
