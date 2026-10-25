@@ -2,6 +2,7 @@ import records from "../data/dictionary.json" with { type: "json" };
 import { translateFieldValue } from "./field-translations.js";
 import cardManifest from "../data/cards.json" with { type: "json" };
 import welcomeImageBase64 from "./welcome-image.js";
+import { createAdminExtras } from "./admin-extra.js";
 
 const BOT_TITLE = "📖 القاموس القبطي البحيري";
 const PAGE_SIZE = 1;
@@ -25,6 +26,8 @@ const TEMPLATES_KEY = "templates:list";
 const OPTOUT_KEY = "optout:list";
 const NOTES_KEY = "admin:notes";
 const BOT_STARTED_AT = Date.now();
+globalThis.__copticBotStartedAt = BOT_STARTED_AT;
+const BOT_VERSION = "1.1.0";
 const wodCache = { value: null, at: 0 };
 const autoReplyCache = { value: null, at: 0 };
 const searchLimitCache = { value: null, at: 0 };
@@ -865,6 +868,35 @@ const ADMIN_COMMANDS = [
   { command: "adminaudit", description: "سجل إجراءات الأدمن" },
   { command: "slowmode", description: "الوضع البطيء العام" },
   { command: "clearcache", description: "مسح كل الكاش" },
+  // ---- Extra admin pack (src/admin-extra.js) ----
+  { command: "ping", description: "زمن استجابة البوت" },
+  { command: "debug", description: "لقطة تشخيصية" },
+  { command: "report", description: "تقرير إداري شامل" },
+  { command: "syncstatus", description: "حالة مزامنة المستخدمين" },
+  { command: "synctest", description: "اختبار اتصال الشيت" },
+  { command: "usercount", description: "إحصاء المستخدمين" },
+  { command: "growth", description: "نمو المستخدمين" },
+  { command: "inactive", description: "المستخدمون الخاملون" },
+  { command: "userlookup", description: "بحث عن مستخدم" },
+  { command: "userdelete", description: "حذف مستخدم" },
+  { command: "usernote", description: "ملاحظة عن مستخدم" },
+  { command: "usernotes", description: "ملاحظات المستخدمين" },
+  { command: "banlist", description: "قائمة المحظورين" },
+  { command: "dicthealth", description: "صحة القاموس" },
+  { command: "fieldreport", description: "امتلاء حقول القاموس" },
+  { command: "randomword", description: "كلمة عشوائية" },
+  { command: "wordsearch", description: "بحث إداري في القاموس" },
+  { command: "topwords", description: "أكثر الكلمات بحثًا" },
+  { command: "misses", description: "كلمات بلا نتائج" },
+  { command: "exportcsv", description: "تصدير القاموس CSV" },
+  { command: "exportfull", description: "نسخة احتياطية شاملة" },
+  { command: "schedule", description: "جدولة رسالة" },
+  { command: "schedules", description: "الرسائل المجدولة" },
+  { command: "unschedule", description: "إلغاء رسالة مجدولة" },
+  { command: "cleanup", description: "تنظيف البيانات القديمة" },
+  { command: "limits", description: "الحدود والإعدادات" },
+  { command: "cacheinfo", description: "حالة الكاش" },
+  { command: "newhelp", description: "أوامر الأدمن الإضافية" },
 ];
 const commandMenuReady = new Set();
 
@@ -1413,6 +1445,7 @@ async function prepareSearch(env, chatId, query, page = 0, messageId = undefined
   }
   const matches = await findMatches(cleanQuery, env);
   if (!matches.length) {
+    trackMiss(cleanQuery);
     return () => deliver({ text: uiTextFor(cleanQuery).noResult });
   }
   if (matches.length > 1) {
@@ -1519,48 +1552,109 @@ export class UserStore {
     return ids;
   }
 
+  // One page of the user sync. Returns true while a job exists (so alarm() stops there).
+  async syncStep() {
+    const storage = this.state.storage;
+    const env = this.env;
+    const job = await storage.get("sync:job");
+    if (!job) return false;
+    try {
+      const cursor = (await storage.get(USERS_SYNC_CURSOR)) ?? null;
+      const pageSize = 50;
+      const listPage = await storage.list({ prefix: "user:", ...(cursor ? { startAfter: cursor } : {}), limit: pageSize });
+      const items = [...listPage].map(([storedKey, record]) => ({
+        key: storedKey,
+        id: storedKey.slice("user:".length),
+        record,
+      }));
+      if (!items.length) { await this.finishSync(job); return true; }
+      const rows = [];
+      for (let c = 0; c < items.length; c += 10) {
+        const chunk = items.slice(c, c + 10);
+        const chunkRows = await Promise.all(chunk.map(async (item) => {
+          let record = item.record ?? {};
+          if (!job.fast && !record.tgName && !record.username) {
+            const chat = await telegram(env, "getChat", { chat_id: item.id }).catch(() => null);
+            if (chat?.ok && chat.result) {
+              record = { ...record, tgName: displayNameOrEmpty(chat.result), username: chat.result.username ?? "" };
+              await saveUser(env, item.id, record).catch(() => null);
+            }
+          }
+          return userSheetRow(item.id, record);
+        }));
+        rows.push(...chunkRows);
+      }
+      const outcome = await pushUsers(env, rows);
+      if (!outcome.ok) {
+        job.attempts = (job.attempts ?? 0) + 1;
+        job.lastError = outcome.error ?? "push failed";
+        if (job.attempts >= 6) {
+          await storage.delete("sync:job");
+          await telegram(env, "sendMessage", {
+            chat_id: job.adminChat,
+            text: `❌ أُوقفت المزامنة بعد ${job.attempts} محاولات: ${job.lastError}\nتم حفظ ${job.total ?? 0} مستخدم قبل التوقف. أصلح السبب ثم أرسل /syncusers.`,
+          }).catch(() => null);
+          return true;
+        }
+        await storage.put("sync:job", job);
+        const waitMs = Math.min(120000, 15000 * job.attempts);
+        await storage.setAlarm(Date.now() + waitMs);
+        if (job.attempts === 1) {
+          await telegram(env, "sendMessage", {
+            chat_id: job.adminChat,
+            text: `⚠️ تعثّر رفع دفعة إلى الشيت (${job.lastError}). سأعيد المحاولة تلقائيًا بعد ${Math.round(waitMs / 1000)} ثانية من حيث توقفت.`,
+          }).catch(() => null);
+        }
+        return true;
+      }
+      job.total = (job.total ?? 0) + rows.length;
+      job.rounds = (job.rounds ?? 0) + 1;
+      job.attempts = 0;
+      job.lastError = "";
+      job.lastAt = new Date().toISOString();
+      // `cursor` is not exposed by every storage implementation, so the next page continues after the last key.
+      const nextCursor = items.length === pageSize ? items[items.length - 1].key : null;
+      if (nextCursor) {
+        await storage.put(USERS_SYNC_CURSOR, nextCursor);
+        await storage.put("sync:job", job);
+        await storage.setAlarm(Date.now() + 25000); // sync, pause ~25s, resume
+        if (job.rounds % 4 === 0) {
+          await telegram(env, "sendMessage", {
+            chat_id: job.adminChat,
+            text: `⏳ مزامنة تلقائية: ${job.total} مستخدم حتى الآن (الجولة ${job.rounds})…`,
+          }).catch(() => null);
+        }
+        return true;
+      }
+      await this.finishSync(job);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "unknown error";
+      job.attempts = (job.attempts ?? 0) + 1;
+      job.lastError = message;
+      console.error("syncStep failed", message);
+      await storage.put("sync:job", job).catch(() => null);
+      // Always reschedule: a thrown error used to leave the job without an alarm, so the sync stopped for good.
+      await storage.setAlarm(Date.now() + Math.min(120000, 20000 * job.attempts)).catch(() => null);
+      return true;
+    }
+  }
+
+  async finishSync(job) {
+    const storage = this.state.storage;
+    await storage.delete(USERS_SYNC_CURSOR);
+    await storage.delete("sync:job");
+    await telegram(this.env, "sendMessage", {
+      chat_id: job.adminChat,
+      text: `✅ اكتملت المزامنة التلقائية: ${job.total ?? 0} مستخدم في ${job.rounds ?? 0} جولة. تحقّق من تبويب "users" في الشيت.`,
+    }).catch(() => null);
+  }
+
   async alarm() {
     const storage = this.state.storage;
     // Sync job: each batch runs in its own alarm invocation with fresh time limit.
-    const syncJob = await storage.get("sync:job");
-    if (syncJob) {
-      const env = this.env;
-      const cursor = (await storage.get(USERS_SYNC_CURSOR)) ?? null;
-      const listPage = await storage.list({ prefix: "user:", ...(cursor ? { startAfter: cursor } : {}), limit: 50 });
-      const page = { users: [...listPage].map(([storedKey, record]) => ({ key: storedKey, id: storedKey.slice("user:".length), record })), next: listPage.cursor ?? null };
-      if ((page.users ?? []).length) {
-        const rows = [];
-        for (let c = 0; c < page.users.length; c += 10) {
-          const chunk = page.users.slice(c, c + 10);
-          const chunkRows = await Promise.all(chunk.map(async (item) => {
-            let record = item.record ?? {};
-            if (!syncJob.fast && !record.tgName && !record.username) {
-              const chat = await telegram(env, "getChat", { chat_id: item.id }).catch(() => null);
-              if (chat?.ok && chat.result) {
-                record = { ...record, tgName: displayNameOrEmpty(chat.result), username: chat.result.username ?? "" };
-                await saveUser(env, item.id, record).catch(() => null);
-              }
-            }
-            return userSheetRow(item.id, record);
-          }));
-          rows.push(...chunkRows);
-        }
-        await pushUsers(env, rows).catch(() => null);
-        syncJob.total = (syncJob.total ?? 0) + rows.length;
-        syncJob.rounds = (syncJob.rounds ?? 0) + 1;
-        if (page.next) {
-          await storage.put(USERS_SYNC_CURSOR, page.next);
-          await storage.put("sync:job", syncJob);
-          await storage.setAlarm(Date.now() + 25000); // sync then pause ~25s then resume (user's idea)
-          if (syncJob.rounds % 4 === 0) await telegram(env, "sendMessage", { chat_id: syncJob.adminChat, text: `⏳ مزامنة تلقائية: ${syncJob.total} مستخدم حتى الآن (الجولة ${syncJob.rounds})…` }).catch(() => null);
-          return;
-        }
-      }
-      await storage.delete(USERS_SYNC_CURSOR);
-      await storage.delete("sync:job");
-      await telegram(env, "sendMessage", { chat_id: syncJob.adminChat, text: `✅ اكتملت المزامنة التلقائية: ${syncJob.total ?? 0} مستخدم في ${syncJob.rounds ?? 0} جولة. تحقق من تبويب "users" في الشيت.` }).catch(() => null);
-      return;
-    }
+    // The sync job continues one page at a time; every failure reschedules itself instead of dying.
+    if (await this.syncStep()) return;
     const job = await storage.get("broadcast");
     if (!job) return;
     // Batch 4: broadcast pause/cancel control.
@@ -1695,7 +1789,8 @@ export class UserStore {
       const username = profile?.username ?? "";
       const tgName = profile?.tgName ?? "";
       if (!existing) {
-        const created = { firstSeen: new Date().toISOString(), ...(username ? { username } : {}), ...(tgName ? { tgName } : {}) };
+        const firstSeen = new Date().toISOString();
+        const created = { firstSeen, lastSeen: firstSeen, ...(username ? { username } : {}), ...(tgName ? { tgName } : {}) };
         await storage.put(`user:${userId}`, created);
         return Response.json({ created: true, user: created, total: (await storage.list({ prefix: "user:" })).size });
       }
@@ -1703,6 +1798,12 @@ export class UserStore {
       let changed = user !== existing;
       if (profile && (username !== (existing.username ?? "") || tgName !== (existing.tgName ?? ""))) {
         user = { ...user, username, tgName };
+        changed = true;
+      }
+      // Remember activity (hourly granularity) so the admin can list idle users without a write per message.
+      const lastSeenAt = user.lastSeen ? Date.parse(user.lastSeen) : 0;
+      if (!Number.isFinite(lastSeenAt) || Date.now() - lastSeenAt > 3600000) {
+        user = { ...user, lastSeen: new Date().toISOString() };
         changed = true;
       }
       if (user !== existing) await storage.put(`user:${userId}`, user);
@@ -2477,17 +2578,28 @@ function displayNameOrEmpty(person) {
   return [person?.first_name, person?.last_name].filter(Boolean).join(" ").trim();
 }
 
+const USER_PUSH_CHUNK = 120;
+// Rows are written to the sheet in chunks and retried with exponential backoff: one huge POST used to
+// abort silently in the middle of a sync, which is why many users never reached the sheet.
 async function pushUsers(env, rows) {
   const config = await driveConfig(env);
   if (!config || !rows.length) return { ok: false, skipped: true };
-  try {
-    await callAppsScript(config, { action: "users", users: rows });
-    return { ok: true };
-  } catch (error) {
-    console.error("User sheet sync failed", error instanceof Error ? error.message : "unknown error");
-    return { ok: false, error: error instanceof Error ? error.message : "unknown error" };
+  let lastError = "";
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      for (let i = 0; i < rows.length; i += USER_PUSH_CHUNK) {
+        await callAppsScript(config, { action: "users", users: rows.slice(i, i + USER_PUSH_CHUNK) });
+      }
+      return { ok: true };
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : "unknown error";
+      console.error("User sheet sync failed", lastError);
+      await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt));
+    }
   }
+  return { ok: false, error: lastError };
 }
+
 async function markUserBlocked(env, chatId, reason = "Telegram 403") {
   if (!env.USERS || chatId == null || !/^\d+$/u.test(String(chatId)) || Number(chatId) <= 0) return;
   const userId = String(chatId);
@@ -2505,44 +2617,73 @@ async function markUserBlocked(env, chatId, reason = "Telegram 403") {
   await notifyAdmins(env, `🚫 <b>مستخدم حظر البوت</b>\n🆔 <code>${escapeHtml(userId)}</code>\n🕒 ${escapeHtml(blockedAt)}\n📌 ${escapeHtml(updated.blockedReason)}`);
 }
 
-async function syncUsersBatch(env, chatId) {
+const USER_SYNC_MAX_PAGES = 6;
+// Syncs page after page in a single run instead of stopping after one page, and only advances the cursor
+// when the sheet actually accepted the rows. If more users remain, the alarm job continues automatically.
+async function syncUsersBatch(env, chatId, options = {}) {
   const config = await driveConfig(env);
   if (!config) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: "لم يتم ربط جوجل درايف بعد. استخدم /setdrive أولًا." });
-    return;
+    return { ok: false, error: "drive not linked" };
   }
-  const cursor = (await storeCall(env, { op: "get", key: USERS_SYNC_CURSOR })).value ?? null;
-  const page = await storeCall(env, { op: "userpage", cursor, limit: USERS_SYNC_BATCH });
-  // Limited parallelism (10 at a time) to avoid Telegram 429 rate-limit on getChat.
-  const rows = [];
-  for (let c = 0; c < page.users.length; c += 10) {
-    const chunk = page.users.slice(c, c + 10);
-    const chunkRows = await Promise.all(chunk.map(async (item) => {
-      let record = item.record ?? {};
-      if (!record.tgName && !record.username) {
-        const chat = await telegram(env, "getChat", { chat_id: item.id }).catch(() => null);
-        if (chat?.ok && chat.result) {
-          record = { ...record, tgName: displayNameOrEmpty(chat.result), username: chat.result.username ?? "" };
-          await saveUser(env, item.id, record).catch(() => null);
+  const maxPages = Math.max(1, Number(options.maxPages) || USER_SYNC_MAX_PAGES);
+  let total = 0;
+  let pages = 0;
+  let done = false;
+  let error = null;
+  for (let page = 0; page < maxPages; page += 1) {
+    const cursor = env.USERS ? ((await storeCall(env, { op: "get", key: USERS_SYNC_CURSOR })).value ?? null) : null;
+    const result = await storeCall(env, { op: "userpage", cursor, limit: USERS_SYNC_BATCH });
+    const list = result?.users ?? [];
+    if (!list.length) { done = true; break; }
+    // Limited parallelism (10 at a time) to avoid Telegram 429 rate-limit on getChat.
+    const rows = [];
+    for (let c = 0; c < list.length; c += 10) {
+      const chunk = list.slice(c, c + 10);
+      const chunkRows = await Promise.all(chunk.map(async (item) => {
+        let record = item.record ?? {};
+        if (!record.tgName && !record.username) {
+          const chat = await telegram(env, "getChat", { chat_id: item.id }).catch(() => null);
+          if (chat?.ok && chat.result) {
+            record = { ...record, tgName: displayNameOrEmpty(chat.result), username: chat.result.username ?? "" };
+            await saveUser(env, item.id, record).catch(() => null);
+          }
         }
-      }
-      return userSheetRow(item.id, record);
-    }));
-    rows.push(...chunkRows);
+        return userSheetRow(item.id, record);
+      }));
+      rows.push(...chunkRows);
+    }
+    const outcome = await pushUsers(env, rows);
+    if (!outcome.ok) { error = outcome.error ?? "تعذّر الدفع إلى الشيت"; break; }
+    total += rows.length;
+    pages += 1;
+    await storeCall(env, { op: "put", key: USERS_SYNC_CURSOR, value: result.next ?? null }).catch(() => null);
+    if (!result.next) { done = true; break; }
   }
-  const outcome = await pushUsers(env, rows);
-  if (!outcome.ok) {
-    await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ تعذّرت مزامنة المستخدمين: ${outcome.error ?? "الربط غير مفعّل"}` });
-    return;
+  await storeCall(env, {
+    op: "put",
+    key: "user-sync:state",
+    value: { lastRunAt: new Date().toISOString(), lastRunTotal: total, pages, lastError: error ?? "" },
+  }).catch(() => null);
+  if (error) {
+    await telegram(env, "sendMessage", {
+      chat_id: chatId,
+      text: `⚠️ توقفت المزامنة بعد ${total} مستخدم: ${error}\nالمؤشر محفوظ، فأعد المحاولة بـ /syncusers — لن يُعاد إرسال من نجح.`,
+    });
+    return { ok: false, error, total };
   }
-  if (page.next) await storeCall(env, { op: "put", key: USERS_SYNC_CURSOR, value: page.next });
-  else await storeCall(env, { op: "put", key: USERS_SYNC_CURSOR, value: null });
+  if (done) {
+    await storeCall(env, { op: "put", key: USERS_SYNC_CURSOR, value: null }).catch(() => null);
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `✅ اكتملت المزامنة: ${total} مستخدم في ${pages} دفعة. تحقّق من تبويب "users".` });
+    return { ok: true, total, done: true };
+  }
+  // More users are still waiting: hand the rest to the alarm job so the admin does not press anything else.
+  if (env.USERS) await storeCall(env, { op: "sync_start", fromChat: chatId, input: "fast" }).catch(() => null);
   await telegram(env, "sendMessage", {
     chat_id: chatId,
-    text: page.next
-      ? `👥 تمت مزامنة ${rows.length} مستخدم إلى ورقة User.\nأرسل /syncusers لمتابعة الباقي.`
-      : `👥 تمت مزامنة ${rows.length} مستخدم. 🎉 كل المستخدمين الآن في ورقة User.`,
+    text: `⏳ تمت مزامنة ${total} مستخدم في ${pages} دفعة. الباقي يُكمل تلقائيًا كل 25 ثانية (/synccancel للإيقاف، /syncstatus للمتابعة).`,
   });
+  return { ok: true, total, done: false };
 }
 
 // Fully registered users are remembered briefly in this isolate (registration never goes backwards),
@@ -2925,6 +3066,54 @@ async function setWelcomeCaption(env, text) {
 async function resetWelcomeCaption(env) {
   if (env.USERS) await storeCall(env, { op: "delete", key: "welcome:caption" });
   invalidateCache(welcomeCache);
+}
+
+
+// ---- Unanswered searches: what users looked for and the dictionary does not have ----
+const missLog = new Map();
+const MISS_LOG_MAX = 400;
+function trackMiss(query) {
+  const key = String(query ?? "").replace(/\s+/gu, " ").trim().slice(0, 80);
+  if (!key || key.length < 2) return;
+  missLog.set(key, (missLog.get(key) ?? 0) + 1);
+  if (missLog.size > MISS_LOG_MAX) { const first = missLog.keys().next().value; if (first) missLog.delete(first); }
+}
+async function flushMisses(env) {
+  if (!env.USERS || !missLog.size) return;
+  try {
+    const previous = (await storeCall(env, { op: "get", key: "misses:snapshot" })).value ?? {};
+    for (const [word, count] of missLog) previous[word] = (previous[word] ?? 0) + count;
+    missLog.clear();
+    const top = Object.entries(previous).sort((a, b) => b[1] - a[1]).slice(0, 300);
+    await storeCall(env, { op: "put", key: "misses:snapshot", value: Object.fromEntries(top) });
+  } catch (error) { console.error("Miss log flush failed", error instanceof Error ? error.message : "unknown error"); }
+}
+async function readMisses(env) {
+  const persisted = env.USERS ? ((await storeCall(env, { op: "get", key: "misses:snapshot" })).value ?? {}) : {};
+  const merged = new Map(Object.entries(persisted));
+  for (const [word, count] of missLog) merged.set(word, (merged.get(word) ?? 0) + count);
+  return [...merged.entries()].sort((a, b) => b[1] - a[1]);
+}
+async function clearMisses(env) {
+  missLog.clear();
+  if (env.USERS) await storeCall(env, { op: "put", key: "misses:snapshot", value: {} });
+}
+// Sizes of the in-isolate caches, used by /cacheinfo.
+function cacheInfo() {
+  const configCaches = [featureFlagsCache, blacklistCache, whitelistCache, whitelistModeCache, banMsgCache, maintMsgCache,
+    slowModeCache, extraAdminsCache, bansCache, maintCache, welcomeCache, rateLimitCache, gamifyCache, apiKeyCache,
+    wodCache, autoReplyCache, searchLimitCache, alertsCache, templatesCache, optOutCache, notesCache];
+  return [
+    ["كاش الإعدادات الممتلئ", configCaches.filter((cache) => cache.value !== null).length],
+    ["آخر عمليات البحث (الذاكرة)", recentSearches.length],
+    ["سجل الكلمات بلا نتائج", missLog.size],
+    ["سجل الأخطاء", errorLog.length],
+    ["سجل تدقيق القاموس", auditLog.length],
+    ["سجل تاريخ البحث", userHistory.size],
+    ["كاش المستخدمين المسجلين", registeredCache.size],
+    ["أكثر الكلمات بحثًا (الذاكرة)", analyticsState.topWords.size],
+    ["آخر بحث لكل مستخدم", lastUserSearchAt.size],
+  ];
 }
 
 // ---- Error log (ring buffer + DO snapshot) ----
@@ -4402,6 +4591,8 @@ async function handleUpdate(update, env, ctx) {
     return;
   }
   inBackground(ctx, maybeAlertUsage(env));
+  // Scheduled admin messages are delivered on the first activity after their due time (no cron needed).
+  inBackground(ctx, adminExtras.processSchedules(env));
   inBackground(ctx, autoWordOfTheDay(env, message.chat.id, ctx));
   // Batch 3: keyword auto-replies and the daily search limit apply to non-admin text searches.
   if (!isAdmin(env, userId) && text && !text.startsWith("/")) {
@@ -4440,6 +4631,8 @@ async function handleUpdate(update, env, ctx) {
   }
   if (isAdmin(env, userId) && isPrivate) {
     const admin = await getUser(env, userId);
+    // Extra admin pack (src/admin-extra.js). Unknown commands fall through to the handlers below.
+    if (await adminExtras.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return;
     if (text === "/cancel" && admin?.bc) {
       await saveUser(env, userId, { ...admin, bc: undefined });
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "تم إلغاء الإرسال الجماعي." });
@@ -5105,9 +5298,39 @@ async function handleUpdate(update, env, ctx) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Extra admin pack wiring: shares the worker's storage, Telegram and dictionary
+// helpers so both files stay small and there is one source of truth.
+// ---------------------------------------------------------------------------
+let activeEnv = null;
+const adminExtras = createAdminExtras({
+  telegram,
+  escapeHtml,
+  storeCall,
+  getUser,
+  saveUser,
+  bannedSet,
+  readAnalyticsReport,
+  readErrorLog,
+  sendTextFile,
+  logAdminAction,
+  adminIds,
+  driveConfig,
+  callAppsScript,
+  records,
+  formatUptime,
+  readMisses,
+  flushMisses,
+  clearMisses,
+  cacheInfo,
+  botVersion: BOT_VERSION,
+  adminStatsOp: () => (activeEnv ? storeCall(activeEnv, { op: "adminStats" }).catch(() => ({})) : Promise.resolve({})),
+});
+
 export default {
   async fetch(request, env, ctx) {
     countRequest(env, ctx);
+    activeEnv = env;
     const url = new URL(request.url);
     const speech = /^\/tts\/(\d{1,6})\.(?:mp3|ogg)$/u.exec(url.pathname);
     if (speech && (request.method === "GET" || request.method === "HEAD") && records[Number(speech[1])]) {

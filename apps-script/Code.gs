@@ -46,6 +46,7 @@ function doPost(e) {
       return json_(dictionaryAppend_(body));
     }
     if (body.action === "users") return json_(upsertUsers_(body.users));
+    if (body.action === "users_count") return json_(usersCount_());
     if (["sync", "reconcile", "delete", "delete_many", "delete_all"].indexOf(body.action) >= 0) {
       if (CONFIG.ADMIN_ID) {
         const senderId = body.by && body.by.id != null ? String(body.by.id) : "";
@@ -558,6 +559,22 @@ function reconcile_() {
 }
 function extractFileId_(url) { const match = String(url || "").match(/\/d\/([^/]+)/); return match ? match[1] : ""; }
 
+function usersCount_() {
+  const spreadsheet = CONFIG.USERS_SHEET_ID ? SpreadsheetApp.openById(CONFIG.USERS_SHEET_ID) : openSpreadsheet_();
+  const sheet = spreadsheet.getSheetByName(CONFIG.USERS_TAB);
+  if (!sheet) return { ok: true, rows: 0 };
+  return { ok: true, rows: Math.max(0, sheet.getLastRow() - 1) };
+}
+
+/**
+ * Upserts user rows for the "users" tab.
+ *
+ * The previous version called getRange/setValues once per user, so a 200-row batch cost
+ * ~400 Sheets service calls. That regularly crossed the 6-minute execution limit and the
+ * request died halfway: the bot saw a timeout, and the remaining users never reached the
+ * sheet (the "sync stops in the middle" symptom). Now the tab is read once, every row is
+ * merged in memory, and a single setValues writes the result back.
+ */
 function upsertUsers_(users) {
   if (!Array.isArray(users) || !users.length) return { ok: false, error: "users is missing" };
   const lock = LockService.getScriptLock(); lock.waitLock(30000);
@@ -565,26 +582,51 @@ function upsertUsers_(users) {
     const spreadsheet = CONFIG.USERS_SHEET_ID ? SpreadsheetApp.openById(CONFIG.USERS_SHEET_ID) : openSpreadsheet_();
     let sheet = spreadsheet.getSheetByName(CONFIG.USERS_TAB);
     const usersHeader = ["name", "username", "id", "joined_at", "registered_at", "blocked", "blocked_at"];
+    const width = usersHeader.length;
     if (!sheet) {
       sheet = spreadsheet.insertSheet(CONFIG.USERS_TAB, spreadsheet.getNumSheets());
       sheet.appendRow(usersHeader);
     } else {
-      const header = sheet.getRange(1, 1, 1, usersHeader.length).getValues()[0];
+      const header = sheet.getRange(1, 1, 1, width).getValues()[0];
       if (!usersHeader.every(function (expected, i) { return String(header[i]).toLowerCase() === expected; })) {
-        sheet.getRange(1, 1, 1, usersHeader.length).setValues([usersHeader]);
+        sheet.getRange(1, 1, 1, width).setValues([usersHeader]);
       }
     }
-    const last = sheet.getLastRow(); const rowOf = {};
-    if (last > 1) sheet.getRange(2, 3, last - 1, 1).getValues().forEach(function (row, i) { rowOf[String(row[0])] = i + 2; });
-    let added = 0, updated = 0;
-    users.slice(0, 200).forEach(function (user) {
-      const id = String(user.id == null ? "" : user.id); if (!/^\d+$/.test(id)) return;
+    const last = sheet.getLastRow();
+    const rows = last > 1
+      ? sheet.getRange(2, 1, last - 1, width).getValues().map(function (row) { return row.slice(); })
+      : [];
+    const rowOf = {};
+    rows.forEach(function (row, i) { const id = String(row[2] == null ? "" : row[2]); if (id) rowOf[id] = i; });
+    let added = 0, updated = 0, changed = false;
+    users.slice(0, 500).forEach(function (user) {
+      const id = String(user.id == null ? "" : user.id);
+      if (!/^\d+$/.test(id)) return;
       const username = user.username ? "@" + String(user.username).replace(/^@/, "") : "";
-      const target = rowOf[id]; const old = target ? sheet.getRange(target, 1, 1, usersHeader.length).getValues()[0] : [];
-      const row = [user.name || old[0] || "", username || old[1] || "", id, user.joined_at || old[3] || "", user.registered_at || old[4] || "", user.blocked === true ? "نعم" : "لا", user.blocked_at || old[6] || ""];
-      if (target) { sheet.getRange(target, 1, 1, usersHeader.length).setValues([row]); updated++; }
-      else { sheet.appendRow(row); rowOf[id] = sheet.getLastRow(); added++; }
+      const index = rowOf[id];
+      if (index === undefined) {
+        rows.push([
+          user.name || "", username, id,
+          user.joined_at || "", user.registered_at || "",
+          user.blocked === true ? "نعم" : "لا", user.blocked_at || "",
+        ]);
+        rowOf[id] = rows.length - 1; added += 1; changed = true;
+        return;
+      }
+      const old = rows[index];
+      const next = [
+        user.name || old[0] || "",
+        username || old[1] || "",
+        id,
+        user.joined_at || old[3] || "",
+        user.registered_at || old[4] || "",
+        user.blocked === true ? "نعم" : (old[5] || "لا"),
+        user.blocked_at || old[6] || "",
+      ];
+      if (next.join("\u0001") !== old.join("\u0001")) { rows[index] = next; updated += 1; changed = true; }
     });
-    return { ok: true, added: added, updated: updated };
+    if (changed && rows.length) sheet.getRange(2, 1, rows.length, width).setValues(rows);
+    return { ok: true, added: added, updated: updated, rows: rows.length };
   } finally { lock.releaseLock(); }
 }
+
