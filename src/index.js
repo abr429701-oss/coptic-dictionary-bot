@@ -94,11 +94,140 @@ async function readAdminAudit(env) { if (!env.USERS) return []; const v = ((awai
 async function slowModeConfig(env) { const v = await cachedDoGet(env, SLOW_MODE_KEY, slowModeCache, { on: false, seconds: 5 }); return v && typeof v === "object" ? v : { on: false, seconds: 5 }; }
 async function setSlowModeConfig(env, cfg) { if (env.USERS) await storeCall(env, { op: "put", key: SLOW_MODE_KEY, value: cfg }); invalidateCache(slowModeCache); }
 function invalidateAllCaches() {
-  for (const c of [wodCache, autoReplyCache, searchLimitCache, alertsCache, templatesCache, optOutCache, notesCache, featureFlagsCache, blacklistCache, whitelistCache, whitelistModeCache, banMsgCache, maintMsgCache, slowModeCache, gamifyCache, apiKeyCache, rateLimitCache, bansCache, maintCache]) { c.value = null; c.at = 0; }
+  for (const c of [wodCache, autoReplyCache, searchLimitCache, alertsCache, templatesCache, optOutCache, notesCache, featureFlagsCache, blacklistCache, whitelistCache, whitelistModeCache, banMsgCache, maintMsgCache, slowModeCache, gamifyCache, apiKeyCache, rateLimitCache, bansCache, maintCache, aliasCache, motdCache]) { c.value = null; c.at = 0; }
   registeredCache.clear(); commandMenuReady.clear(); lastLookup.clear();
 }
 async function broadcastControlState(env) { if (!env.USERS) return { paused: false }; const v = ((await storeCall(env, { op: "get", key: BROADCAST_CTRL_KEY })).value ?? { paused: false }); return v && typeof v === "object" ? v : { paused: false }; }
 async function setBroadcastControl(env, state) { if (env.USERS) await storeCall(env, { op: "put", key: BROADCAST_CTRL_KEY, value: state }); }
+
+// ---- Batch 5 admin features: aliases, MOTD, manual points ----
+const ALIAS_KEY = "alias:list";
+const MOTD_KEY = "motd:text";
+const aliasCache = { value: null, at: 0 };
+const motdCache = { value: null, at: 0 };
+async function aliasList(env) { const v = await cachedDoGet(env, ALIAS_KEY, aliasCache, {}); return v && typeof v === "object" ? v : {}; }
+async function setAlias(env, trigger, target) {
+  const all = await aliasList(env);
+  if (target) all[normalize(trigger)] = String(target).slice(0, 80);
+  else delete all[normalize(trigger)];
+  if (env.USERS) await storeCall(env, { op: "put", key: ALIAS_KEY, value: all });
+  invalidateCache(aliasCache);
+}
+async function motdText(env) { const v = await cachedDoGet(env, MOTD_KEY, motdCache, ""); return typeof v === "string" ? v : ""; }
+async function setMotd(env, text) { if (env.USERS) await storeCall(env, { op: "put", key: MOTD_KEY, value: String(text ?? "").slice(0, 800) }); invalidateCache(motdCache); }
+// MOTD is pushed once per UTC day to each user who sends /start.
+async function maybeSendMotd(env, chatId, userId) {
+  try {
+    const text = await motdText(env);
+    if (!text) return;
+    const user = await getUser(env, userId);
+    const today = utcDay();
+    if (user?.motdSeen === today) return;
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `📢 <b>رسالة اليوم</b>\n\n${escapeHtml(text)}`, parse_mode: "HTML" });
+    await saveUser(env, userId, { ...(user ?? {}), motdSeen: today });
+  } catch (error) { console.error("MOTD failed", error instanceof Error ? error.message : "unknown error"); }
+}
+// Manual points awarding (merges into the same gamify score the leaderboard reads).
+async function awardPoints(env, targetId, amount) {
+  if (!env.USERS) return null;
+  const key = "gamify:scores";
+  const all = (await storeCall(env, { op: "get", key })).value ?? {};
+  const entry = all[String(targetId)] ?? { points: 0, streak: 0, lastDay: "", name: "" };
+  entry.points = Math.max(0, (entry.points ?? 0) + Number(amount));
+  all[String(targetId)] = entry;
+  await storeCall(env, { op: "put", key, value: all });
+  return entry.points;
+}
+
+// ---- Batch 5 user features: favorites, quiz, voice preference, my stats ----
+const quizState = new Map(); // chatId -> { correct, options, at }
+const QUIZ_TTL_MS = 15 * 60000;
+function pickQuizRecord() {
+  for (let tries = 0; tries < 25; tries += 1) {
+    const record = records[Math.floor(Math.random() * records.length)];
+    if (record?._deleted) continue;
+    const meaning = splitMeaning(record.meaning ?? "")[0] ?? "";
+    if (meaning.length >= 2 && meaning.length <= 60) return { record, meaning };
+  }
+  return null;
+}
+async function beginQuiz(env, chatId) {
+  const picked = pickQuizRecord();
+  if (!picked) { await telegram(env, "sendMessage", { chat_id: chatId, text: "تعذّر تجهيز سؤال الآن، جرّب مرة أخرى." }); return; }
+  const wrong = new Set();
+  while (wrong.size < 3) { const other = pickQuizRecord(); if (other && normalize(other.meaning) !== normalize(picked.meaning)) wrong.add(other.meaning); }
+  const options = [...wrong].map((m) => ({ m, correct: false }));
+  options.splice(Math.floor(Math.random() * 4), 0, { m: picked.meaning, correct: true });
+  quizState.set(String(chatId), { correct: options.findIndex((o) => o.correct), options, at: Date.now() });
+  if (quizState.size > 500) { for (const [k, v] of quizState) if (Date.now() - v.at > QUIZ_TTL_MS) quizState.delete(k); }
+  await telegram(env, "sendMessage", {
+    chat_id: chatId,
+    text: `🧠 <b>اختبار سريع!</b>\nما معنى كلمة <b>${escapeHtml(String(picked.record.coptic ?? "").slice(0, 40))}</b> ؟`,
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: [
+      [options[0], options[1]].map((o, i) => ({ text: o.m.slice(0, 24), callback_data: `qz|${i}` })),
+      [options[2], options[3]].map((o, i) => ({ text: o.m.slice(0, 24), callback_data: `qz|${i + 2}` })),
+    ] },
+  });
+}
+async function handleQuizAnswer(env, callback) {
+  const answer = (extra = {}) => telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, ...extra });
+  const chatId = String(callback.message?.chat?.id ?? "");
+  const state = quizState.get(chatId);
+  if (!state || Date.now() - state.at > QUIZ_TTL_MS) {
+    await answer({ text: "⌛ انتهت صلاحية السؤال. أرسل /quiz لسؤال جديد.", show_alert: true });
+    return;
+  }
+  const chosen = Number(String(callback.data ?? "").split("|")[1]);
+  const won = chosen === state.correct;
+  quizState.delete(chatId);
+  await answer({ text: won ? `🎉 أحسنت! المعنى الصحيح: ${state.options[state.correct].m}` : `❌ خطأ. الصحيح: ${state.options[state.correct].m}`, show_alert: true });
+  await telegram(env, "editMessageText", {
+    chat_id: callback.message.chat.id,
+    message_id: callback.message.message_id,
+    text: won ? `🎉 <b>إجابة صحيحة!</b> (${escapeHtml(callback.from?.first_name ?? "")})\n✅ ${escapeHtml(state.options[state.correct].m)}\n\nسؤال جديد: /quiz` : `❌ <b>إجابة خاطئة</b> (${escapeHtml(callback.from?.first_name ?? "")})\n✅ الصحيح: ${escapeHtml(state.options[state.correct].m)}\n\nسؤال جديد: /quiz`,
+    parse_mode: "HTML",
+  });
+}
+// Per-user voice preference: the stored word card/voice stays, only auto-sending changes.
+async function voiceAutoOn(env, chatId) {
+  if (!env.USERS || Number(chatId) <= 0) return true; // groups and storage-less keep the default
+  const user = await getUser(env, String(chatId));
+  return user?.voiceOff !== true;
+}
+async function userFavorites(env, userId) { const user = await getUser(env, String(userId)); return Array.isArray(user?.favs) ? user.favs.slice(0, 50) : []; }
+async function addFavorite(env, userId, entry) {
+  const user = await getUser(env, String(userId)) ?? {};
+  const favs = Array.isArray(user.favs) ? user.favs : [];
+  if (favs.some((f) => normalize(f.word) === normalize(entry.word))) return false;
+  favs.push({ word: String(entry.word).slice(0, 60), meaning: String(entry.meaning ?? "").slice(0, 60), at: new Date().toISOString() });
+  await saveUser(env, String(userId), { ...user, favs: favs.slice(-50) });
+  return true;
+}
+async function removeFavorite(env, userId, word) {
+  const user = await getUser(env, String(userId)) ?? {};
+  const favs = (Array.isArray(user.favs) ? user.favs : []).filter((f) => normalize(f.word) !== normalize(word));
+  await saveUser(env, String(userId), { ...user, favs });
+  return favs.length < (user.favs?.length ?? 0);
+}
+async function sendMyStats(env, chatId, userId, name) {
+  const [scores, history] = await Promise.all([
+    env.USERS ? storeCall(env, { op: "get", key: "gamify:scores" }).then((r) => r.value ?? {}).catch(() => ({})) : Promise.resolve({}),
+    getUserHistory(env, userId),
+  ]);
+  const entry = scores[String(userId)] ?? {};
+  const todayCount = searchCounts.get(`${userId}:${utcDay()}`)?.count ?? 0;
+  const favs = await userFavorites(env, userId);
+  const lines = [
+    `📊 <b>إحصاءاتك يا ${escapeHtml(name)}</b>`,
+    `🏆 نقاطك: <b>${Number(entry.points ?? 0).toLocaleString("en-US")}</b>`,
+    `🔥 أطول سلسلة: ${Number(entry.streak ?? 0)} يومًا`,
+    `🔎 عمليات بحث اليوم: ${todayCount}`,
+    `🕘 آخر ${history.length} بحث مخزّن (/recent لعرضها)`,
+    `⭐ كلماتك المفضلة: ${favs.length} (/myfav لعرضها)`,
+  ];
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML" });
+}
 
 // ---- Word of the day ----
 async function wordOfTheDayConfig(env) { return await cachedDoGet(env, "wod:config", wodCache, null); }
@@ -866,6 +995,13 @@ const USER_COMMANDS = [
   { command: "keyboard", description: "لوحة مفاتيح قبطية لكتابة الكلمات" },
   { command: "learn", description: "بوت تعلم اللغة القبطية من الصفر" },
   { command: "contact", description: "إرسال رسالة إلى مشرفي البوت" },
+  { command: "quiz", description: "اختبار سريع في المفردات" },
+  { command: "fav", description: "حفظ آخر كلمة بحثت عنها" },
+  { command: "myfav", description: "كلماتك المفضلة" },
+  { command: "mystats", description: "إحصاءاتك ونقاطك" },
+  { command: "recent", description: "آخر عمليات بحثك" },
+  { command: "voiceon", description: "تشغيل إرسال النطق تلقائيًا" },
+  { command: "voiceoff", description: "إيقاف إرسال النطق تلقائيًا" },
 ];
 const ADMIN_COMMANDS = [
   ...USER_COMMANDS,
@@ -1526,7 +1662,7 @@ async function sendOption(env, chatId, options, baseIndex, step, fallback = unde
   if (!(await sendCardEntry(env, chatId, record, text, media, more.reply_markup, cardLanguage))) {
     await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
   }
-  if (sendVoice && await featureEnabled(env, "audio")) {
+  if (sendVoice && await featureEnabled(env, "audio") && await voiceAutoOn(env, chatId)) {
     if (ctx?.waitUntil) ctx.waitUntil(sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, searchKey).catch((error) => console.error("Background voice failed", error instanceof Error ? error.message : "unknown error")));
     else await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, searchKey);
   }
@@ -2148,6 +2284,7 @@ function buildCommandsHelpText(env, userId) {
     lines.push("/optout — إحصاء خيار الخروج من البث | /purge &lt;أيام&gt; — حذف الخاملين");
     lines.push("/resetuser &lt;id&gt; — تصفير مستخدم | /pin &lt;id&gt; / /pinhere / /unpin — تثبيت");
     lines.push("/reply &lt;id&gt; &lt;نص&gt; — الرد على رسالة /contact | /exportuserscsv — تصدير المستخدمين");
+    lines.push("/alias اختصار = كلمة — اختصار بحث فوري | /motd النص — رسالة اليوم | /points &lt;id&gt; &lt;عدد&gt; — منح/خصم نقاط");
     lines.push("— Batch 4 —");
     lines.push("/feature &lt;ميزة&gt; on|off — مفاتيح الميزات (audio/keyboard/contact/...)");
     lines.push("/blacklist add|remove &lt;كلمة&gt; — كلمات محظورة | /whitelist on|off/add|remove — القائمة البيضاء");
@@ -4649,6 +4786,11 @@ async function handleUpdate(update, env, ctx) {
       }
       return;
     }
+    const quizMatch = /^qz\|(\d)$/u.exec(callback.data ?? "");
+    if (quizMatch) {
+      await handleQuizAnswer(env, callback);
+      return;
+    }
     if (callback.data === "noop") {
       await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
       return;
@@ -4814,12 +4956,16 @@ async function handleUpdate(update, env, ctx) {
   // Scheduled admin messages are delivered on the first activity after their due time (no cron needed).
   inBackground(ctx, adminExtras.processSchedules(env));
   inBackground(ctx, autoWordOfTheDay(env, message.chat.id, ctx));
-  // Batch 3: keyword auto-replies and the daily search limit apply to non-admin text searches.
+  // Batch 5: MOTD (رسالة اليوم) once per day on /start for regular users.
+  if (!isAdmin(env, userId) && (text === "/start" || text.startsWith("/start "))) inBackground(ctx, maybeSendMotd(env, message.chat.id, userId));
+  // Batch 5: search aliases — an alias redirects straight to its target search.
   if (!isAdmin(env, userId) && text && !text.startsWith("/")) {
     const replies = await (featureEnabled(env, "autoreply") ? autoReplies(env) : Promise.resolve([]));
     const normalizedText = normalize(text);
     const hit = replies.find((r) => { const t = normalize(r.trigger); return t && (normalizedText === t || normalizedText.startsWith(`${t} `)); });
     if (hit) { await registerPromise.catch(() => null); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: String(hit.reply).slice(0, 3000) }); return; }
+    const aliasTarget = (await aliasList(env))[normalizedText];
+    if (aliasTarget) { await registerPromise.catch(() => null); await sendSearch(env, message.chat.id, aliasTarget, 0, undefined, ctx); return; }
     const limit = await dailySearchLimit(env);
     if (limit) {
       const used = bumpSearchCount(userId);
@@ -5238,6 +5384,44 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     if (text === "/exportuserscsv") { await exportUsersCsv(env, message.chat.id); return; }
+    // ---- Batch 5 admin commands: aliases, MOTD, manual points ----
+    if (text === "/alias" || text.startsWith("/alias ")) {
+      const arg = text.slice("/alias".length).trim();
+      if (!arg) {
+        const all = await aliasList(env);
+        const rows = Object.entries(all).slice(0, 30).map(([trigger, target]) => `• «${escapeHtml(trigger)}» → بحث: ${escapeHtml(target)}`);
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: rows.length ? `🔀 <b>اختصارات البحث</b> (${Object.keys(all).length}):\n${rows.join("\n")}\n\nإضافة: /alias اختصار = كلمة القاموس\nحذف: /alias حذف اختصار` : "🔀 لا توجد اختصارات بحث.\nإضافة: /alias اختصار = كلمة القاموس\nحين يكتب المستخدم الاختصار يبحث له البوت عن الكلمة المقصودة فورًا.", parse_mode: "HTML" });
+        return;
+      }
+      const removeMatch = /^حذف\s+(.+)$/u.exec(arg);
+      if (removeMatch) { await setAlias(env, removeMatch[1].trim(), null); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ حُذف الاختصار." }); return; }
+      const sep = arg.includes("=") ? "=" : arg.includes("|") ? "|" : null;
+      const [trigger, ...rest] = sep ? arg.split(sep) : [];
+      const target = rest.join("=").trim();
+      if (!sep || !trigger.trim() || !target) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /alias اختصار = كلمة القاموس" }); return; }
+      await setAlias(env, trigger.trim(), target);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ حين يكتب أي مستخدم «${escapeHtml(trigger.trim())}» سينفّذ البحث عن «${escapeHtml(target)}» فورًا.`, parse_mode: "HTML" });
+      return;
+    }
+    if (text === "/motd" || text.startsWith("/motd ")) {
+      const body = text.slice("/motd".length).trim();
+      if (!body) { const current = await motdText(env); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: current ? `📢 رسالة اليوم الحالية:\n${escapeHtml(current)}\n\nتغيير: /motd النص\nحذف: /motd حذف` : "📢 لا توجد رسالة يوم مضبوطة.\n✏️ الاستخدام: /motd النص — تُرسل مرة واحدة يوميًا لكل مستخدم عند /start.", parse_mode: "HTML" }); return; }
+      if (/^حذف$/u.test(body)) { await setMotd(env, ""); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ حُذفت رسالة اليوم." }); return; }
+      await setMotd(env, body);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ حُفظت رسالة اليوم وستصل لكل مستخدم مرة واحدة عند /start:\n${escapeHtml(body)}`, parse_mode: "HTML" });
+      return;
+    }
+    if (text === "/points" || text.startsWith("/points ")) {
+      const parts = text.split(/\s+/u);
+      const target = parts[1] ?? "";
+      const amount = Number(parts[2] ?? NaN);
+      if (!/^\d+$/u.test(target) || !Number.isFinite(amount) || amount === 0) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /points <user_id> <عدد> — عدد موجب لمنح نقاط وسالب لخصمها." }); return; }
+      const newScore = await awardPoints(env, target, amount);
+      if (newScore == null) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ التخزين غير مفعّل." }); return; }
+      await logAdminAction(env, userId, "points", `${target} ${amount > 0 ? "+" : ""}${amount}`);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `🏆 رصيد المستخدم <code>${escapeHtml(target)}</code> أصبح <b>${Number(newScore).toLocaleString("en-US")}</b> نقطة.`, parse_mode: "HTML" });
+      return;
+    }
     if (text === "/reply" || text.startsWith("/reply ")) { await handleAdminReply(env, message, text); return; }
     if (text === "/card_hide" || text.startsWith("/card_hide ")) {
       await setCardVisibility(env, message.chat.id, text.slice("/card_hide".length), false);
@@ -5468,6 +5652,33 @@ async function handleUpdate(update, env, ctx) {
     const user = known ?? await getUser(env, userId);
     if (user?.awaitingContact) { await saveUser(env, userId, { ...user, awaitingContact: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء رسالة التواصل مع الإدارة." }); return; }
   }
+  // ---- Batch 5 user features: quiz, favorites, my stats, recent, voice preference ----
+  if (text === "/quiz") { await beginQuiz(env, message.chat.id); return; }
+  if (text === "/fav" || text === "/⭐") {
+    const last = lastLookup.get(String(message.chat.id));
+    if (!last?.coptic) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⭐ ابحث عن كلمة أولًا ثم اضغط /fav لحفظها في مفضلتك." }); return; }
+    const added = await addFavorite(env, userId, { word: last.coptic, meaning: last.meaning });
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: added ? `⭐ تمت إضافة «${escapeHtml(last.coptic)}» إلى مفضلتك. اعرضها بـ /myfav` : "⭐ هذه الكلمة في مفضلتك بالفعل.", parse_mode: "HTML" });
+    return;
+  }
+  if (text === "/myfav" || text.startsWith("/myfav ")) {
+    const arg = text.slice("/myfav".length).trim();
+    if (arg) { const removed = await removeFavorite(env, userId, arg); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: removed ? `🗑 حُذفت «${escapeHtml(arg.slice(0, 60))}» من المفضلة.` : "هذه الكلمة ليست في مفضلتك." }); return; }
+    const favs = await userFavorites(env, userId);
+    if (!favs.length) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "مفضلتك فارغة. ابحث عن كلمة ثم أرسل /fav لحفظها." }); return; }
+    const lines = ["⭐ <b>كلماتك المفضلة</b>", "", ...favs.map((f) => `• <b>${escapeHtml(f.word)}</b> — ${escapeHtml(f.meaning ?? "")}\n  حذف: /myfav ${escapeHtml(f.word)}`)];
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: lines.join("\n").slice(0, 3800), parse_mode: "HTML" });
+    return;
+  }
+  if (text === "/mystats") { await sendMyStats(env, message.chat.id, userId, displayName(message.from)); return; }
+  if (text === "/recent") {
+    const history = await getUserHistory(env, userId);
+    if (!history.length) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "لا توجد عمليات بحث محفوظة بعد." }); return; }
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: ["🕘 <b>آخر عمليات بحثك</b>", "", ...history.slice(0, 15).map((h) => `• ${escapeHtml(h.q)}`)].join("\n"), parse_mode: "HTML" });
+    return;
+  }
+  if (text === "/voiceoff") { await saveUser(env, userId, { ...(known ?? await getUser(env, userId)) ?? {}, voiceOff: true }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🔇 لن يُرسل النطق تلقائيًا مع نتائج البحث بعد الآن. للتشغيل: /voiceon" }); return; }
+  if (text === "/voiceon") { const user = (known ?? await getUser(env, userId)) ?? {}; await saveUser(env, userId, { ...user, voiceOff: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🔊 سيعود إرسال النطق تلقائيًا مع نتائج البحث." }); return; }
   if (text === "/suggest" || text.startsWith("/suggest ")) {
     const suggestion = text.slice("/suggest".length).trim();
     if (!suggestion) {
