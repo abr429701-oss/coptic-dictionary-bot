@@ -229,6 +229,63 @@ async function sendMyStats(env, chatId, userId, name) {
   await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML" });
 }
 
+// ---- Batch 6: group rules, warnings, temp bans, hidden cards, word info, search count ----
+const RULES_KEY = "group:rules";
+const rulesCache = { value: null, at: 0 };
+async function rulesText(env) { const v = await cachedDoGet(env, RULES_KEY, rulesCache, ""); return typeof v === "string" ? v : ""; }
+async function setRulesText(env, text) { if (env.USERS) await storeCall(env, { op: "put", key: RULES_KEY, value: String(text ?? "").slice(0, 1500) }); invalidateCache(rulesCache); }
+async function userWarns(env, userId) { const user = await getUser(env, String(userId)); return Array.isArray(user?.warns) ? user.warns : []; }
+async function addWarn(env, userId, reason) {
+  const user = (await getUser(env, String(userId))) ?? {};
+  const warns = Array.isArray(user.warns) ? user.warns : [];
+  warns.push({ at: new Date().toISOString(), reason: String(reason ?? "").slice(0, 120) });
+  await saveUser(env, String(userId), { ...user, warns });
+  return warns.length;
+}
+async function resetWarns(env, userId) { const user = (await getUser(env, String(userId))) ?? {}; await saveUser(env, String(userId), { ...user, warns: [] }); }
+const WARN_AUTOban = 3;
+// Temp bans: an expiry timestamp inside the ban entry; isBanned clears expired bans lazily.
+async function tempBanUser(env, userId, hours, reason = "") {
+  await banUser(env, userId, reason || `حظر مؤقت ${hours} ساعة`);
+  const set = await bannedSet(env);
+  const entry = set[String(userId)];
+  if (entry) {
+    entry.until = new Date(Date.now() + hours * 3600000).toISOString();
+    if (env.USERS) await storeCall(env, { op: "put", key: "bans:list", value: set });
+    invalidateCache(bansCache);
+  }
+}
+async function wordSearchCount(env, word) {
+  const key = normalize(String(word)).slice(0, 80);
+  const persisted = env.USERS ? ((await storeCall(env, { op: "get", key: "analytics:snapshot" })).value ?? {}) : {};
+  const total = new Map(persisted.topWords ?? []).get(key) ?? 0;
+  return Number(total) + (analyticsState.topWords.get(key) ?? 0);
+}
+async function sendWordInfo(env, chatId, query) {
+  const matches = await findMatches(query, env);
+  if (!matches.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ لم أجد هذه الكلمة في القاموس." }); return; }
+  const idx = matches[0];
+  const record = records[idx];
+  const voiceIds = env.USERS ? new Set((await storeCall(env, { op: "voiceIds" })).ids ?? []) : new Set();
+  const fields = Object.entries(record).filter(([k, v]) => k !== "_deleted" && String(v ?? "").trim()).slice(0, 15)
+    .map(([k, v]) => `• <b>${escapeHtml(k)}:</b> ${escapeHtml(String(v).slice(0, 120))}`);
+  await telegram(env, "sendMessage", {
+    chat_id: chatId,
+    text: [`🔍 <b>معلومات الكلمة</b> (صف ${idx + 2})`, `🔊 صوت مسجل: ${voiceIds.has(Number(record.id)) ? "نعم ✅" : "لا ❌"}`, "", ...fields].join("\n").slice(0, 3800),
+    parse_mode: "HTML",
+  });
+}
+async function sendHiddenCards(env, chatId) {
+  const entries = env.USERS ? ((await storeCall(env, { op: "listprefix", key: "card-disabled:" })).entries ?? []) : [];
+  if (!entries.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ لا توجد بطاقات مخفية." }); return; }
+  const lines = entries.slice(0, 40).map(({ key }) => {
+    const id = Number(key.slice("card-disabled:".length));
+    const record = records.find((r) => r.id === id);
+    return `• ${escapeHtml(String(record?.coptic ?? `id:${id}`).slice(0, 40))} — إظهار: /card_show ${escapeHtml(String(record?.coptic ?? id))}`;
+  });
+  await telegram(env, "sendMessage", { chat_id: chatId, text: `🖼 <b>البطاقات المخفية</b> (${entries.length}):\n${lines.join("\n")}\n\nلإظهار الكل: /unhideall`, parse_mode: "HTML" });
+}
+
 // ---- Word of the day ----
 async function wordOfTheDayConfig(env) { return await cachedDoGet(env, "wod:config", wodCache, null); }
 async function setWordOfTheDay(env, value) {
@@ -2163,6 +2220,15 @@ export class UserStore {
       }
       return Response.json({ purged, days });
     }
+    if (op === "listprefix") {
+      const page = await storage.list({ prefix: String(key ?? ""), limit: Math.min(100, Number(limit) || 50) });
+      return Response.json({ entries: [...page].map(([k, v]) => ({ key: k, value: v })) });
+    }
+    if (op === "purgeprefix") {
+      const page = await storage.list({ prefix: String(key ?? "") });
+      for (const k of page.keys()) await storage.delete(k);
+      return Response.json({ purged: page.size });
+    }
     if (op === "kbstep") {
       // Read-modify-write inside the object so rapid taps never overwrite each other.
       const user = (await storage.get(userKey)) ?? {};
@@ -2285,6 +2351,8 @@ function buildCommandsHelpText(env, userId) {
     lines.push("/resetuser &lt;id&gt; — تصفير مستخدم | /pin &lt;id&gt; / /pinhere / /unpin — تثبيت");
     lines.push("/reply &lt;id&gt; &lt;نص&gt; — الرد على رسالة /contact | /exportuserscsv — تصدير المستخدمين");
     lines.push("/alias اختصار = كلمة — اختصار بحث فوري | /motd النص — رسالة اليوم | /points &lt;id&gt; &lt;عدد&gt; — منح/خصم نقاط");
+    lines.push("/rules — قواعد البوت (كأدمن: /rules نص أو /rules حذف) | /warn &lt;id&gt; — تحذير (3 = حظر 24س) | /tempban &lt;id&gt; &lt;ساعات&gt; — حظر مؤقت");
+    lines.push("/wordinfo &lt;كلمة&gt; — كل حقول الكلمة | /searchcount &lt;كلمة&gt; — عدد مرات بحثها | /hiddencards — البطاقات المخفية | /unhideall — إظهار الكل");
     lines.push("— Batch 4 —");
     lines.push("/feature &lt;ميزة&gt; on|off — مفاتيح الميزات (audio/keyboard/contact/...)");
     lines.push("/blacklist add|remove &lt;كلمة&gt; — كلمات محظورة | /whitelist on|off/add|remove — القائمة البيضاء");
@@ -3191,7 +3259,11 @@ async function bannedSet(env) {
   return obj && typeof obj === "object" ? obj : {};
 }
 async function isBanned(env, userId) {
-  return Boolean((await bannedSet(env))[String(userId)]);
+  const entry = (await bannedSet(env))[String(userId)];
+  if (!entry) return false;
+  // Temp bans expire on their own: first check after expiry lifts the ban.
+  if (entry.until && new Date(entry.until).getTime() < Date.now()) { await unbanUser(env, userId); return false; }
+  return true;
 }
 async function banUser(env, userId, reason = "") {
   const set = await bannedSet(env);
@@ -5383,7 +5455,78 @@ async function handleUpdate(update, env, ctx) {
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم حفظ ملاحظتك. اعرضها بـ /note" });
       return;
     }
-    if (text === "/exportuserscsv") { await exportUsersCsv(env, message.chat.id); return; }
+    if (text === "/rules" || text.startsWith("/rules ")) {
+      const body = text.slice("/rules".length).trim();
+      if (!body) {
+        const current = await rulesText(env);
+        if (!current) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "📜 لا توجد قواعد مضبوطة بعد.\nكأدمن: /rules نص القواعد — وحينها يستطيع أي عضو عرضها بـ /rules" }); return; }
+      }
+      if (!isAdmin(env, userId)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `📜 <b>قواعد البوت والمجموعات</b>\n\n${escapeHtml((await rulesText(env)) || "لم تُضبط القواعد بعد.")}`, parse_mode: "HTML" }); return; }
+      if (/^حذف$/u.test(body)) { await setRulesText(env, ""); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ حُذفت نص القواعد." }); return; }
+      await setRulesText(env, body);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ حُفظت القواعد. أي عضو يراها بـ /rules:\n${escapeHtml(body)}`, parse_mode: "HTML" });
+      return;
+    }
+    if (text === "/warn" || text.startsWith("/warn ")) {
+      const parts = text.split(/\s+/u);
+      const target = parts[1] ?? "";
+      const reason = text.slice("/warn".length + target.length + 1).trim();
+      if (!/^\d+$/u.test(target)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /warn <user_id> [سبب] — عند التحذير الثالث يُحظر المستخدم تلقائيًا." }); return; }
+      const count = await addWarn(env, target, reason);
+      await logAdminAction(env, userId, "warn", `${target} #${count}`);
+      if (count >= WARN_AUTOban) {
+        await tempBanUser(env, target, 24, "ثلاثة تحذيرات");
+        await resetWarns(env, target);
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `🚫 وصل المستخدم <code>${escapeHtml(target)}</code> إلى ${WARN_AUTOban} تحذيرات، فحُظر تلقائيًا 24 ساعة وتصفيرت تحذيراته.`, parse_mode: "HTML" });
+        return;
+      }
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `⚠️ تحذير ${count}/${WARN_AUTOban} للمستخدم <code>${escapeHtml(target)}</code>${reason ? ` — ${escapeHtml(reason.slice(0, 100))}` : ""}.`, parse_mode: "HTML" });
+      return;
+    }
+    if (text === "/warns" || text.startsWith("/warns ")) {
+      const target = text.slice("/warns".length).trim();
+      if (!/^\d+$/u.test(target)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /warns <user_id> — عرض تحذيرات مستخدم. التصفير: /resetwarns <id>" }); return; }
+      const warns = await userWarns(env, target);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: warns.length ? `⚠️ تحذيرات المستخدم <code>${escapeHtml(target)}</code> (${warns.length}):\n${warns.map((w, i) => `${i + 1}. ${escapeHtml(w.reason || "بدون سبب")} — ${w.at.slice(0, 10)}`).join("\n")}` : `✅ المستخدم <code>${escapeHtml(target)}</code> بلا تحذيرات.`, parse_mode: "HTML" });
+      return;
+    }
+    if (text === "/resetwarns" || text.startsWith("/resetwarns ")) {
+      const target = text.slice("/resetwarns".length).trim();
+      if (!/^\d+$/u.test(target)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /resetwarns <user_id>" }); return; }
+      await resetWarns(env, target);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم تصفير تحذيرات المستخدم <code>${escapeHtml(target)}</code>.`, parse_mode: "HTML" });
+      return;
+    }
+    if (text === "/tempban" || text.startsWith("/tempban ")) {
+      const parts = text.split(/\s+/u);
+      const target = parts[1] ?? "";
+      const hours = Number(parts[2] ?? NaN);
+      if (!/^\d+$/u.test(target) || !Number.isFinite(hours) || hours <= 0) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /tempban <user_id> <ساعات> [سبب] — يُرفع الحظر تلقائيًا بعد انتهاء المدة." }); return; }
+      const reason = parts.slice(3).join(" ");
+      await tempBanUser(env, target, hours, reason);
+      await logAdminAction(env, userId, "tempban", `${target} ${hours}h`);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `⏳ حُظر المستخدم <code>${escapeHtml(target)}</code> مؤقتًا لمدة ${hours} ساعة (ينتهي تلقائيًا).`, parse_mode: "HTML" });
+      return;
+    }
+    if (text === "/wordinfo" || text.startsWith("/wordinfo ")) {
+      const word = text.slice("/wordinfo".length).trim();
+      if (!word) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /wordinfo <كلمة> — كل الحقول الخام للكلمة ورقم صفها وحالة الصوت." }); return; }
+      await sendWordInfo(env, message.chat.id, word);
+      return;
+    }
+    if (text === "/searchcount" || text.startsWith("/searchcount ")) {
+      const word = text.slice("/searchcount".length).trim();
+      if (!word) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /searchcount <كلمة> — كم مرة بحثها المستخدمون." }); return; }
+      const count = await wordSearchCount(env, word);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `🔎 كلمة «${escapeHtml(word.slice(0, 60))}» بحثت <b>${Number(count).toLocaleString("en-US")}</b> مرة.`, parse_mode: "HTML" });
+      return;
+    }
+    if (text === "/hiddencards") { await sendHiddenCards(env, message.chat.id); return; }
+    if (text === "/unhideall") {
+      const result = await storeCall(env, { op: "purgeprefix", key: "card-disabled:" });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ أُعيد إظهار ${Number(result?.purged ?? 0).toLocaleString("en-US")} بطاقة مخفية.` });
+      return;
+    }
     // ---- Batch 5 admin commands: aliases, MOTD, manual points ----
     if (text === "/alias" || text.startsWith("/alias ")) {
       const arg = text.slice("/alias".length).trim();
