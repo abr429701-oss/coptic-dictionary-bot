@@ -3,6 +3,7 @@ import { translateFieldValue } from "./field-translations.js";
 import cardManifest from "../data/cards.json" with { type: "json" };
 import welcomeImageBase64 from "./welcome-image.js";
 import { createAdminExtras } from "./admin-extra.js";
+import { createAdminExtras2 } from "./admin-extra2.js";
 
 const BOT_TITLE = "📖 القاموس القبطي البحيري";
 const PAGE_SIZE = 1;
@@ -1106,6 +1107,27 @@ const ADMIN_COMMANDS = [
   { command: "limits", description: "الحدود والإعدادات" },
   { command: "cacheinfo", description: "حالة الكاش" },
   { command: "newhelp", description: "أوامر الأدمن الإضافية" },
+  { command: "selfcheck", description: "فحص ذاتي شامل" },
+  { command: "statuspage", description: "نص حالة جاهز للنشر" },
+  { command: "sheetdiff", description: "فرق التخزين والشيت" },
+  { command: "syncwatch", description: "مراقبة المزامنة التلقائية" },
+  { command: "digest", description: "الملخص الإداري اليومي" },
+  { command: "announce", description: "إعلان بمعاينة" },
+  { command: "backupauto", description: "نسخة احتياطية يومية" },
+  { command: "maintplan", description: "صيانة مجدولة" },
+  { command: "exportaudit", description: "تصدير سجل الإجراءات" },
+  { command: "exporterrors", description: "تصدير سجل الأخطاء" },
+  { command: "exportmisses", description: "تصدير الكلمات المفقودة" },
+  { command: "exportbans", description: "تصدير المحظورين" },
+  { command: "trace", description: "تتبّع مستخدم" },
+  { command: "usertimeline", description: "خط زمني لمستخدم" },
+  { command: "adminscore", description: "أداء فريق الإدارة" },
+  { command: "wordaudit", description: "تدقيق كلمة" },
+  { command: "gapfill", description: "تعبئة حقول ناقصة" },
+  { command: "searchstats", description: "إحصاءات البحث" },
+  { command: "livewords", description: "الأكثر بحثًا الآن" },
+  { command: "voicecoverage", description: "تغطية الأصوات" },
+  { command: "a2help", description: "أوامر الحزمة الثانية" },
 ];
 const commandMenuReady = new Set();
 
@@ -4830,6 +4852,10 @@ async function handleUpdate(update, env, ctx) {
       await handleBroadcastCallback(env, callback);
       return;
     }
+    if (String(callback.data ?? "").startsWith("a2|")) {
+      await adminExtras2.handleCallback({ env, callback });
+      return;
+    }
     if (String(callback.data ?? "").startsWith("ad|")) {
       await handleAdminDashboardCallback(env, callback, ctx);
       return;
@@ -5007,7 +5033,7 @@ async function handleUpdate(update, env, ctx) {
     const awaitingName = regUser?.awaitingName === true || regUser?.awaitingContact === true;
     const isSearchAttempt = (text && !text.startsWith("/") && !awaitingName) || Boolean(message.voice || message.audio);
     if (isSearchAttempt) {
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: maintMsg || "🔧 بوت القاموس القبطي الناطق تحت الصيانة حالياً نظراً للاضافة الكبيرة القادمة قريباً، وسيتم تنبيهك عند الاتاحة الكاملة، شكرًا لتفهمك." });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: maintMsg || "🔧 البوت حاليًا تحت الصيانة نظراً للاضافة الكبيرة القادمة، وسيتم تنبيهك عند الاتاحة الكاملة، شكرًا لتفهمك." });
       return;
     }
     // commands (/start, /contact, ...) and the registration name-entry proceed normally.
@@ -5027,6 +5053,8 @@ async function handleUpdate(update, env, ctx) {
   inBackground(ctx, maybeAlertUsage(env));
   // Scheduled admin messages are delivered on the first activity after their due time (no cron needed).
   inBackground(ctx, adminExtras.processSchedules(env));
+  // Auto jobs: scheduled maintenance, daily digest, auto backup, sync watcher (one check per minute).
+  inBackground(ctx, adminExtras2.tick(env));
   inBackground(ctx, autoWordOfTheDay(env, message.chat.id, ctx));
   // Batch 5: MOTD (رسالة اليوم) once per day on /start for regular users.
   if (!isAdmin(env, userId) && (text === "/start" || text.startsWith("/start "))) inBackground(ctx, maybeSendMotd(env, message.chat.id, userId));
@@ -5071,6 +5099,7 @@ async function handleUpdate(update, env, ctx) {
     const admin = await getUser(env, userId);
     // Extra admin pack (src/admin-extra.js). Unknown commands fall through to the handlers below.
     if (await adminExtras.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return;
+    if (await adminExtras2.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return;
     if (text === "/cancel" && admin?.bc) {
       await saveUser(env, userId, { ...admin, bc: undefined });
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "تم إلغاء الإرسال الجماعي." });
@@ -5922,6 +5951,31 @@ const adminExtras = createAdminExtras({
   cacheInfo,
   botVersion: BOT_VERSION,
   adminStatsOp: () => (activeEnv ? storeCall(activeEnv, { op: "adminStats" }).catch(() => ({})) : Promise.resolve({})),
+});
+
+const adminExtras2 = createAdminExtras2({
+  telegram,
+  escapeHtml,
+  storeCall,
+  getUser,
+  bannedSet,
+  readAnalyticsReport,
+  readErrorLog,
+  readMisses,
+  flushMisses,
+  sendTextFile,
+  logAdminAction,
+  adminIds,
+  driveConfig,
+  callAppsScript,
+  records,
+  formatUptime,
+  getUserHistory,
+  maintenanceOn,
+  setMaintenance,
+  customMaintenanceMessage,
+  recentSearches,
+  botVersion: BOT_VERSION,
 });
 
 export default {
