@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdir, readFile, writeFile, rm, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -168,6 +168,21 @@ for (const record of records) {
   if (entry?.fileName) audioIndex[record.id] = entry.fileName;
 }
 await writeFile(path.join(outDir, "audio-index.json"), `${JSON.stringify(audioIndex, null, 2)}\n`);
+
+// Cleanup: delete orphaned audio files (old versions no longer referenced by any word id).
+// Each word id has exactly ONE current fileName in audioIndex; any other .ogg is stale.
+const currentFiles = new Set(Object.values(audioIndex));
+const allFiles = await readdir(outDir);
+let deleted = 0;
+for (const file of allFiles) {
+  if (!file.endsWith(".ogg")) continue;
+  if (!currentFiles.has(file)) {
+    await rm(path.join(outDir, file), { force: true });
+    deleted += 1;
+  }
+}
+if (deleted) console.log(`cleaned up ${deleted} stale audio file(s) (one voice per word id)`);
+
 if (fatal) throw fatal;
 if (failed && done === 0) throw new Error(`All IPA Reader jobs failed (${failed})`);
 console.log(`done: ${done} generated, ${failed} failed`);
