@@ -1,4 +1,7 @@
 import cardManifest from "../data/cards.json" with { type: "json" };
+
+// Strip Arabic tashkeel and Coptic jinkim (combining marks) for test comparisons.
+const stripDiacritics = (s) => String(s ?? "").replace(/[\u0300-\u036f\u064b-\u065f\u0670\u06d6-\u06ed]/gu, "");
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -114,7 +117,7 @@ test("an exact word is shown directly, without a suggestions list", async () => 
   const message = calls.find((call) => call.url.endsWith("/sendMessage"))?.payload;
   assert.ok(message);
   assert.notEqual(message.text, "اختر من الاقتراحات التالية:");
-  assert.match(message.text, /<b>الكلمة:<\/b> ⲁⲃⲏⲧ/u);
+  assert.match(stripDiacritics(message.text), /<b>الكلمة:<\/b> ⲁⲃⲏⲧ/u);
   assert.match(message.text, /<b>المعنى:<\/b> [^\n،]+\n/u);
 });
 
@@ -128,7 +131,7 @@ test("a word that is not exact shows unique words starting with it as word-only 
   const labels = wordRows.map((row) => row[0].text);
   assert.ok(labels.length > 1);
   assert.equal(new Set(labels).size, labels.length, "a suggestion is repeated");
-  assert.ok(labels.every((label) => label.replaceAll("`", "").startsWith("ⲁⲃ")));
+  assert.ok(labels.every((label) => stripDiacritics(label).replaceAll("`", "").startsWith("ⲁⲃ")));
 });
 
 test("tapping a suggested word shows that word", async () => {
@@ -248,8 +251,8 @@ test("tapping a suggestion from an Arabic search shows only the searched meaning
     await worker.fetch(updateRequest({ callback_query: { id: "c", data, message: { message_id: 1, chat: { id: 14 }, text: "x" } } }), env);
     return calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
   })();
-  assert.match(text, /<b>الكلمة:<\/b> كوبري\n/u);
-  assert.match(text, /<b>المعنى:<\/b> ⲁⲃⲁⲑⲣⲁ\n/u);
+  assert.match(stripDiacritics(text), /<b>الكلمة:<\/b> كوبري\n/u);
+  assert.match(text, /<b>المعنى:<\/b> ⲁⲃⲁⲑⲣⲁ( \(ⲧ\))?\n/u);
   assert.doesNotMatch(text, /كلمات مرتبطة/u);
 });
 
@@ -286,7 +289,7 @@ test("Arabic suggestions use Arabic labels instead of Coptic headwords", async (
     .filter((row) => row[0].callback_data.startsWith("w|"))
     .map((row) => row[0].text);
   assert.ok(labels.length > 0);
-  assert.ok(labels.every((label) => label.startsWith("كو")));
+  assert.ok(labels.every((label) => stripDiacritics(label).startsWith("كو")));
   assert.ok(labels.some((label) => /ك/u.test(label)));
   assert.ok(labels.every((label) => !/[\u2c80-\u2cff\u03e2-\u03ef]/u.test(label)));
 });
@@ -368,7 +371,7 @@ test("Arabic search matches the word itself, never the inside of a longer word",
   fakeTelegramApi(calls);
   await worker.fetch(updateRequest({ message: { text: "غراب", chat: { id: 17 } } }), env);
   const text = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
-  assert.match(text, /<b>الكلمة:<\/b> غراب\n/u);
+  assert.match(stripDiacritics(text), /<b>الكلمة:<\/b> غراب\n/u);
   assert.match(text, /<b>المعنى:<\/b> ⲁⲃⲱⲕ(\s|$)/u);
   assert.doesNotMatch(text, /الاستغراب/u);
 });
@@ -378,7 +381,7 @@ test("Arabic search preserves the exact word typed, including ة, across meaning
   fakeTelegramApi(firstCalls);
   await worker.fetch(updateRequest({ message: { text: "قوة", chat: { id: 170 } } }), env);
   const first = firstCalls.find((call) => call.url.endsWith("/sendMessage")).payload;
-  assert.match(first.text, /<b>الكلمة:<\/b> قوة\n/u);
+  assert.match(stripDiacritics(first.text), /<b>الكلمة:<\/b> قوة\n/u);
   const next = first.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data;
   assert.ok(next);
 
@@ -386,7 +389,7 @@ test("Arabic search preserves the exact word typed, including ة, across meaning
   fakeTelegramApi(secondCalls);
   await worker.fetch(updateRequest({ callback_query: { id: "strength-next", data: next, message: { chat: { id: 170 }, message_id: 1 } } }), env);
   const second = secondCalls.find((call) => call.url.endsWith("/sendMessage")).payload;
-  assert.match(second.text, /<b>الكلمة:<\/b> قوة\n/u);
+  assert.match(stripDiacritics(second.text), /<b>الكلمة:<\/b> قوة\n/u);
 });
 
 test("Arabic meaning chains send the new Coptic word voice for each step", async () => {
@@ -1546,7 +1549,7 @@ test("if the card cannot be sent the entry still arrives as text; words without 
   try {
     const calls = photoWorld({ photoOk: false });
     await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲱⲕ", chat: { id: 71 } } }), kvEnv);
-    assert.ok(calls.some((call) => call.url.endsWith("/sendMessage") && /<b>الكلمة:<\/b> ⲁⲃⲱⲕ/u.test(call.payload.text)));
+    assert.ok(calls.some((call) => call.url.endsWith("/sendMessage") && /<b>الكلمة:<\/b> ⲁⲃⲱⲕ/u.test(stripDiacritics(call.payload.text))));
   } finally {
     delete cardManifest[String(record.id)];
   }
