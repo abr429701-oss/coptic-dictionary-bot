@@ -815,18 +815,18 @@ function formatRecord(record, partIndex = -1, searchedWord = "") {
   const isCopticSearch = searchedWord === "" || scriptKind(normalize(searchedWord)) === "cop";
   const language = isCopticSearch ? "ar" : uiLanguage(searchedWord);
   const labels = UI_TEXT[language] ?? UI_TEXT.ar;
-  // For Coptic searches show the dictionary headword with its original diacritics
-  // (jinkim), not the normalized search query (normalize strips all combining marks).
-  // For other searches keep showing the user's own query as the headword.
+  // Headword shown to the user:
+  //   - Coptic search -> the dictionary Coptic spelling (keeps jinkim/diacritics)
+  //   - Arabic search -> the matching Arabic meaning FROM THE SHEET (keeps full tashkeel),
+  //     not the user's bare typed query
+  //   - other languages -> the user's typed query
   const displayedWord = isCopticSearch
     ? String(record.coptic ?? "").trim() || searchedWord
-    : searchedWord || record.coptic;
+    : (language === "ar" ? arabicPart : searchedWord) || record.coptic;
   const fields = !isCopticSearch
     ? [
         [labels.word, displayedWord],
         [labels.meaning, record.coptic],
-        // Show the Arabic meaning with full tashkeel even for non-Coptic searches.
-        [UI_TEXT.ar.meaning, arabicPart],
         [labels.kind, localizedValue(record.kind, language)],
         [labels.origin, localizedValue(record.origin, language)],
       ]
@@ -1239,7 +1239,7 @@ function voiceCaption(record, partIndex = -1, searchedWord = "") {
   const labels = UI_TEXT[language] ?? UI_TEXT.ar;
   const values = isCopticSearch
     ? [[UI_TEXT.ar.meaning, meaning], [UI_TEXT.ar.word, record?.coptic], [UI_TEXT.ar.origin, record?.origin], [UI_TEXT.ar.kind, record?.kind]]
-    : [[labels.word, searchedWord || record?.coptic], [UI_TEXT.ar.meaning, meaning], [labels.origin, localizedValue(record?.origin, language)], [labels.kind, localizedValue(record?.kind, language)]];
+    : [[labels.word, searchedWord || record?.coptic], [labels.meaning, record?.coptic], [labels.origin, localizedValue(record?.origin, language)], [labels.kind, localizedValue(record?.kind, language)]];
   return values.map(([label, value]) => `${label}: ${String(value ?? "").replace(/\s+/gu, " ").trim().replace(/\.+$/u, "")}`)
     .map((value) => String(value ?? "").replace(/\s+/gu, " ").trim().replace(/\.+$/u, ""))
     .filter(Boolean)
