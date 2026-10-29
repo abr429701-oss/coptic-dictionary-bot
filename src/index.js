@@ -938,8 +938,15 @@ async function prefixWords(env, kind, key, limit = 5000) {
 }
 
 // Every meaning to show for an exact word, once each, in order.
+// Sheet headwords often carry a gender marker, e.g. "ⲁⲃⲱⲕ (ⲡ)". A user typing the bare word
+// must still land on that entry, so the exact lookup also accepts the headword without it.
+function bareHeadword(value) {
+  return normalize(value).replace(/\s*\([^)]*\)/gu, " ").replace(/\s+/gu, " ").trim();
+}
+
 async function exactChain(env, kind, key) {
-  const entry = (await wordEntries(env, kind, key)).find((item) => item.key === key);
+  const entries = await wordEntries(env, kind, key);
+  const entry = entries.find((item) => item.key === key) ?? entries.find((item) => item.key !== key && bareHeadword(item.key) === key);
   if (!entry) return [];
   const options = [];
   const seen = new Set();
