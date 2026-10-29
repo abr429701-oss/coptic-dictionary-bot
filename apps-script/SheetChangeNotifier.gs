@@ -7,6 +7,9 @@
  *   2. Run setupSheetChangeTriggers() once from the editor and accept the permissions.
  *   3. Optional check: run testSheetChangeNotification() - a "Deploy Coptic Dictionary Bot" run should appear in GitHub Actions.
  *
+ * MAINTENANCE MODE: Use the "Coptic Bot" menu in the spreadsheet (or run enableMaintenanceMode / disableMaintenanceMode)
+ * to pause change detection while doing bulk edits. When disabled, ONE sync is triggered with the final state.
+ *
  * Links in column L repair themselves: deleting a row in "upload", or clearing a link in column L, rebuilds the
  * column from the human recordings plus the GitHub links stored in the hidden "github_audio" tab (about a minute).
  *
@@ -30,10 +33,75 @@ const NOTIFY = {
   LINKS_QUIET_SECONDS: 15, // rebuild column L this long after the last edit of a link or of the upload tab
   FINGERPRINT_KEY: "DICT_FINGERPRINT",
   STRUCTURE_TYPES: ["INSERT_ROW", "REMOVE_ROW", "INSERT_COLUMN", "REMOVE_COLUMN", "OTHER"],
+  MAINTENANCE_KEY: "MAINTENANCE_MODE", // "ON" = pause all change detection
 };
+
+// ---------- MAINTENANCE MODE ----------
+function isMaintenanceMode_() {
+  return PropertiesService.getScriptProperties().getProperty(NOTIFY.MAINTENANCE_KEY) === "ON";
+}
+
+function enableMaintenanceMode() {
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty(NOTIFY.MAINTENANCE_KEY, "ON");
+  // Clear any pending dirty marks so edits done before enabling don't fire later
+  props.deleteProperty(NOTIFY.FIRST_KEY);
+  props.deleteProperty(NOTIFY.LAST_KEY);
+  props.deleteProperty(NOTIFY.STRUCT_KEY);
+  props.deleteProperty(NOTIFY.LINKS_KEY);
+  console.log("MAINTENANCE MODE ON — all sheet change detection is paused.");
+  try {
+    SpreadsheetApp.getUi().alert("وضع الصيانة مفعّل ✅\n\nالمزامنة مع جيت هاب متوقفة.\nعدّل الشيت بحرية، ثم اضغط إيقاف وضع الصيانة لما تخلص.");
+  } catch (e) {}
+}
+
+function disableMaintenanceMode() {
+  const props = PropertiesService.getScriptProperties();
+  props.deleteProperty(NOTIFY.MAINTENANCE_KEY);
+  // Refresh fingerprint to the current state so we don't double-trigger
+  try {
+    props.setProperty(NOTIFY.FINGERPRINT_KEY, dictionaryFingerprint_());
+  } catch (e) {
+    console.error("Could not refresh fingerprint: " + e);
+  }
+  // Send exactly ONE sync notification to capture the final state
+  if (sendSheetChanged_()) {
+    console.log("MAINTENANCE MODE OFF — sync triggered.");
+    try {
+      SpreadsheetApp.getUi().alert("وضع الصيانة متوقف ✅\n\nتم إرسال مزامنة واحدة لجيت هاب بالحالة النهائية.");
+    } catch (e) {}
+  } else {
+    console.log("MAINTENANCE MODE OFF — sync failed (check GITHUB_DISPATCH_TOKEN).");
+    try {
+      SpreadsheetApp.getUi().alert("تنبيه: فشل إرسال المزامنة. تحقق من GITHUB_DISPATCH_TOKEN في Script Properties.");
+    } catch (e) {}
+  }
+}
+
+function showMaintenanceStatus() {
+  const ui = SpreadsheetApp.getUi();
+  const status = isMaintenanceMode_()
+    ? "🔴 وضع الصيانة مفعّل — المزامنة متوقفة"
+    : "🟢 المزامنة تعمل بشكل طبيعي";
+  ui.alert("حالة المزامنة", status, ui.ButtonSet.OK);
+}
+
+// Custom menu in the spreadsheet (appears automatically on open)
+// NOTE: If you already have an onOpen() in Code.gs, merge these menu items into it.
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu("Coptic Bot ⚙️")
+    .addItem("🔴 تفعيل وضع الصيانة (إيقاف المزامنة)", "enableMaintenanceMode")
+    .addItem("🟢 إيقاف وضع الصيانة (مزامنة واحدة)", "disableMaintenanceMode")
+    .addItem("🔄 مزامنة يدوية الآن", "testSheetChangeNotification")
+    .addItem("ℹ️ حالة المزامنة", "showMaintenanceStatus")
+    .addToUi();
+}
+// ---------- END MAINTENANCE MODE ----------
 
 // Installable onEdit trigger: a cell was typed, pasted, cleared or filled.
 function notifyDictionaryEdit(e) {
+  if (isMaintenanceMode_()) return; // maintenance mode: ignore ALL edits
   const range = e && e.range;
   if (!range) return;
   const tab = range.getSheet().getName();
@@ -55,6 +123,7 @@ function markLinksDirty_() {
 
 // Installable onChange trigger: rows or columns were inserted or deleted (in any tab - checked later).
 function notifyDictionaryStructureChange(e) {
+  if (isMaintenanceMode_()) return; // maintenance mode: ignore structure changes
   if (!e || NOTIFY.STRUCTURE_TYPES.indexOf(e.changeType) === -1) return;
   PropertiesService.getScriptProperties().setProperty(NOTIFY.STRUCT_KEY, "1");
   markLinksDirty_(); // a deleted row in "upload" must not leave its link in column L
@@ -86,8 +155,8 @@ function dictionaryFingerprint_() {
 
 // Time-driven trigger (every minute).
 function flushDictionaryChanges() {
+  if (isMaintenanceMode_()) return; // maintenance mode: don't flush anything
   const props = PropertiesService.getScriptProperties();
-
   const linksAt = Number(props.getProperty(NOTIFY.LINKS_KEY));
   if (linksAt && Date.now() - linksAt >= NOTIFY.LINKS_QUIET_SECONDS * 1000) {
     props.deleteProperty(NOTIFY.LINKS_KEY);
@@ -98,7 +167,6 @@ function flushDictionaryChanges() {
       console.error("Rebuilding the audio links failed: " + error);
     }
   }
-
   if (props.getProperty(NOTIFY.STRUCT_KEY)) {
     props.deleteProperty(NOTIFY.STRUCT_KEY);
     try {
@@ -112,14 +180,12 @@ function flushDictionaryChanges() {
       console.error("Fingerprint check failed: " + error);
     }
   }
-
   const first = Number(props.getProperty(NOTIFY.FIRST_KEY));
   const last = Number(props.getProperty(NOTIFY.LAST_KEY));
   if (!first || !last) return;
   const now = Date.now();
   if (now - last < NOTIFY.QUIET_SECONDS * 1000 && now - first < NOTIFY.MAX_WAIT_SECONDS * 1000) return;
   if (!sendSheetChanged_()) return; // the dirty mark stays, so the next minute tries again
-
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) return;
   try {
