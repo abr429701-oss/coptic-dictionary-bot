@@ -1320,40 +1320,81 @@ function prepareWordVoice(env, record, media = null, { skipRecorded = false } = 
   })();
 }
 
-async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1, searchedWord = "") {
+// Text + voice can travel as ONE Telegram message (voice with the result as its caption),
+// which is the only way both arrive at literally the same instant. VOICE_CAPTION=off
+// restores the older two-message behaviour.
+const voiceCaptionMode = (env) => String(env?.VOICE_CAPTION ?? "on") !== "off";
+
+// Telegram caps captions at 1024 characters; anything longer is sent as its own message.
+const CAPTION_MAX = 1024;
+
+// Sends one prepared voice. `caption` is optional: when present the text and the voice travel
+// as ONE Telegram message, so they appear at the same instant instead of as two separate updates.
+async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1, searchedWord = "", caption = "", options = {}) {
+  const chatText = String(caption ?? "").slice(0, CAPTION_MAX);
   let voice = await prepared;
-  if (!voice) return;
+  if (!voice) {
+    // No audio at all for this word: never drop the answer, send the text so the user
+    // knows the search worked and the voice is simply missing.
+    if (options.textFallback) await telegram(env, "sendMessage", { chat_id: chatId, text: String(options.textFallback).slice(0, MAX_MESSAGE_LENGTH), parse_mode: "HTML" }).catch(() => null);
+    return { ok: false, reason: "no-audio" };
+  }
   if (voice.fileId) {
-    const result = await telegram(env, "sendVoice", { chat_id: chatId, voice: voice.fileId });
-    if (result?.ok) return;
-    // Do not fall back to Google TTS. A missing generated file should remain a
-    // visible generation/deployment problem rather than changing the voice.
-    return;
+    const payload = { chat_id: chatId, voice: voice.fileId, ...(chatText ? { caption: chatText, parse_mode: "HTML" } : {}) };
+    const result = await telegram(env, "sendVoice", payload);
+    if (result?.ok) return { ok: true, fileId: voice.fileId, messageId: result.result?.message_id };
+    // A remembered file_id can become invalid (old build, deleted file). Try one fresh send below.
+    console.error("sendVoice by file_id failed", result?.description ?? "unknown");
+    voice = { ...voice, fileId: undefined };
+    if (!voice.audio) return { ok: false, reason: result?.description ?? "file_id rejected" };
   }
-  try {
-    const form = new FormData();
-    form.append("chat_id", String(chatId));
-    if (voice.neural) form.append("voice", new Blob([voice.audio], { type: "audio/ogg" }), "word.ogg");
-    else form.append("voice", new Blob([voice.audio], { type: "audio/mpeg" }), "word.mp3");
-    const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVoice`, { method: "POST", body: form });
-    if (!response.ok) {
-      console.error("Telegram sendVoice failed", response.status);
-      if (response.status === 403) await markUserBlocked(env, chatId, "sendVoice 403");
+  const body = voice.audio;
+  if (!body || !body.byteLength) return { ok: false, reason: "empty audio" };
+  // The bytes are uploaded straight to Telegram: no redirect, no remote fetch, no silent failure.
+  const mime = voice.neural || voice.human ? "audio/ogg" : "audio/mpeg";
+  const filename = mime === "audio/ogg" ? "word.ogg" : "word.mp3";
+  let lastError = "";
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const form = new FormData();
+      form.append("chat_id", String(chatId));
+      if (chatText) { form.append("caption", chatText); form.append("parse_mode", "HTML"); }
+      form.append("voice", new Blob([body], { type: mime }), filename);
+      const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendVoice`, {
+        method: "POST",
+        body: form,
+        signal: AbortSignal.timeout(20000),
+      });
+      const text = await response.text();
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch { parsed = null; }
+      if (response.ok && parsed?.ok) {
+        const sentId = parsed.result?.voice?.file_id;
+        if (voice.repeatFor && env.USERS && sentId) {
+          await storeCall(env, { op: "put", key: repeatedRecordingKey(voice.repeatFor), value: { fileId: sentId } }).catch(() => {});
+        } else if (voice.neural && voice.cacheable !== false && voice.wordId != null && env.USERS && sentId) {
+          // Remember Telegram's file_id so this word is uploaded once, then reused forever.
+          await storeCall(env, { op: "put", key: voice.human ? humanKey(voice.wordId) : neuralKey(voice.wordId), value: { fileId: sentId } }).catch(() => {});
+        }
+        return { ok: true, fileId: sentId, messageId: parsed.result?.message_id };
+      }
+      lastError = parsed?.description || `HTTP ${response.status}`;
+      if (response.status === 403) { await markUserBlocked(env, chatId, "sendVoice 403").catch(() => {}); return { ok: false, reason: "blocked" }; }
+      // Rate limiting: Telegram tells us exactly how long to wait.
+      if (response.status === 429) {
+        const wait = Number(parsed?.parameters?.retry_after ?? 1) * 1000;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(wait, 5000)));
+        continue;
+      }
+      // 4xx other than 429 will not fix itself by retrying the same bytes.
+      if (response.status >= 400 && response.status < 500) break;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : "unknown error";
     }
-    else if (voice.repeatFor && env.USERS) {
-      const sent = await response.json().catch(() => null);
-      const repeatedId = sent?.result?.voice?.file_id;
-      if (repeatedId) await storeCall(env, { op: "put", key: repeatedRecordingKey(voice.repeatFor), value: { fileId: repeatedId } }).catch(() => {});
-    }
-    else if (voice.neural && voice.cacheable !== false && voice.wordId != null && env.USERS) {
-      // Remember Telegram's file_id so this word is synthesized only once.
-      const sent = await response.json().catch(() => null);
-      const fileId = sent?.result?.voice?.file_id;
-      if (fileId) await storeCall(env, { op: "put", key: voice.human ? humanKey(voice.wordId) : neuralKey(voice.wordId), value: { fileId } }).catch(() => {});
-    }
-  } catch (error) {
-    console.error("Voice failed", error instanceof Error ? error.message : "unknown error");
+    await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
   }
+  console.error("Voice send failed", lastError);
+  return { ok: false, reason: lastError };
 }
 
 async function sendWordVoice(env, chatId, record) {
@@ -1702,13 +1743,31 @@ async function prepareSearch(env, chatId, query, page = 0, messageId = undefined
     const more = moreMeaning(options, matchIndex, 1, undefined, true, uiLanguage(normalizedQuery));
     const text = widenResultText(`${formatRecord(record, selected.part, normalizedQuery)}${more.notice ?? ""}`).slice(0, MAX_MESSAGE_LENGTH);
     if (await sendCardEntry(env, chatId, record, text, media, more.reply_markup, cardLanguage)) {
-      if (ctx?.waitUntil) ctx.waitUntil(sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery).catch((error) => console.error("Background voice failed", error instanceof Error ? error.message : "unknown error")));
-      else await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery);
+      await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery, text, { textFallback: text });
       return undefined;
     }
+    // One message: the voice carries the result as its caption, so the text and the audio can never
+    // arrive separately. Long results (over the 1024-character caption cap) still fall back to a
+    // separate text message, because Telegram cannot hold them in a caption.
+    const audioEnabled = await featureEnabled(env, "audio");
+    const autoVoice = audioEnabled ? await voiceAutoOn(env, chatId) : false;
+    const captionMode = voiceCaptionMode(env);
+    if (captionMode && messageId === undefined && autoVoice && text.length <= CAPTION_MAX) {
+      const sent = await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery, text, { textFallback: text });
+      if (sent.ok) {
+        // Attach the "next meaning" button to the voice message itself.
+        if (more.reply_markup) {
+          await telegram(env, "editMessageReplyMarkup", {
+            chat_id: chatId,
+            message_id: sent.messageId ?? undefined,
+            reply_markup: more.reply_markup,
+          }).catch(() => null);
+        }
+        return { ok: true, result: { message_id: sent.messageId, caption: text } };
+      }
+    }
     const response = await deliver({ text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
-    if (ctx?.waitUntil) ctx.waitUntil(sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery).catch((error) => console.error("Background voice failed", error instanceof Error ? error.message : "unknown error")));
-    else await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery);
+    if (messageId === undefined && autoVoice) await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery, "", { textFallback: null });
     return response;
   };
 }
@@ -1745,13 +1804,21 @@ async function sendOption(env, chatId, options, baseIndex, step, fallback = unde
   const voice = prepareWordVoice(env, voiceRecord, media, { skipRecorded: isGreekSearch });
   const more = moreMeaning(options, baseIndex, step + 1, callbackFor ?? (searchKey ? chainCallback(searchKey) : undefined), true, uiLanguage(searchKey));
   const text = widenResultText(`${formatRecord(record, selected.part, searchKey)}${more.notice ?? ""}`).slice(0, MAX_MESSAGE_LENGTH);
+  const wantVoice = sendVoice && await featureEnabled(env, "audio") && await voiceAutoOn(env, chatId);
+  const captionMode = voiceCaptionMode(env);
   if (!(await sendCardEntry(env, chatId, record, text, media, more.reply_markup, cardLanguage))) {
+    if (wantVoice && captionMode && text.length <= CAPTION_MAX) {
+      const sent = await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, searchKey, text, { textFallback: text });
+      if (sent.ok) {
+        if (more.reply_markup && sent.messageId) {
+          await telegram(env, "editMessageReplyMarkup", { chat_id: chatId, message_id: sent.messageId, reply_markup: more.reply_markup }).catch(() => null);
+        }
+        return;
+      }
+    }
     await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
   }
-  if (sendVoice && await featureEnabled(env, "audio") && await voiceAutoOn(env, chatId)) {
-    if (ctx?.waitUntil) ctx.waitUntil(sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, searchKey).catch((error) => console.error("Background voice failed", error instanceof Error ? error.message : "unknown error")));
-    else await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, searchKey);
-  }
+  if (wantVoice) await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, searchKey, "", { textFallback: text });
 }
 
 // Registered users live in one SQLite-backed Durable Object (no extra Cloudflare token permission needed).

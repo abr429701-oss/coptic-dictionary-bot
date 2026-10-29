@@ -29,7 +29,9 @@ const fakeAssets = {
     }
   },
 };
-const env = { TELEGRAM_BOT_TOKEN: token, WEBHOOK_SECRET: secret, ASSETS: fakeAssets };
+// Legacy two-message pipeline (result text, then voice). The atomic caption mode is
+// covered by its own test at the end of this file.
+const env = { TELEGRAM_BOT_TOKEN: token, WEBHOOK_SECRET: secret, ASSETS: fakeAssets, VOICE_CAPTION: "off" };
 const fakeOgg = () => new Response(new Uint8Array([79, 103, 103, 83, 1, 2, 3]), { headers: { "content-type": "audio/ogg" } });
 const isGeneratedAudio = (url) => String(url).includes("raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/audio/");
 const firstMeaning = (value) => String(value ?? "").split(/[،,]/u)[0].trim();
@@ -1791,4 +1793,22 @@ test("/kbd and /k aliases open the Coptic keyboard composer", async () => {
     assert.match(open.text, /لوحة المفاتيح القبطية/u);
     assert.ok(open.reply_markup.inline_keyboard.flat().some((b) => b.callback_data === "kb|ⲁ"));
   }
+});
+
+// ---- Atomic delivery: text + voice in ONE message ----
+test("VOICE_CAPTION on: the result text and the voice go out as a single message", async () => {
+  const calls = [];
+  fakeTelegramApi(calls);
+  const kvEnv = { ...env, VOICE_CAPTION: "on", USERS: fakeKv() };
+  const target = records.find((item) => String(item.coptic ?? "").includes("ⲁⲃⲏⲧ"));
+  kvEnv.USERS.store.set(`voiceid:${target.id}`, { fileId: "atomic-file-id" });
+  await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲏⲧ", chat: { id: 4242 }, from: { id: 4242 } } }), kvEnv);
+  const voice = calls.find((call) => call.url.endsWith("/sendVoice"));
+  assert.ok(voice, "the voice must be sent");
+  // Either a remembered file_id or freshly uploaded bytes are acceptable; what matters is that the
+  // result text rides on the voice caption and no second message carries it.
+  assert.ok(voice.payload.voice, "the voice must carry a file_id or audio bytes");
+  assert.match(String(voice.payload.caption ?? ""), /الكلمة/u, "the result text must ride on the voice caption");
+  const separateTexts = calls.filter((call) => call.url.endsWith("/sendMessage") && /الكلمة/u.test(String(call.payload?.text ?? "")));
+  assert.equal(separateTexts.length, 0, "the result text must not be sent as its own message");
 });

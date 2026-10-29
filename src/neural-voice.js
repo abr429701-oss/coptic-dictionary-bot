@@ -363,66 +363,57 @@ export async function fetchHumanSpeech(env, record) {
 // Fetch prebuilt audio
 // -----------------------------------------------------------------------------
 
-export async function fetchPrebuiltSpeech(
-  env,
-  record
-) {
+// Audio lives on two GitHub branches. A word may exist on either one, and GitHub raw
+// occasionally answers slowly or with a transient 5xx: one short attempt used to return
+// null, so the voice never arrived even though its link existed. Now every candidate URL
+// is retried, the branches are tried in order, and the timeout is long enough for a slow
+// cold fetch.
+const AUDIO_HUMAN_BASE = "https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/audio-human";
+
+function audioCandidates(env, id) {
+  const urls = [];
+  const add = (url) => { if (url && !urls.includes(url)) urls.push(url); };
+  add(audioUrl(env, id, { bust: true }));
+  add(audioUrl(env, id));
+  add(`${(env?.AUDIO_HUMAN_BASE_URL || AUDIO_HUMAN_BASE).replace(/\/+$/u, "")}/${encodeURIComponent(`${id}.ogg`)}`);
+  return urls;
+}
+
+async function fetchOgg(url, headers, timeoutMs) {
+  const response = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+  if (!response.ok) return { ok: false, status: response.status };
+  const audio = await response.arrayBuffer();
+  if (audio.byteLength < 4) return { ok: false, status: "tiny" };
+  const magic = new TextDecoder().decode(new Uint8Array(audio, 0, 4));
+  if (magic !== "OggS") return { ok: false, status: "not-ogg" };
+  return { ok: true, audio };
+}
+
+export async function fetchPrebuiltSpeech(env, record) {
   if (record?.id == null) return null;
-
-  try {
-    const headers =
-      env?.GITHUB_AUDIO_TOKEN
-        ? {
-            authorization:
-              `Bearer ${env.GITHUB_AUDIO_TOKEN}`,
+  const headers = env?.GITHUB_AUDIO_TOKEN ? { authorization: `Bearer ${env.GITHUB_AUDIO_TOKEN}` } : {};
+  for (const url of audioCandidates(env, record.id)) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const result = await fetchOgg(url, headers, 9000);
+        if (result.ok) {
+          // Files on GitHub hold the word once; the bot plays it several times in one voice message.
+          try {
+            return repeatSingleWordOgg(result.audio, {
+              times: Number(env?.VOICE_REPEATS ?? 3),
+              pauseMs: Number(env?.VOICE_REPEAT_PAUSE_MS ?? 700),
+            });
+          } catch {
+            return result.audio;
           }
-        : {};
-
-    const response = await fetch(
-      audioUrl(env, record.id, { bust: true }),
-      {
-        headers,
-        signal: AbortSignal.timeout(3000),
+        }
+        // A real 404 means this URL will never work: move to the next candidate immediately.
+        if (result.status === 404) break;
+      } catch (error) {
+        if (attempt === 1) console.error("Prebuilt voice error:", url, error instanceof Error ? error.message : "unknown");
       }
-    );
-
-    if (!response.ok) return null;
-
-    const audio =
-      await response.arrayBuffer();
-
-    if (audio.byteLength < 4) {
-      return null;
+      await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)));
     }
-
-    const magic =
-      new TextDecoder().decode(
-        new Uint8Array(
-          audio,
-          0,
-          4
-        )
-      );
-
-    if (magic !== "OggS") return null;
-
-    // Files on GitHub hold the word once; the bot plays it several times in one voice message.
-    try {
-      return repeatSingleWordOgg(audio, {
-        times: Number(env?.VOICE_REPEATS ?? 3),
-        pauseMs: Number(env?.VOICE_REPEAT_PAUSE_MS ?? 700),
-      });
-    } catch {
-      return audio;
-    }
-  } catch (error) {
-    console.error(
-      "Prebuilt voice error:",
-      error instanceof Error
-        ? error.message
-        : "unknown error"
-    );
-
-    return null;
   }
+  return null;
 }
