@@ -815,9 +815,12 @@ function formatRecord(record, partIndex = -1, searchedWord = "") {
   const isCopticSearch = searchedWord === "" || scriptKind(normalize(searchedWord)) === "cop";
   const language = isCopticSearch ? "ar" : uiLanguage(searchedWord);
   const labels = UI_TEXT[language] ?? UI_TEXT.ar;
-  // Always show the dictionary headword with its original diacritics (jinkim),
-  // never the normalized search query (normalize strips all combining marks).
-  const displayedWord = String(record.coptic ?? "").trim() || searchedWord;
+  // For Coptic searches show the dictionary headword with its original diacritics
+  // (jinkim), not the normalized search query (normalize strips all combining marks).
+  // For other searches keep showing the user's own query as the headword.
+  const displayedWord = isCopticSearch
+    ? String(record.coptic ?? "").trim() || searchedWord
+    : searchedWord || record.coptic;
   const fields = !isCopticSearch
     ? [
         [labels.word, displayedWord],
@@ -1236,7 +1239,7 @@ function voiceCaption(record, partIndex = -1, searchedWord = "") {
   const labels = UI_TEXT[language] ?? UI_TEXT.ar;
   const values = isCopticSearch
     ? [[UI_TEXT.ar.meaning, meaning], [UI_TEXT.ar.word, record?.coptic], [UI_TEXT.ar.origin, record?.origin], [UI_TEXT.ar.kind, record?.kind]]
-    : [[labels.word, String(record?.coptic ?? "").trim() || searchedWord], [UI_TEXT.ar.meaning, meaning], [labels.origin, localizedValue(record?.origin, language)], [labels.kind, localizedValue(record?.kind, language)]];
+    : [[labels.word, searchedWord || record?.coptic], [UI_TEXT.ar.meaning, meaning], [labels.origin, localizedValue(record?.origin, language)], [labels.kind, localizedValue(record?.kind, language)]];
   return values.map(([label, value]) => `${label}: ${String(value ?? "").replace(/\s+/gu, " ").trim().replace(/\.+$/u, "")}`)
     .map((value) => String(value ?? "").replace(/\s+/gu, " ").trim().replace(/\.+$/u, ""))
     .filter(Boolean)
