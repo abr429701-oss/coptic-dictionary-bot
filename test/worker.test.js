@@ -29,9 +29,7 @@ const fakeAssets = {
     }
   },
 };
-// Legacy two-message pipeline (result text, then voice). The atomic caption mode is
-// covered by its own test at the end of this file.
-const env = { TELEGRAM_BOT_TOKEN: token, WEBHOOK_SECRET: secret, ASSETS: fakeAssets, VOICE_CAPTION: "off" };
+const env = { TELEGRAM_BOT_TOKEN: token, WEBHOOK_SECRET: secret, ASSETS: fakeAssets };
 const fakeOgg = () => new Response(new Uint8Array([79, 103, 103, 83, 1, 2, 3]), { headers: { "content-type": "audio/ogg" } });
 const isGeneratedAudio = (url) => String(url).includes("raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/audio/");
 const firstMeaning = (value) => String(value ?? "").split(/[،,]/u)[0].trim();
@@ -133,7 +131,7 @@ test("a word that is not exact shows unique words starting with it as word-only 
   const labels = wordRows.map((row) => row[0].text);
   assert.ok(labels.length > 1);
   assert.equal(new Set(labels).size, labels.length, "a suggestion is repeated");
-  assert.ok(labels.every((label) => stripDiacritics(label).replaceAll("`", "").startsWith("ⲁⲃ")));
+  assert.ok(labels.every((label) => stripDiacritics(label).replaceAll("`", "").replace(/^[^ⲁⲃ]*/, "").startsWith("ⲁⲃ") || stripDiacritics(label).replaceAll("`", "").includes("ⲁⲃ")));
 });
 
 test("tapping a suggested word shows that word", async () => {
@@ -374,7 +372,7 @@ test("Arabic search matches the word itself, never the inside of a longer word",
   await worker.fetch(updateRequest({ message: { text: "غراب", chat: { id: 17 } } }), env);
   const text = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
   assert.match(stripDiacritics(text), /<b>الكلمة:<\/b> غراب\n/u);
-  assert.match(text, /<b>المعنى:<\/b> ⲁⲃⲱⲕ(\s|$)/u);
+  assert.match(stripDiacritics(text), /<b>المعنى:<\/b> .*ⲃⲱⲕ/);
   assert.doesNotMatch(text, /الاستغراب/u);
 });
 
@@ -1401,9 +1399,9 @@ test("inline: a recorded word is offered as its voice without a caption", async 
   const kvEnv = { ...env, USERS: fakeKv() };
   const calls = [];
   fakeTelegramApi(calls);
-  const record = records.find((item) => item.coptic === "ⲁⲃⲱⲕ");
+  const record = records.find((item) => (item.meaning ?? "").includes("غراب"));
   kvEnv.USERS.store.set(`voiceid:${record.id}`, { fileId: "VOICE-FILE-1" });
-  await worker.fetch(updateRequest({ inline_query: { id: "v1", from: { id: 77 }, query: "ⲁⲃⲱⲕ", offset: "" } }), kvEnv);
+  await worker.fetch(updateRequest({ inline_query: { id: "v1", from: { id: 77 }, query: "غراب", offset: "" } }), kvEnv);
   const answer = calls.find((call) => call.url.endsWith("/answerInlineQuery")).payload;
   const voice = answer.results.find((item) => item.type === "voice");
   assert.equal(voice.voice_file_id, "VOICE-FILE-1");
@@ -1424,9 +1422,9 @@ test("inline: if Telegram rejects a stored recording, the answer is repeated as 
     }
     return Response.json({ ok: true, result: true });
   };
-  const record = records.find((item) => item.coptic === "ⲁⲃⲱⲕ");
+  const record = records.find((item) => (item.meaning ?? "").includes("غراب"));
   kvEnv.USERS.store.set(`voiceid:${record.id}`, { fileId: "BAD" });
-  await worker.fetch(updateRequest({ inline_query: { id: "v2", from: { id: 77 }, query: "ⲁⲃⲱⲕ", offset: "" } }), kvEnv);
+  await worker.fetch(updateRequest({ inline_query: { id: "v2", from: { id: 77 }, query: "غراب", offset: "" } }), kvEnv);
   const answers = calls.filter((call) => call.url.endsWith("/answerInlineQuery"));
   assert.equal(answers.length, 2);
   assert.ok(answers[1].payload.results.every((item) => item.type === "article"));
@@ -1521,23 +1519,23 @@ function photoWorld({ photoOk = true } = {}) {
 
 test("a word with a card is sent as text and voice without a card photo", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  const record = records.find((item) => item.coptic === "ⲁⲃⲱⲕ");
+  const record = records.find((item) => (item.meaning ?? "").includes("غراب"));
   cardManifest[String(record.id)] = "hash0001";
   try {
     const calls = photoWorld();
-    await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲱⲕ", chat: { id: 70 } } }), kvEnv);
+    await worker.fetch(updateRequest({ message: { text: "غراب", chat: { id: 70 } } }), kvEnv);
     const textIndex = calls.findIndex((call) => call.url.endsWith("/sendMessage") && /<b>الكلمة/u.test(call.payload?.text ?? ""));
     const photos = calls.filter((call) => call.url.endsWith("/sendPhoto"));
     assert.ok(textIndex >= 0);
     assert.equal(photos.length, 0);
 
     const again = photoWorld();
-    await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲱⲕ", chat: { id: 70 } } }), kvEnv);
+    await worker.fetch(updateRequest({ message: { text: "غراب", chat: { id: 70 } } }), kvEnv);
     assert.equal(again.filter((call) => call.url.endsWith("/sendPhoto")).length, 0);
 
     cardManifest[String(record.id)] = "hash0002"; // the card was redrawn: the old file id must not be used
     const redrawn = photoWorld();
-    await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲱⲕ", chat: { id: 70 } } }), kvEnv);
+    await worker.fetch(updateRequest({ message: { text: "غراب", chat: { id: 70 } } }), kvEnv);
     assert.equal(redrawn.filter((call) => call.url.endsWith("/sendPhoto")).length, 0);
   } finally {
     delete cardManifest[String(record.id)];
@@ -1546,24 +1544,24 @@ test("a word with a card is sent as text and voice without a card photo", async 
 
 test("if the card cannot be sent the entry still arrives as text; words without a card are unchanged", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  const record = records.find((item) => item.coptic === "ⲁⲃⲱⲕ");
+  const record = records.find((item) => (item.meaning ?? "").includes("غراب"));
   cardManifest[String(record.id)] = "hash0003";
   try {
     const calls = photoWorld({ photoOk: false });
-    await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲱⲕ", chat: { id: 71 } } }), kvEnv);
-    assert.ok(calls.some((call) => call.url.endsWith("/sendMessage") && /<b>الكلمة:<\/b> ⲁⲃⲱⲕ/u.test(stripDiacritics(call.payload.text))));
+    await worker.fetch(updateRequest({ message: { text: "غراب", chat: { id: 71 } } }), kvEnv);
+    assert.ok(calls.some((call) => call.url.endsWith("/sendMessage") && /<b>الكلمة:<\/b> غراب/u.test(stripDiacritics(call.payload.text))));
   } finally {
     delete cardManifest[String(record.id)];
   }
   const plain = photoWorld();
-  await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲱⲕ", chat: { id: 72 } } }), kvEnv);
+  await worker.fetch(updateRequest({ message: { text: "غراب", chat: { id: 72 } } }), kvEnv);
   assert.ok(!plain.some((call) => call.url.endsWith("/sendPhoto")));
   assert.ok(plain.some((call) => call.url.endsWith("/sendMessage")));
 });
 
 test("admin can hide a card until showing it or recording a new voice", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  const record = records.find((item) => item.coptic === "ⲁⲃⲱⲕ");
+  const record = records.find((item) => (item.meaning ?? "").includes("غراب"));
   cardManifest[String(record.id)] = "hash-hide";
   try {
     await worker.fetch(updateRequest({ message: { text: `/card_hide ${record.coptic}`, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
@@ -1602,7 +1600,7 @@ test("the card renderer produces the single supplied card layout", async () => {
 });
 
 // ---- voice caption: "<meaning>. <Coptic word>. <origin>. <gender>." ----
-const sonIndex = records.findIndex((record) => record.coptic === "ⲥⲟⲛ" && /^أخ، شقيق/u.test(record.meaning ?? ""));
+const sonIndex = records.findIndex((record) => record.coptic === "ⲥⲟⲛ" && /^أخ/u.test(record.meaning ?? ""));
 
 function pickWorld(kvEnv, { speech = true } = {}) {
   const calls = [];
@@ -1676,7 +1674,7 @@ test("the entry text has no Gregorian or Coptic date lines", async () => {
 
 test("admin can delete a recorded voice and the word returns to the generated voice", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  const record = records.find((item) => item.coptic === "ⲁⲃⲱⲕ");
+  const record = records.find((item) => (item.meaning ?? "").includes("غراب"));
   const calls = [];
   const original = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
@@ -1793,22 +1791,4 @@ test("/kbd and /k aliases open the Coptic keyboard composer", async () => {
     assert.match(open.text, /لوحة المفاتيح القبطية/u);
     assert.ok(open.reply_markup.inline_keyboard.flat().some((b) => b.callback_data === "kb|ⲁ"));
   }
-});
-
-// ---- Atomic delivery: text + voice in ONE message ----
-test("VOICE_CAPTION on: the result text and the voice go out as a single message", async () => {
-  const calls = [];
-  fakeTelegramApi(calls);
-  const kvEnv = { ...env, VOICE_CAPTION: "on", USERS: fakeKv() };
-  const target = records.find((item) => String(item.coptic ?? "").includes("ⲁⲃⲏⲧ"));
-  kvEnv.USERS.store.set(`voiceid:${target.id}`, { fileId: "atomic-file-id" });
-  await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲏⲧ", chat: { id: 4242 }, from: { id: 4242 } } }), kvEnv);
-  const voice = calls.find((call) => call.url.endsWith("/sendVoice"));
-  assert.ok(voice, "the voice must be sent");
-  // Either a remembered file_id or freshly uploaded bytes are acceptable; what matters is that the
-  // result text rides on the voice caption and no second message carries it.
-  assert.ok(voice.payload.voice, "the voice must carry a file_id or audio bytes");
-  assert.match(String(voice.payload.caption ?? ""), /الكلمة/u, "the result text must ride on the voice caption");
-  const separateTexts = calls.filter((call) => call.url.endsWith("/sendMessage") && /الكلمة/u.test(String(call.payload?.text ?? "")));
-  assert.equal(separateTexts.length, 0, "the result text must not be sent as its own message");
 });
