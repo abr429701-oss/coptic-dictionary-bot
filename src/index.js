@@ -1292,35 +1292,31 @@ function prepareWordVoice(env, record, media = null, { skipRecorded = false } = 
         console.error("Recorded voice lookup failed", error instanceof Error ? error.message : "unknown error");
       }
     }
-    // New single-word Miguel files win over everything else; words without one yet fall back to the older voices.
-    let fallbackVoice = null;
     if (record?.id != null) {
-      try {
-        const cached = env.USERS ? (await storeCall(env, { op: "get", key: neuralKey(record.id) })).value : null;
-        if (cached?.fileId) return { fileId: cached.fileId, neural: true };
-        const neural = await fetchPrebuiltSpeech(env, record);
-        if (neural) {
-          // Only the new single-word files are remembered by Telegram file_id; older files are never cached.
-          const fresh = isSingleWordOgg(neural);
-          const voice = { audio: neural, neural: true, wordId: record.id, cacheable: fresh };
-          if (fresh) return voice;
-          fallbackVoice = voice;
-        }
-      } catch (error) {
-        console.error("Neural voice failed", error instanceof Error ? error.message : "unknown error");
-      }
-    }
-    if (record?.id != null) {
-      try {
-        const cachedHuman = env.USERS ? (await storeCall(env, { op: "get", key: humanKey(record.id) })).value : null;
-        if (cachedHuman?.fileId) return { fileId: cachedHuman.fileId, neural: true };
-        const human = await fetchHumanSpeech(env, record);
+      // Cached file_ids for both sources are read in PARALLEL (two DO reads), then both
+      // audio sources are fetched in PARALLEL too. The old code awaited the neural fetch
+      // fully before even starting the human fetch, doubling the wait on words that only
+      // have one of the two. Priority is unchanged: fresh single-word neural > human > older neural.
+      const [cachedNeural, cachedHuman] = env.USERS ? await Promise.all([
+        storeCall(env, { op: "get", key: neuralKey(record.id) }).then((r) => r.value).catch(() => null),
+        storeCall(env, { op: "get", key: humanKey(record.id) }).then((r) => r.value).catch(() => null),
+      ]) : [null, null];
+      if (cachedNeural?.fileId) return { fileId: cachedNeural.fileId, neural: true };
+      if (cachedHuman?.fileId) return { fileId: cachedHuman.fileId, neural: true };
+      const [neural, human] = await Promise.all([
+        fetchPrebuiltSpeech(env, record).catch(() => null),
+        fetchHumanSpeech(env, record).catch(() => null),
+      ]);
+      if (neural) {
+        // Only the new single-word files are remembered by Telegram file_id; older files are never cached.
+        const fresh = isSingleWordOgg(neural);
+        const voice = { audio: neural, neural: true, wordId: record.id, cacheable: fresh };
+        if (fresh) return voice;
         if (human) return { audio: human, neural: true, human: true, wordId: record.id };
-      } catch (error) {
-        console.error("Human voice failed", error instanceof Error ? error.message : "unknown error");
+        return voice;
       }
+      if (human) return { audio: human, neural: true, human: true, wordId: record.id };
     }
-    if (fallbackVoice) return fallbackVoice;
     // No Google fallback: generated audio must come from the Polly Miguel
     // files published by GitHub Actions.
     return null;
@@ -1339,6 +1335,10 @@ const CAPTION_MAX = 1024;
 // as ONE Telegram message, so they appear at the same instant instead of as two separate updates.
 async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1, searchedWord = "", caption = "", options = {}) {
   const chatText = String(caption ?? "").slice(0, CAPTION_MAX);
+  // Show "recording voice…" in the chat right away so the user sees progress while the
+  // audio is being prepared/fetched, instead of a silent pause.
+  telegram(env, "sendChatAction", { chat_id: chatId, action: "upload_voice" }).catch(() => null);
+  const voiceT0 = Date.now();
   let voice = await prepared;
   if (!voice) {
     // No audio at all for this word: never drop the answer, send the text so the user
@@ -1349,7 +1349,11 @@ async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1, 
   if (voice.fileId) {
     const payload = { chat_id: chatId, voice: voice.fileId, ...(chatText ? { caption: chatText, parse_mode: "HTML" } : {}) };
     const result = await telegram(env, "sendVoice", payload);
-    if (result?.ok) return { ok: true, fileId: voice.fileId, messageId: result.result?.message_id };
+    if (result?.ok) {
+      const prepareMs = Date.now() - voiceT0;
+      if (prepareMs > 300) console.log(JSON.stringify({ ev: "voice-slow", stage: "file-id", ms: prepareMs, word: String(record?.coptic ?? "").slice(0, 30) }));
+      return { ok: true, fileId: voice.fileId, messageId: result.result?.message_id };
+    }
     // A remembered file_id can become invalid (old build, deleted file). Try one fresh send below.
     console.error("sendVoice by file_id failed", result?.description ?? "unknown");
     voice = { ...voice, fileId: undefined };
@@ -6059,6 +6063,11 @@ const adminExtras2 = createAdminExtras2({
   botVersion: BOT_VERSION,
 });
 
+// Serialized background chain: fast-ack hands each update to ctx.waitUntil, but updates
+// still execute one after another so message sequences (e.g. /record then a voice note)
+// keep their state order.
+let updateChain = Promise.resolve();
+
 export default {
   async fetch(request, env, ctx) {
     countRequest(env, ctx);
@@ -6138,6 +6147,22 @@ export default {
     try {
       const t0 = Date.now();
       const update = await request.json();
+      // Fast-ack: answer Telegram 200 immediately and keep processing the update in the
+      // background (ctx.waitUntil). Without this, Telegram waits for the whole voice
+      // pipeline (fetch/repeat/upload) before seeing 200 and delays/retries the update.
+      // Updates still run in arrival order (serialized chain) so dependent messages
+      // (for example /record then a voice note) keep their state sequence.
+      // Tests call fetch without a Workers ctx, so there we still await to keep them deterministic.
+      if (ctx?.waitUntil) {
+        const done = updateChain.then(() => handleUpdate(update, env, ctx)).catch((error) => {
+          logError(env, error, { where: "webhook" });
+          console.error("Webhook update failed", error instanceof Error ? error.message : "unknown error");
+        });
+        updateChain = done;
+        ctx.waitUntil(done);
+        console.log(JSON.stringify({ ev: "webhook-ack", kind: update.inline_query ? "inline" : update.callback_query ? "callback" : "message", update_id: update.update_id ?? null }));
+        return new Response("ok", { status: 200 });
+      }
       await handleUpdate(update, env, ctx);
       // Pro feature: structured request logging (duration + update type).
       const durMs = Date.now() - t0;

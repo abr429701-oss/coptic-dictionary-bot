@@ -1207,9 +1207,9 @@ test("uploading runs after the reply when the platform provides waitUntil", asyn
   const ctx = { waitUntil: (promise) => pending.push(promise) };
   await adminSay(kvEnv, { text: "/record" }, ctx);
   await adminSay(kvEnv, { voice: { file_id: "TG-2", duration: 1 } }, ctx);
-  const id = [...kvEnv.USERS.store.keys()].find((key) => key.startsWith("voiceid:"));
   assert.ok(pending.length >= 1); // handed to the platform (plus the request counter's batched write)
   await Promise.all(pending);
+  const id = [...kvEnv.USERS.store.keys()].find((key) => key.startsWith("voiceid:"));
   assert.ok(kvEnv.USERS.store.get(id).drive.url);
   assert.ok(calls.some((call) => call.url === SCRIPT_URL));
 });

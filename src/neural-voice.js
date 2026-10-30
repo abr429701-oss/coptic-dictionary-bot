@@ -347,7 +347,7 @@ export async function fetchHumanSpeech(env, record) {
   if (!humanAudioEnabled(env) || record?.id == null) return null;
   try {
     const response = await fetch(humanAudioUrl(env, record.id), {
-      signal: AbortSignal.timeout(1800),
+      signal: AbortSignal.timeout(3500),
     });
     if (!response.ok) return null;
     const audio = await response.arrayBuffer();
@@ -392,28 +392,34 @@ async function fetchOgg(url, headers, timeoutMs) {
 export async function fetchPrebuiltSpeech(env, record) {
   if (record?.id == null) return null;
   const headers = env?.GITHUB_AUDIO_TOKEN ? { authorization: `Bearer ${env.GITHUB_AUDIO_TOKEN}` } : {};
-  for (const url of audioCandidates(env, record.id)) {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+  const candidates = audioCandidates(env, record.id);
+  const tryUrl = async (url) => {
+    try {
+      const result = await fetchOgg(url, headers, 9000);
+      if (!result.ok) return null;
+      // Files on GitHub hold the word once; the bot plays it several times in one voice message.
       try {
-        const result = await fetchOgg(url, headers, 9000);
-        if (result.ok) {
-          // Files on GitHub hold the word once; the bot plays it several times in one voice message.
-          try {
-            return repeatSingleWordOgg(result.audio, {
-              times: Number(env?.VOICE_REPEATS ?? 3),
-              pauseMs: Number(env?.VOICE_REPEAT_PAUSE_MS ?? 700),
-            });
-          } catch {
-            return result.audio;
-          }
-        }
-        // A real 404 means this URL will never work: move to the next candidate immediately.
-        if (result.status === 404) break;
-      } catch (error) {
-        if (attempt === 1) console.error("Prebuilt voice error:", url, error instanceof Error ? error.message : "unknown");
+        return repeatSingleWordOgg(result.audio, {
+          times: Number(env?.VOICE_REPEATS ?? 3),
+          pauseMs: Number(env?.VOICE_REPEAT_PAUSE_MS ?? 700),
+        });
+      } catch {
+        return result.audio;
       }
-      await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)));
+    } catch (error) {
+      console.error("Prebuilt voice error:", url, error instanceof Error ? error.message : "unknown");
+      return null;
     }
-  }
-  return null;
+  };
+  // Primary candidate (the /audio/ branch, cache-busted) is tried first alone: it covers
+  // the vast majority of words, so the common path costs exactly one fetch.
+  const primary = await tryUrl(candidates[0]);
+  if (primary) return primary;
+  // Hedged fallback: the remaining URLs are raced in PARALLEL instead of walked
+  // sequentially (the old loop could burn ~55s across 3 URLs × 2 attempts × 9s
+  // timeout + backoff before giving up). Worst case now: primary + one parallel wave.
+  const rest = candidates.slice(1);
+  if (!rest.length) return null;
+  const results = await Promise.all(rest.map((url) => tryUrl(url)));
+  return results.find((audio) => audio) ?? null;
 }
