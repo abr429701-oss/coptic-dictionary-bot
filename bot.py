@@ -160,9 +160,13 @@ async def send_search(update: Update, context: ContextTypes.DEFAULT_TYPE, query:
     context.user_data["last_query"] = query
     context.user_data["last_indices"] = indices
     text, markup = render(query, indices, page)
+    # النص رسالة مستقلة تمامًا بلا أي صوت مرفق أو ذكر لملف داخلها.
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
-    await send_page_card(update.effective_chat.id, indices, page, context)
-    await send_page_audio(update.effective_chat.id, indices, page, context)
+    # الصوت ملف منفصل يُرسل في نفس اللحظة مع بطاقة الصورة (بالتوازي) — لا انتظار بينهما.
+    await asyncio.gather(
+        send_page_card(update.effective_chat.id, indices, page, context),
+        send_page_audio(update.effective_chat.id, indices, page, context),
+    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -287,18 +291,30 @@ async def send_page_card(chat_id: int, indices: list[int], page: int, context: C
 
 
 async def download_prebuilt_audio(record: dict[str, str]) -> bytes:
-    """Download Matthew/IPA Reader audio from the public audio-human branch."""
+    """Download Matthew/IPA Reader audio from the public audio-human branch.
+
+    Uses a non-blocking async client (no thread hop) so the download runs
+    concurrently with card rendering and arrives as fast as possible.
+    """
     word_id = record.get("id")
     if word_id in (None, ""):
         raise ValueError("record has no permanent audio id")
     url = f"{AUDIO_BASE_URL}/{word_id}.ogg"
-    response = await asyncio.to_thread(httpx.get, url, timeout=45.0, follow_redirects=True)
-    response.raise_for_status()
-    return response.content
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(20.0, connect=5.0), follow_redirects=True
+    ) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        return response.content
 
 
 async def send_page_audio(chat_id: int, indices: list[int], page: int, context: ContextTypes.DEFAULT_TYPE):
-    """Send the prebuilt Matthew voice for the records shown on this page."""
+    """Send the prebuilt Matthew voice for the records shown on this page.
+
+    Runs concurrently with send_page_card: the voice file is fetched and
+    uploaded in parallel, so text, card and audio land at the same moment.
+    """
+    await context.bot.send_chat_action(chat_id=chat_id, action="upload_voice")
     for index in indices[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]:
         record = RECORDS[index]
         if not (record.get("pronunciation") or "").strip():
