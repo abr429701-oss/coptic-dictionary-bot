@@ -57,7 +57,7 @@ def esc(value: Any) -> str:
 
 with DATA_FILE.open(encoding="utf-8") as f:
     RECORDS: list[dict[str, str]] = json.load(f)
-SEARCH_TEXT = [normalize(" ".join(r.values())) for r in RECORDS]
+SEARCH_TEXT = [normalize(" ".join(str(v) for v in r.values())) for r in RECORDS]
 
 
 def find_matches(query: str) -> list[int]:
@@ -444,7 +444,7 @@ async def admin_reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global RECORDS, SEARCH_TEXT
     with DATA_FILE.open(encoding="utf-8") as f:
         RECORDS = json.load(f)
-    SEARCH_TEXT = [normalize(" ".join(r.values())) for r in RECORDS]
+    SEARCH_TEXT = [normalize(" ".join(str(v) for v in r.values())) for r in RECORDS]
     await update.effective_message.reply_text(f"✅ تمت إعادة تحميل القاموس: {len(RECORDS):,} سجل.")
 
 
