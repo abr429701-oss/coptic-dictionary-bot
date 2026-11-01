@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ipaForSpeech, ipaToEspeak, audioUrl, audioVersion, fetchPrebuiltSpeech, fetchHumanSpeech, humanAudioUrl } from "../src/neural-voice.js";
+import { ipaForSpeech, ipaToEspeak, audioUrl, audioVersion, fetchPrebuiltSpeech, fetchHumanSpeech, humanAudioUrl, resetAudioCaches } from "../src/neural-voice.js";
+
+// The in-isolate audio memory must never leak one test's fetched word into the next test.
+test.beforeEach(() => resetAudioCaches());
 
 test("IPA is cleaned for the engine", () => {
   assert.equal(ipaForSpeech({ pronunciation: "ref-tshoːl" }), "ref tʃoːl");
@@ -25,6 +28,10 @@ test("prebuilt audio is fetched by word id", async () => {
     assert.equal((await fetchPrebuiltSpeech({}, { id: 5 })).byteLength, 6);
     assert.equal(await fetchPrebuiltSpeech({}, { id: 6 }), null);
     globalThis.fetch = async () => Response.json({ ok: true });
+    // Word 5 is now served from the in-isolate memory even when the network breaks (two-layer cache).
+    assert.equal((await fetchPrebuiltSpeech({}, { id: 5 })).byteLength, 6);
+    resetAudioCaches();
+    // With the memory cleared, a broken network yields null exactly as before.
     assert.equal(await fetchPrebuiltSpeech({}, { id: 5 }), null);
   } finally { globalThis.fetch = original; }
 });

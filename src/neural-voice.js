@@ -345,15 +345,33 @@ export const humanAudioUrl = (env, id) =>
 
 export async function fetchHumanSpeech(env, record) {
   if (!humanAudioEnabled(env) || record?.id == null) return null;
+  const url = humanAudioUrl(env, record.id);
   try {
-    const response = await fetch(humanAudioUrl(env, record.id), {
+    // Same two-layer cache as fetchOgg: RAM of this isolate first, then the edge cache —
+    // raw.githubusercontent is touched at most once per word per colo.
+    const mem = audioMemGet(url);
+    if (mem) return mem;
+    try {
+      const cache = caches.default;
+      const hit = await cache.match(url);
+      if (hit) {
+        const cachedAudio = await hit.arrayBuffer();
+        if (cachedAudio.byteLength >= 4) { audioMemPut(url, cachedAudio); return cachedAudio; }
+      }
+    } catch { /* cache unavailable in this runtime */ }
+    const response = await fetch(url, {
       signal: AbortSignal.timeout(3500),
     });
     if (!response.ok) return null;
+    if (response.body) {
+      try { await cachePutAudio(url, response.clone()); } catch { /* non-critical */ }
+    }
     const audio = await response.arrayBuffer();
     if (audio.byteLength < 4) return null;
     const magic = new TextDecoder().decode(new Uint8Array(audio, 0, 4));
-    return magic === "OggS" ? audio : null;
+    if (magic !== "OggS") return null;
+    audioMemPut(url, audio);
+    return audio;
   } catch {
     return null;
   }
@@ -380,13 +398,63 @@ function audioCandidates(env, id) {
 }
 
 async function fetchOgg(url, headers, timeoutMs) {
+  // Two-layer cache, fastest first: RAM of this isolate (0 ms), then the edge cache
+  // (a few ms, any user on this colo). raw.githubusercontent is touched at most once
+  // per word per colo — its slow cold fetch (up to the 9s timeout) can no longer sit
+  // between the user's question and the voice.
+  const mem = audioMemGet(url);
+  if (mem) return { ok: true, audio: mem };
+  try {
+    const cache = caches.default;
+    const hit = await cache.match(url);
+    if (hit) {
+      const audio = await hit.arrayBuffer();
+      if (audio.byteLength >= 4) { audioMemPut(url, audio); return { ok: true, audio }; }
+    }
+  } catch { /* cache unavailable in this runtime */ }
   const response = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
   if (!response.ok) return { ok: false, status: response.status };
+  if (response.ok && response.body) {
+    try { await cachePutAudio(url, response.clone()); } catch { /* non-critical */ }
+  }
   const audio = await response.arrayBuffer();
   if (audio.byteLength < 4) return { ok: false, status: "tiny" };
   const magic = new TextDecoder().decode(new Uint8Array(audio, 0, 4));
   if (magic !== "OggS") return { ok: false, status: "not-ogg" };
+  audioMemPut(url, audio);
   return { ok: true, audio };
+}
+async function cachePutAudio(url, response) {
+  const cache = caches.default;
+  await cache.put(url, new Response(response.body, { headers: { "content-type": "audio/ogg", "cache-control": "public, max-age=86400" } }));
+}
+
+// In-isolate memory cache: words fetched in this running instance are served from RAM
+// (0 ms) on every later request in the same isolate, with a hard byte budget so the
+// Worker never grows unbounded. Edge cache above covers cross-isolate reuse.
+const AUDIO_MEM_MAX_BYTES = 24 * 1024 * 1024;
+const audioMem = new Map(); // url -> ArrayBuffer
+let audioMemBytes = 0;
+function audioMemGet(url) {
+  const hit = audioMem.get(url);
+  if (hit) return hit;
+}
+function audioMemPut(url, audio) {
+  if (audio.byteLength > AUDIO_MEM_MAX_BYTES / 4 || audioMem.has(url)) return;
+  audioMem.set(url, audio);
+  audioMemBytes += audio.byteLength;
+  while (audioMemBytes > AUDIO_MEM_MAX_BYTES) {
+    const oldest = audioMem.keys().next().value;
+    const dropped = audioMem.get(oldest);
+    audioMem.delete(oldest);
+    audioMemBytes -= dropped?.byteLength ?? 0;
+  }
+}
+// Test isolation: clears the in-isolate audio memory so one test's fetched word
+// can never leak into another test that expects a fresh network outcome.
+export function resetAudioCaches() {
+  audioMem.clear();
+  audioMemBytes = 0;
 }
 
 export async function fetchPrebuiltSpeech(env, record) {
