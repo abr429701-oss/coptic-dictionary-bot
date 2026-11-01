@@ -314,7 +314,6 @@ async def send_page_audio(chat_id: int, indices: list[int], page: int, context: 
     Runs concurrently with send_page_card: the voice file is fetched and
     uploaded in parallel, so text, card and audio land at the same moment.
     """
-    await context.bot.send_chat_action(chat_id=chat_id, action="upload_voice")
     for index in indices[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]:
         record = RECORDS[index]
         if not (record.get("pronunciation") or "").strip():
@@ -336,7 +335,7 @@ async def send_page_audio(chat_id: int, indices: list[int], page: int, context: 
 
 async def audio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer("جارٍ تجهيز النطق...")
+    await query.answer()  # إقرار صامت بلا عبارة «جارٍ تجهيز النطق...»
     try:
         index = int((query.data or "a|0").split("|", 1)[1])
         record = RECORDS[index]

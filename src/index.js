@@ -1335,9 +1335,8 @@ const CAPTION_MAX = 1024;
 // as ONE Telegram message, so they appear at the same instant instead of as two separate updates.
 async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1, searchedWord = "", caption = "", options = {}) {
   const chatText = String(caption ?? "").slice(0, CAPTION_MAX);
-  // Show "recording voice…" in the chat right away so the user sees progress while the
-  // audio is being prepared/fetched, instead of a silent pause.
-  telegram(env, "sendChatAction", { chat_id: chatId, action: "upload_voice" }).catch(() => null);
+  // بلا أي مؤشر «جارٍ إرسال ملف صوتي…»: الصوت يُجهَّز بالفعل بالتوازي قبل هذه اللحظة،
+  // والمؤشر لا يفعل سوى إظهار عبارة يكرهها المستخدم وتأخير إحساس الوصول.
   const voiceT0 = Date.now();
   let voice = await prepared;
   if (!voice) {
