@@ -1280,20 +1280,6 @@ async function repeatedRecording(env, fileId) {
   }
 }
 
-// Public /tts URL for a word's repeated neural audio. The /tts endpoint serves
-// exactly what fetchPrebuiltSpeech would return (single-word files repeated 3x),
-// with a 30-day edge cache, and it is public, so Telegram can fetch it directly.
-// This is only used for fresh neural words (verified below); recorded and human
-// voices keep their existing paths and priorities.
-function ttsUrlForRecord(env, record) {
-  if (record?.id == null) return null;
-  const index = recordIndexById().get(record.id);
-  if (index == null) return null;
-  const base = String(env?.WORKER_URL ?? "https://coptic-dictionary-bot.abr429701.workers.dev").replace(/\/+$/u, "");
-  if (!base) return null;
-  return `${base}/tts/${index}.ogg`;
-}
-
 // Starts the lookup (admin recording) or speech generation right away, so it is ready when the text is sent.
 // Generated Matthew audio from the audio-human branch is the default voice.
 function prepareWordVoice(env, record, media = null, { skipRecorded = false } = {}) {
@@ -1326,10 +1312,7 @@ function prepareWordVoice(env, record, media = null, { skipRecorded = false } = 
       const neural = await neuralPromise;
       if (neural && isSingleWordOgg(neural)) {
         // Only the new single-word files are remembered by Telegram file_id; older files are never cached.
-        // Send by /tts URL when possible (Telegram fetches the already-repeated,
-        // edge-cached file itself), and keep the downloaded bytes only as a
-        // fallback if Telegram cannot fetch the URL.
-        return { audio: neural, neural: true, wordId: record.id, cacheable: true, ttsUrl: ttsUrlForRecord(env, record) };
+        return { audio: neural, neural: true, wordId: record.id, cacheable: true };
       }
       const human = await humanPromise;
       if (neural) {
@@ -1378,24 +1361,6 @@ async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1, 
     console.error("sendVoice by file_id failed", result?.description ?? "unknown");
     voice = { ...voice, fileId: undefined };
     if (!voice.audio) return { ok: false, reason: result?.description ?? "file_id rejected" };
-  }
-  // Fresh neural only: let Telegram fetch the /tts URL itself instead of the
-  // Worker uploading the bytes. If Telegram rejects the URL, fall through to
-  // the existing multipart upload below with the downloaded bytes.
-  if (voice.ttsUrl) {
-    try {
-      const urlResult = await telegram(env, "sendVoice", { chat_id: chatId, voice: voice.ttsUrl, ...(chatText ? { caption: chatText, parse_mode: "HTML" } : {}) });
-      if (urlResult?.ok) {
-        const sentId = urlResult.result?.voice?.file_id;
-        if (voice.neural && voice.cacheable !== false && voice.wordId != null && env.USERS && sentId) {
-          await storeCall(env, { op: "put", key: neuralKey(voice.wordId), value: { fileId: sentId } }).catch(() => {});
-        }
-        return { ok: true, fileId: sentId, messageId: urlResult.result?.message_id };
-      }
-      console.error("sendVoice by /tts URL failed, falling back to upload", urlResult?.description ?? "unknown");
-    } catch (error) {
-      console.error("sendVoice by /tts URL failed, falling back to upload", error instanceof Error ? error.message : "unknown error");
-    }
   }
   const body = voice.audio;
   if (!body || !body.byteLength) return { ok: false, reason: "empty audio" };
@@ -4382,6 +4347,13 @@ async function answerInline(env, inlineQuery) {
   let indexes = short ? await findPrefixMatches(env, normalizedQuery) : await findMatches(raw, env);
   if (!indexes.length && short) indexes = await findMatches(raw, env);
   indexes = indexes.slice(0, INLINE_LIMIT);
+  // Speculative prefetch: warm the dual-layer audio cache (RAM + Edge) for the
+  // top results so a tap sends the voice with zero download wait. Fire-and-forget;
+  // never blocks the inline answer. Keyed by word id, so row reordering is safe.
+  indexes.slice(0, 3).forEach((index) => {
+    const rec = records[index];
+    if (rec?.id != null) fetchPrebuiltSpeech(env, rec).catch(() => {});
+  });
   const voices = await recordedVoices(env, indexes);
   const results = indexes.map((index) => inlineArticle(index, normalizedQuery, voices[records[index].id], audioUrl(env, records[index].id)));
   const response = await answer(results, INLINE_CACHE_SECONDS);
