@@ -1303,17 +1303,21 @@ function prepareWordVoice(env, record, media = null, { skipRecorded = false } = 
       ]) : [null, null];
       if (cachedNeural?.fileId) return { fileId: cachedNeural.fileId, neural: true };
       if (cachedHuman?.fileId) return { fileId: cachedHuman.fileId, neural: true };
-      const [neural, human] = await Promise.all([
-        fetchPrebuiltSpeech(env, record).catch(() => null),
-        fetchHumanSpeech(env, record).catch(() => null),
-      ]);
-      if (neural) {
+      // Start both in parallel, but do not wait for the human fetch when a
+      // fresh neural file is already ready: the human file is only a fallback
+      // for words without a fresh neural file, so waiting for it used to add
+      // its whole fetch time to every fresh-neural word.
+      const neuralPromise = fetchPrebuiltSpeech(env, record).catch(() => null);
+      const humanPromise = fetchHumanSpeech(env, record).catch(() => null);
+      const neural = await neuralPromise;
+      if (neural && isSingleWordOgg(neural)) {
         // Only the new single-word files are remembered by Telegram file_id; older files are never cached.
-        const fresh = isSingleWordOgg(neural);
-        const voice = { audio: neural, neural: true, wordId: record.id, cacheable: fresh };
-        if (fresh) return voice;
+        return { audio: neural, neural: true, wordId: record.id, cacheable: true };
+      }
+      const human = await humanPromise;
+      if (neural) {
         if (human) return { audio: human, neural: true, human: true, wordId: record.id };
-        return voice;
+        return { audio: neural, neural: true, wordId: record.id, cacheable: false };
       }
       if (human) return { audio: human, neural: true, human: true, wordId: record.id };
     }
@@ -1742,14 +1746,28 @@ async function prepareSearch(env, chatId, query, page = 0, messageId = undefined
     return () => deliver({ text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup });
   }
   const matchIndex = matches[0];
+  // Start the voice fetch here, not inside the closure below: prepareSearch
+  // is already run in parallel with the user-registration round trip, so the
+  // audio can be downloading while that finishes instead of only starting
+  // after it. Only for real sends (messageId === undefined); edit cases never
+  // send a voice, so they must not pay for a fetch.
+  const singleOptions = meaningOptions(matchIndex, normalizedQuery);
+  const singleSelected = singleOptions[0] ?? { index: matchIndex, part: matchedPartIndex(records[matchIndex], normalizedQuery) };
+  const singleRecord = records[singleSelected.index];
+  const singleCardLanguage = uiLanguage(normalizedQuery);
+  const singleMedia = messageId === undefined ? lookupMedia(env, singleRecord, singleCardLanguage) : null;
+  const singleVoiceRecord = voiceRecordForSearch(singleRecord, normalizedQuery);
+  const singleVoice = messageId === undefined
+    ? prepareWordVoice(env, singleVoiceRecord, singleMedia, { skipRecorded: scriptKind(normalizedQuery) === "el" })
+    : null;
   return async () => {
-    const options = meaningOptions(matchIndex, normalizedQuery);
-    const selected = options[0] ?? { index: matchIndex, part: matchedPartIndex(records[matchIndex], normalizedQuery) };
-    const record = records[selected.index];
-    const cardLanguage = uiLanguage(normalizedQuery);
-    const media = messageId === undefined ? lookupMedia(env, record, cardLanguage) : null;
-    const voiceRecord = voiceRecordForSearch(record, normalizedQuery);
-    const voice = prepareWordVoice(env, voiceRecord, media, { skipRecorded: scriptKind(normalizedQuery) === "el" });
+    const options = singleOptions;
+    const selected = singleSelected;
+    const record = singleRecord;
+    const cardLanguage = singleCardLanguage;
+    const media = singleMedia;
+    const voiceRecord = singleVoiceRecord;
+    const voice = singleVoice;
     const more = moreMeaning(options, matchIndex, 1, undefined, true, uiLanguage(normalizedQuery));
     const text = widenResultText(`${formatRecord(record, selected.part, normalizedQuery)}${more.notice ?? ""}`).slice(0, MAX_MESSAGE_LENGTH);
     if (await sendCardEntry(env, chatId, record, text, media, more.reply_markup, cardLanguage)) {
