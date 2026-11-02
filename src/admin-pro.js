@@ -17,6 +17,19 @@ const AP = {
   weekly: "pro:weekly:last",
   security: "pro:security:audit",
   uistrings: "pro:uistrings",
+  gamify: "pro:gamify:scores",
+  antispamFlags: "pro:antispam:flags",
+  antispamAutoban: "pro:antispam:autoban",
+  events: "pro:events",
+  eventSeq: "pro:event:seq",
+  voiceRebuild: "pro:voice:rebuild",
+  referrals: "pro:referrals",
+  reports: "pro:reports",
+  reportSeq: "pro:report:seq",
+  rollout: "pro:rollout",
+  teamnotes: "pro:teamnotes",
+  teamnoteSeq: "pro:teamnote:seq",
+  maintAdv: "pro:maint:advanced",
 };
 const HR = "━━━━━━━━━━━━";
 const ROLE_LEVELS = { viewer: 1, mod: 2, admin: 3, owner: 4 };
@@ -74,6 +87,9 @@ export function createAdminPro(api) {
     return out;
   }
   let lastTickAt = 0;
+  // عدّاد السبام في الذاكرة (لكل عملية معزولة) — يُصفّى كل دقيقة
+  const spamCounters = new Map();
+  const SPAM_THRESHOLD = 30;
 
   // ==========================================================================
   // 1) نظام الصلاحيات المتدرجة
@@ -692,6 +708,588 @@ export function createAdminPro(api) {
   }
 
   // ==========================================================================
+  // 9) نظام النقاط والمكافآت (Gamification)
+  // ==========================================================================
+  const LEVELS = [
+    { min: 0, name: "مبتدئ" },
+    { min: 50, name: "متعلم" },
+    { min: 200, name: "متقدم" },
+    { min: 500, name: "خبير" },
+    { min: 1000, name: "أسطورة" },
+  ];
+  function levelForScore(score) {
+    let lvl = LEVELS[0];
+    for (const l of LEVELS) if (score >= l.min) lvl = l;
+    return lvl.name;
+  }
+  async function getScores(env) {
+    const v = await sget(env, AP.gamify, {});
+    return (v && typeof v === "object") ? v : {};
+  }
+  async function addPoints(env, userId, amount, reason) {
+    if (!env.USERS) return null;
+    const scores = await getScores(env);
+    const id = String(userId);
+    const cur = scores[id] || { score: 0, level: LEVELS[0].name, badges: [] };
+    cur.score = Number(cur.score || 0) + Number(amount || 0);
+    cur.level = levelForScore(cur.score);
+    const newBadges = [];
+    if (cur.score >= 50 && !cur.badges.includes("first50")) { cur.badges.push("first50"); newBadges.push("أول 50 نقطة"); }
+    if (cur.score >= 200 && !cur.badges.includes("adv200")) { cur.badges.push("adv200"); newBadges.push("متقدم (200)"); }
+    if (cur.score >= 1000 && !cur.badges.includes("legend")) { cur.badges.push("legend"); newBadges.push("أسطورة"); }
+    scores[id] = cur;
+    await sput(env, AP.gamify, scores);
+    return { score: cur.score, level: cur.level, newBadges };
+  }
+  async function cmdAddPoints(env, chatId, userId, args) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.mod)) return;
+    const parts = args.split(/\s+/u).filter(Boolean);
+    if (parts.length < 2) { await say(env, chatId)("ℹ️ الاستخدام: <code>/addpoints &lt;id&gt; &lt;نقاط&gt;</code>"); return; }
+    const targetId = String(parts[0]).replace(/[^0-9-]/gu, "");
+    const amount = Number(parts[1]);
+    if (!targetId || !Number.isFinite(amount)) { await say(env, chatId)("❌ معرف أو عدد نقاط غير صالح."); return; }
+    const res = await addPoints(env, targetId, amount, `admin:${userId}`);
+    await logSecurity(env, userId, "addpoints", `user=${targetId} amount=${amount}`);
+    await say(env, chatId)(`✅ أُضيفت <b>${fmt(amount)}</b> نقطة للمستخدم <code>${esc(targetId)}</code>.\nالرصيد الآن: <b>${fmt(res?.score ?? 0)}</b> (${esc(res?.level ?? "")})`);
+  }
+  async function cmdSetPoints(env, chatId, userId, args) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.admin)) return;
+    const parts = args.split(/\s+/u).filter(Boolean);
+    if (parts.length < 2) { await say(env, chatId)("ℹ️ الاستخدام: <code>/setpoints &lt;id&gt; &lt;نقاط&gt;</code>"); return; }
+    const targetId = String(parts[0]).replace(/[^0-9-]/gu, "");
+    const amount = Number(parts[1]);
+    if (!targetId || !Number.isFinite(amount) || amount < 0) { await say(env, chatId)("❌ قيمة غير صالحة."); return; }
+    const scores = await getScores(env);
+    scores[targetId] = { score: amount, level: levelForScore(amount), badges: (scores[targetId]?.badges) || [] };
+    await sput(env, AP.gamify, scores);
+    await logSecurity(env, userId, "setpoints", `user=${targetId} amount=${amount}`);
+    await say(env, chatId)(`✅ ضبط رصيد <code>${esc(targetId)}</code> على <b>${fmt(amount)}</b> نقطة (${esc(levelForScore(amount))}).`);
+  }
+  async function cmdLeaderboard(env, chatId, userId) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.viewer)) return;
+    const scores = await getScores(env);
+    const entries = Object.entries(scores).map(([id, v]) => ({ id, score: Number(v?.score || 0), level: v?.level || "" })).sort((a, b) => b.score - a.score).slice(0, 10);
+    if (!entries.length) { await say(env, chatId)("📭 لا توجد نقاط مسجلة بعد."); return; }
+    const lines = ["🏆 <b>لوحة المتصدرين (أعلى 10)</b>", HR];
+    entries.forEach((e, i) => lines.push(`${i + 1}. <code>${esc(e.id)}</code> — <b>${fmt(e.score)}</b> نقطة (${esc(e.level)})`));
+    await say(env, chatId)(lines.join("\n"));
+  }
+  async function cmdBadges(env, chatId, userId, args) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.viewer)) return;
+    const targetId = String(args.trim().split(/\s+/u)[0] || userId).replace(/[^0-9-]/gu, "");
+    const scores = await getScores(env);
+    const cur = scores[targetId];
+    if (!cur) { await say(env, chatId)(`📭 المستخدم <code>${esc(targetId)}</code> ليس لديه نقاط بعد.`); return; }
+    const badgeNames = { first50: "أول 50 نقطة", adv200: "متقدم (200)", legend: "أسطورة" };
+    const lines = [`🎖️ <b>شارات المستخدم</b> <code>${esc(targetId)}</code>`, HR, `النقاط: <b>${fmt(cur.score)}</b> — المستوى: <b>${esc(cur.level)}</b>`, ""];
+    if (!cur.badges?.length) lines.push("لا توجد شارات بعد.");
+    else cur.badges.forEach((b) => lines.push(`• ${esc(badgeNames[b] || b)}`));
+    await say(env, chatId)(lines.join("\n"));
+  }
+
+  // ==========================================================================
+  // 10) كشف السبام والحماية التلقائية (Anti-Spam)
+  // ==========================================================================
+  function noteRequest(env, userId) {
+    const id = String(userId);
+    const now = Date.now();
+    const rec = spamCounters.get(id) || { count: 0, windowStart: now };
+    if (now - rec.windowStart > 60000) { rec.count = 0; rec.windowStart = now; }
+    rec.count += 1;
+    spamCounters.set(id, rec);
+    return rec.count;
+  }
+  async function getSpamFlags(env) {
+    const v = await sget(env, AP.antispamFlags, {});
+    return (v && typeof v === "object") ? v : {};
+  }
+  async function antispamTick(env) {
+    const now = Date.now();
+    const flags = await getSpamFlags(env);
+    let changed = false;
+    for (const [id, rec] of spamCounters.entries()) {
+      if (now - rec.windowStart > 60000) { spamCounters.delete(id); continue; }
+      if (rec.count > SPAM_THRESHOLD && !flags[id]) {
+        flags[id] = { flaggedAt: now, peak: rec.count, status: "warned" };
+        changed = true;
+        const autoban = Boolean(await sget(env, AP.antispamAutoban, false));
+        if (autoban && bannedSet) {
+          try { await bannedSet(env).add?.(id); } catch { /* ignore */ }
+          flags[id].status = "banned";
+          await logSecurity(env, "system", "antispam_autoban", `user=${id} peak=${rec.count}`);
+        }
+        await sendAlert(env, "spam", `مستخدم <code>${esc(id)}</code> تجاوز عتبة السبام (${fmt(rec.count)} طلب/دقيقة).${autoban ? " تم حظره تلقائيًا." : ""}`);
+      }
+    }
+    if (changed) await sput(env, AP.antispamFlags, flags);
+  }
+  async function cmdAntispam(env, chatId, userId, args) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.admin)) return;
+    const arg = args.trim().toLowerCase();
+    if (arg === "on") { await sput(env, AP.antispamAutoban, true); await logSecurity(env, userId, "antispam_on", ""); await say(env, chatId)("✅ تم تفعيل الحظر التلقائي للسبام."); return; }
+    if (arg === "off") { await sput(env, AP.antispamAutoban, false); await logSecurity(env, userId, "antispam_off", ""); await say(env, chatId)("✅ تم إيقاف الحظر التلقائي (سيبقى التحذير فقط)."); return; }
+    const autoban = Boolean(await sget(env, AP.antispamAutoban, false));
+    const flags = await getSpamFlags(env);
+    const active = Object.keys(flags).length;
+    const liveCount = spamCounters.size;
+    await say(env, chatId)([
+      "🛡️ <b>حالة الحماية من السبام</b>", HR,
+      `الحظر التلقائي: <b>${autoban ? "مفعّل ⚠️" : "معطّل"}</b> (غيّره: /antispam on|off)`,
+      `العتبة: <b>${SPAM_THRESHOLD}</b> طلب/دقيقة`,
+      `مستخدمون مُعلمون: <b>${fmt(active)}</b>`,
+      `جلسات نشطة بالذاكرة: <b>${fmt(liveCount)}</b>`,
+      "",
+      "المُعلمون: /spamlist — مسح: /spamclear &lt;id&gt;",
+    ].join("\n"));
+  }
+  async function cmdSpamList(env, chatId, userId) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.mod)) return;
+    const flags = await getSpamFlags(env);
+    const entries = Object.entries(flags);
+    if (!entries.length) { await say(env, chatId)("📭 لا يوجد مستخدمون مُعلمون بالسبام."); return; }
+    const lines = ["🚫 <b>المستخدمون المُعلمون بالسبام</b>", HR];
+    entries.slice(0, 20).forEach(([id, f]) => lines.push(`• <code>${esc(id)}</code> — ذروة <b>${fmt(f.peak)}</b> — ${esc(f.status || "warned")} — ${new Date(Number(f.flaggedAt)).toLocaleString("en-GB")}`));
+    await say(env, chatId)(lines.join("\n"));
+  }
+  async function cmdSpamClear(env, chatId, userId, args) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.mod)) return;
+    const targetId = String(args.trim().split(/\s+/u)[0]).replace(/[^0-9-]/gu, "");
+    if (!targetId) { await say(env, chatId)("ℹ️ الاستخدام: <code>/spamclear &lt;id&gt;</code>"); return; }
+    const flags = await getSpamFlags(env);
+    delete flags[targetId];
+    spamCounters.delete(targetId);
+    await sput(env, AP.antispamFlags, flags);
+    await logSecurity(env, userId, "spamclear", `user=${targetId}`);
+    await say(env, chatId)(`✅ تم مسح علامة السبام للمستخدم <code>${esc(targetId)}</code>.`);
+  }
+
+  // ==========================================================================
+  // 11) سجل بحث مستخدم محدد
+  // ==========================================================================
+  async function cmdSearchHistory(env, chatId, userId, args) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.mod)) return;
+    const targetId = String(args.trim().split(/\s+/u)[0]).replace(/[^0-9-]/gu, "");
+    if (!targetId) { await say(env, chatId)("ℹ️ الاستخدام: <code>/searchhistory &lt;id&gt;</code>"); return; }
+    let history = [];
+    if (getUserHistory) {
+      try {
+        const h = await getUserHistory(env, targetId);
+        if (Array.isArray(h)) history = h;
+        else if (h && Array.isArray(h.history)) history = h.history;
+      } catch { /* ignore */ }
+    }
+    if (!history.length) {
+      const raw = await sget(env, `history:${targetId}`, null);
+      if (Array.isArray(raw)) history = raw;
+    }
+    if (!history.length) { await say(env, chatId)(`📭 لا يوجد سجل بحث للمستخدم <code>${esc(targetId)}</code>.`); return; }
+    const lines = [`🔍 <b>آخر 20 عملية بحث — </b><code>${esc(targetId)}</code>`, HR, "<code>الوقت            الكلمة</code>"];
+    history.slice(-20).reverse().forEach((h) => {
+      const t = h.at || h.time || h.timestamp || "";
+      const q = h.query || h.word || h.name || JSON.stringify(h).slice(0, 60);
+      lines.push(`<code>${esc(String(t).slice(0, 19).padEnd(19, " "))}</code> ${esc(String(q).slice(0, 40))}`);
+    });
+    await say(env, chatId)(lines.join("\n"));
+  }
+
+  // ==========================================================================
+  // 12) إدارة الأحداث/المناسبات المجدولة
+  // ==========================================================================
+  async function getEvents(env) {
+    const v = await sget(env, AP.events, []);
+    return Array.isArray(v) ? v : [];
+  }
+  async function cmdAddEvent(env, chatId, userId, args) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.admin)) return;
+    const m = /^(\d{4}-\d{2}-\d{2})\s+([^|]+?)\s*\|\s*([\s\S]+)$/u.exec(args.trim());
+    if (!m) { await say(env, chatId)("ℹ️ الاستخدام: <code>/addevent YYYY-MM-DD العنوان | الرسالة</code>"); return; }
+    const seq = Number(await sget(env, AP.eventSeq, 0)) + 1;
+    await sput(env, AP.eventSeq, seq);
+    const events = await getEvents(env);
+    events.push({ id: `EVT-${seq}`, title: m[2].trim(), date_iso: m[1], message: m[3].trim(), sent: false, createdAt: Date.now() });
+    await sput(env, AP.events, events.slice(-100));
+    await logSecurity(env, userId, "addevent", `id=EVT-${seq} date=${m[1]}`);
+    await say(env, chatId)(`✅ تمت إضافة الحدث <b>EVT-${seq}</b> (${esc(m[1])}): ${esc(m[2].trim())}`);
+  }
+  async function cmdEvents(env, chatId, userId) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.viewer)) return;
+    const events = await getEvents(env);
+    if (!events.length) { await say(env, chatId)("📭 لا توجد أحداث مجدولة."); return; }
+    const lines = ["📅 <b>الأحداث المجدولة</b>", HR];
+    events.slice(-20).forEach((e) => lines.push(`• <b>${esc(e.id)}</b> [${esc(e.date_iso)}] ${e.sent ? "✅ أُرسل" : "⏳ بانتظار"} — ${esc(e.title)}`));
+    lines.push("", "لحذف: <code>/delevent EVT-X</code>");
+    await say(env, chatId)(lines.join("\n"));
+  }
+  async function cmdDelEvent(env, chatId, userId, args) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.admin)) return;
+    const id = args.trim().split(/\s+/u)[0];
+    if (!id) { await say(env, chatId)("ℹ️ الاستخدام: <code>/delevent EVT-X</code>"); return; }
+    const events = await getEvents(env);
+    const filtered = events.filter((e) => e.id !== id);
+    if (filtered.length === events.length) { await say(env, chatId)(`❌ حدث ${esc(id)} غير موجود.`); return; }
+    await sput(env, AP.events, filtered);
+    await logSecurity(env, userId, "delevent", `id=${id}`);
+    await say(env, chatId)(`✅ تم حذف الحدث <b>${esc(id)}</b>.`);
+  }
+  async function eventsTick(env) {
+    const events = await getEvents(env);
+    const today = day();
+    let changed = false;
+    for (const e of events) {
+      if (e.sent || e.sending) continue;
+      if (e.date_iso > today) continue;
+      e.sending = true;
+      e.targets = e.targets || null;
+      if (!e.targets) {
+        const users = await allUsers(env);
+        e.targets = users.map((u) => String(u.id)).filter((id) => !adminIds(env).map(String).includes(id));
+        e.total = e.targets.length;
+        e.sentCount = 0;
+      }
+      const batch = e.targets.splice(0, CAMPAIGN_BATCH);
+      for (const id of batch) {
+        await telegram(env, "sendMessage", { chat_id: id, text: `📅 <b>${esc(e.title)}</b>\n${HR}\n${esc(e.message)}`, parse_mode: "HTML", disable_web_page_preview: true }).catch(() => null);
+        e.sentCount += 1;
+      }
+      if (!e.targets.length) { e.sent = true; e.sending = false; e.sentAt = Date.now(); delete e.targets; }
+      changed = true;
+    }
+    if (changed) await sput(env, AP.events, events);
+  }
+
+  // ==========================================================================
+  // 13) إدارة دفعية للأصوات
+  // ==========================================================================
+  async function cmdVoiceGaps(env, chatId, userId) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.admin)) return;
+    const ids = Object.keys(records || {});
+    let missing = 0;
+    const samples = [];
+    for (const id of ids.slice(0, 3000)) {
+      const rec = records[id];
+      const hasVoice = rec && (rec.voiceKey || rec.neuralKey || rec.humanKey || rec.voice || rec.audio);
+      if (!hasVoice) {
+        missing += 1;
+        if (samples.length < 10) samples.push(rec?.coptic || rec?.word || id);
+      }
+    }
+    const coverage = ids.length ? Math.round(((ids.length - missing) / ids.length) * 100) : 0;
+    const lines = [
+      "🎙️ <b>الكلمات بلا تسجيل صوتي</b>", HR,
+      `إجمالي الكلمات: <b>${fmt(ids.length)}</b>`,
+      `بدون صوت (عينة فحص): <b>${fmt(missing)}</b>`,
+      `نسبة التغطية التقديرية: <b>${coverage}%</b>`,
+    ];
+    if (samples.length) lines.push("", "عينات: " + samples.map((s) => `<code>${esc(String(s).slice(0, 20))}</code>`).join("، "));
+    lines.push("", "لإعادة بناء صوت: /rebuildvoice &lt;wordId|all&gt;");
+    await say(env, chatId)(lines.join("\n"));
+  }
+  async function cmdRebuildVoice(env, chatId, userId, args) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.admin)) return;
+    const target = args.trim();
+    if (!target) { await say(env, chatId)("ℹ️ الاستخدام: <code>/rebuildvoice &lt;wordId|all&gt;</code>"); return; }
+    const queue = await sget(env, AP.voiceRebuild, []);
+    const list = Array.isArray(queue) ? queue : [];
+    list.push({ target, requestedBy: String(userId), at: Date.now(), status: "pending" });
+    await sput(env, AP.voiceRebuild, list.slice(-200));
+    await logSecurity(env, userId, "rebuildvoice", `target=${target}`);
+    await say(env, chatId)(`✅ سُجّل طلب إعادة بناء الصوت لـ <code>${esc(target)}</code> في قائمة المعالجة (${fmt(list.length)} طلب).`);
+  }
+
+  // ==========================================================================
+  // 14) نظام الدعوات/الإحالات (Referral)
+  // ==========================================================================
+  async function getReferrals(env) {
+    const v = await sget(env, AP.referrals, {});
+    return (v && typeof v === "object") ? v : {};
+  }
+  async function registerReferral(env, referrerId, inviteeId) {
+    if (!env.USERS) return false;
+    const refs = await getReferrals(env);
+    const r = String(referrerId);
+    const list = refs[r] || [];
+    if (list.includes(String(inviteeId))) return false;
+    list.push(String(inviteeId));
+    refs[r] = list;
+    await sput(env, AP.referrals, refs);
+    await addPoints(env, referrerId, 10, "referral");
+    return true;
+  }
+  async function botUsername(env) {
+    const me = await telegram(env, "getMe", {}).catch(() => null);
+    return me?.result?.username || "";
+  }
+  async function cmdMyRef(env, chatId, userId) {
+    const username = await botUsername(env);
+    const link = username ? `https://t.me/${username}?start=ref_${userId}` : `https://t.me/<bot>?start=ref_${userId}`;
+    const refs = await getReferrals(env);
+    const count = (refs[String(userId)] || []).length;
+    await say(env, chatId)([
+      "🔗 <b>رابط الدعوة الخاص بك</b>", HR,
+      `<code>${esc(link)}</code>`,
+      "",
+      `الأصدقاء المدعوون: <b>${fmt(count)}</b>`,
+      "كل دعوة ناجحة تكسبك 10 نقاط!",
+    ].join("\n"));
+  }
+  async function cmdTopRef(env, chatId, userId) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.viewer)) return;
+    const refs = await getReferrals(env);
+    const entries = Object.entries(refs).map(([id, list]) => ({ id, count: Array.isArray(list) ? list.length : 0 })).sort((a, b) => b.count - a.count).slice(0, 10);
+    if (!entries.length) { await say(env, chatId)("📭 لا توجد إحالات مسجلة بعد."); return; }
+    const lines = ["🏆 <b>أفضل الدعاة (أعلى 10)</b>", HR];
+    entries.forEach((e, i) => lines.push(`${i + 1}. <code>${esc(e.id)}</code> — <b>${fmt(e.count)}</b> دعوة`));
+    await say(env, chatId)(lines.join("\n"));
+  }
+  async function cmdRefInfo(env, chatId, userId, args) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.mod)) return;
+    const targetId = String(args.trim().split(/\s+/u)[0] || userId).replace(/[^0-9-]/gu, "");
+    const refs = await getReferrals(env);
+    const list = refs[targetId] || [];
+    const lines = [`🔗 <b>إحالات المستخدم</b> <code>${esc(targetId)}</code>`, HR, `العدد: <b>${fmt(list.length)}</b>`];
+    if (list.length) { lines.push(""); list.slice(0, 20).forEach((id) => lines.push(`• <code>${esc(id)}</code>`)); }
+    await say(env, chatId)(lines.join("\n"));
+  }
+
+  // ==========================================================================
+  // 15) نظام إبلاغ المستخدمين (User Reporting)
+  // ==========================================================================
+  async function getReports(env) {
+    const v = await sget(env, AP.reports, []);
+    return Array.isArray(v) ? v : [];
+  }
+  async function cmdReport(env, chatId, userId, args) {
+    const parts = args.trim().split(/\s+/u);
+    if (parts.length < 2) { await say(env, chatId)("ℹ️ الاستخدام: <code>/report &lt;id أو @username&gt; السبب</code>"); return; }
+    const target = parts[0].replace(/^@/u, "");
+    const reason = parts.slice(1).join(" ").slice(0, 500);
+    const seq = Number(await sget(env, AP.reportSeq, 0)) + 1;
+    await sput(env, AP.reportSeq, seq);
+    const reports = await getReports(env);
+    reports.push({ id: `RPT-${seq}`, reporter: String(userId), target, reason, at: Date.now(), status: "open" });
+    await sput(env, AP.reports, reports.slice(-200));
+    await say(env, chatId)(`✅ تم استلام بلاغك <b>RPT-${seq}</b>، سيراجعه فريق الإدارة.`);
+    await notifyAdmins(env, `🚨 <b>بلاغ مستخدم جديد</b>\n${HR}\nالرقم: <b>RPT-${seq}</b>\nالمُبلغ: <code>${esc(userId)}</code>\nالمُبلغ عنه: <code>${esc(target)}</code>\nالسبب: ${esc(reason)}`);
+  }
+  async function cmdReports(env, chatId, userId) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.mod)) return;
+    const reports = await getReports(env);
+    const open = reports.filter((r) => r.status === "open");
+    if (!open.length) { await say(env, chatId)("📭 لا توجد بلاغات مفتوحة."); return; }
+    const lines = ["🚨 <b>البلاغات المفتوحة</b>", HR];
+    open.slice(-20).forEach((r) => lines.push(`• <b>${esc(r.id)}</b> — المُبلغ <code>${esc(r.reporter)}</code> عن <code>${esc(r.target)}</code>\n  ${esc(r.reason)}`));
+    lines.push("", "للإغلاق: <code>/reportclose RPT-X الإجراء المتخذ</code>");
+    await say(env, chatId)(lines.join("\n"));
+  }
+  async function cmdReportClose(env, chatId, userId, args) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.mod)) return;
+    const m = /^(RPT-\d+)\s*([\s\S]*)$/u.exec(args.trim());
+    if (!m) { await say(env, chatId)("ℹ️ الاستخدام: <code>/reportclose RPT-X الإجراء المتخذ</code>"); return; }
+    const reports = await getReports(env);
+    const r = reports.find((x) => x.id === m[1]);
+    if (!r) { await say(env, chatId)(`❌ بلاغ ${esc(m[1])} غير موجود.`); return; }
+    r.status = "closed";
+    r.action = String(m[2] || "").slice(0, 200);
+    r.closedBy = String(userId);
+    r.closedAt = Date.now();
+    await sput(env, AP.reports, reports);
+    await logSecurity(env, userId, "reportclose", `id=${r.id} action=${r.action}`);
+    await say(env, chatId)(`✅ تم إغلاق البلاغ <b>${esc(r.id)}</b>.`);
+  }
+
+  // ==========================================================================
+  // 16) اختبار A/B وتدريج الميزات (Feature Rollout)
+  // ==========================================================================
+  async function getRollout(env) {
+    const v = await sget(env, AP.rollout, {});
+    return (v && typeof v === "object") ? v : {};
+  }
+  async function isFeatureEnabled(env, featureName, userId) {
+    const rollout = await getRollout(env);
+    const cfg = rollout[String(featureName)];
+    if (!cfg) return false;
+    const id = String(userId);
+    if (Array.isArray(cfg.denyUsers) && cfg.denyUsers.includes(id)) return false;
+    if (Array.isArray(cfg.allowUsers) && cfg.allowUsers.includes(id)) return true;
+    const percent = Number(cfg.percent || 0);
+    if (percent >= 100) return true;
+    if (percent <= 0) return false;
+    let hash = 0;
+    for (let i = 0; i < id.length; i += 1) hash = ((hash << 5) - hash + id.charCodeAt(i)) | 0;
+    return (Math.abs(hash) % 100) < percent;
+  }
+  async function cmdRollout(env, chatId, userId, args) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.owner)) return;
+    const m = /^([a-z_][a-z0-9_]*)\s+(\d{1,3})%?$/iu.exec(args.trim());
+    if (!m) { await say(env, chatId)("ℹ️ الاستخدام: <code>/rollout &lt;feature&gt; &lt;0-100&gt;%</code>"); return; }
+    const percent = Math.max(0, Math.min(100, Number(m[2])));
+    const rollout = await getRollout(env);
+    const cur = rollout[m[1]] || { percent: 0, allowUsers: [], denyUsers: [] };
+    cur.percent = percent;
+    rollout[m[1]] = cur;
+    await sput(env, AP.rollout, rollout);
+    await logSecurity(env, userId, "rollout", `feature=${m[1]} percent=${percent}`);
+    await say(env, chatId)(`✅ ميزة <code>${esc(m[1])}</code> مفعّلة لـ <b>${percent}%</b> من المستخدمين.`);
+  }
+  async function cmdRolloutAllow(env, chatId, userId, args) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.owner)) return;
+    const parts = args.trim().split(/\s+/u);
+    if (parts.length < 2) { await say(env, chatId)("ℹ️ الاستخدام: <code>/rolloutallow &lt;feature&gt; &lt;id&gt;</code>"); return; }
+    const rollout = await getRollout(env);
+    const cur = rollout[parts[0]] || { percent: 0, allowUsers: [], denyUsers: [] };
+    cur.allowUsers = cur.allowUsers || [];
+    if (!cur.allowUsers.includes(parts[1])) cur.allowUsers.push(parts[1]);
+    cur.denyUsers = (cur.denyUsers || []).filter((x) => x !== parts[1]);
+    rollout[parts[0]] = cur;
+    await sput(env, AP.rollout, rollout);
+    await logSecurity(env, userId, "rolloutallow", `feature=${parts[0]} user=${parts[1]}`);
+    await say(env, chatId)(`✅ سماح للمستخدم <code>${esc(parts[1])}</code> بميزة <code>${esc(parts[0])}</code>.`);
+  }
+  async function cmdRolloutDeny(env, chatId, userId, args) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.owner)) return;
+    const parts = args.trim().split(/\s+/u);
+    if (parts.length < 2) { await say(env, chatId)("ℹ️ الاستخدام: <code>/rolloutdeny &lt;feature&gt; &lt;id&gt;</code>"); return; }
+    const rollout = await getRollout(env);
+    const cur = rollout[parts[0]] || { percent: 0, allowUsers: [], denyUsers: [] };
+    cur.denyUsers = cur.denyUsers || [];
+    if (!cur.denyUsers.includes(parts[1])) cur.denyUsers.push(parts[1]);
+    cur.allowUsers = (cur.allowUsers || []).filter((x) => x !== parts[1]);
+    rollout[parts[0]] = cur;
+    await sput(env, AP.rollout, rollout);
+    await logSecurity(env, userId, "rolloutdeny", `feature=${parts[0]} user=${parts[1]}`);
+    await say(env, chatId)(`✅ منع المستخدم <code>${esc(parts[1])}</code> من ميزة <code>${esc(parts[0])}</code>.`);
+  }
+  async function cmdRollouts(env, chatId, userId) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.admin)) return;
+    const rollout = await getRollout(env);
+    const entries = Object.entries(rollout);
+    if (!entries.length) { await say(env, chatId)("📭 لا توجد ميزات مدروجة حاليًا."); return; }
+    const lines = ["🧪 <b>تدريج الميزات (A/B)</b>", HR];
+    entries.forEach(([name, cfg]) => lines.push(`• <code>${esc(name)}</code>: <b>${fmt(cfg.percent)}%</b> — سماح: ${fmt((cfg.allowUsers || []).length)}، منع: ${fmt((cfg.denyUsers || []).length)}`));
+    await say(env, chatId)(lines.join("\n"));
+  }
+
+  // ==========================================================================
+  // 17) ملاحظات تعاون فريق الأدمن (Team Notes)
+  // ==========================================================================
+  async function getTeamNotes(env) {
+    const v = await sget(env, AP.teamnotes, []);
+    return Array.isArray(v) ? v : [];
+  }
+  async function cmdTeamNote(env, chatId, userId, args) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.mod)) return;
+    if (!args.trim()) { await say(env, chatId)("ℹ️ اكتب نص الملاحظة: <code>/teamnote النص</code>"); return; }
+    const seq = Number(await sget(env, AP.teamnoteSeq, 0)) + 1;
+    await sput(env, AP.teamnoteSeq, seq);
+    const notes = await getTeamNotes(env);
+    notes.push({ id: `NOTE-${seq}`, text: String(args).slice(0, 500), assignee: "", status: "open", by: String(userId), at: Date.now() });
+    await sput(env, AP.teamnotes, notes.slice(-200));
+    await say(env, chatId)(`✅ أُضيفت الملاحظة <b>NOTE-${seq}</b>.`);
+  }
+  async function cmdTeamNotes(env, chatId, userId, args) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.mod)) return;
+    const filter = args.trim().toLowerCase();
+    const notes = await getTeamNotes(env);
+    let list = notes.slice(-30);
+    if (filter === "open" || filter === "doing" || filter === "done") list = list.filter((n) => n.status === filter);
+    if (!list.length) { await say(env, chatId)("📭 لا توجد ملاحظات."); return; }
+    const statusName = { open: "مفتوحة", doing: "قيد التنفيذ", done: "مكتملة" };
+    const lines = ["📝 <b>ملاحظات الفريق</b>", HR];
+    list.forEach((n) => lines.push(`• <b>${esc(n.id)}</b> [${esc(statusName[n.status] || n.status)}] ${n.assignee ? `→ <code>${esc(n.assignee)}</code>` : ""}\n  ${esc(n.text)}`));
+    lines.push("", "تعيين: /teamassign NOTE-X &lt;id&gt; — إنجاز: /teamdone NOTE-X");
+    await say(env, chatId)(lines.join("\n"));
+  }
+  async function cmdTeamAssign(env, chatId, userId, args) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.mod)) return;
+    const parts = args.trim().split(/\s+/u);
+    if (parts.length < 2) { await say(env, chatId)("ℹ️ الاستخدام: <code>/teamassign NOTE-X &lt;userId&gt;</code>"); return; }
+    const notes = await getTeamNotes(env);
+    const n = notes.find((x) => x.id === parts[0]);
+    if (!n) { await say(env, chatId)(`❌ ملاحظة ${esc(parts[0])} غير موجودة.`); return; }
+    n.assignee = parts[1];
+    n.status = "doing";
+    await sput(env, AP.teamnotes, notes);
+    await say(env, chatId)(`✅ عُيّنت <b>${esc(n.id)}</b> إلى <code>${esc(parts[1])}</code> (قيد التنفيذ).`);
+  }
+  async function cmdTeamDone(env, chatId, userId, args) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.mod)) return;
+    const id = args.trim().split(/\s+/u)[0];
+    const notes = await getTeamNotes(env);
+    const n = notes.find((x) => x.id === id);
+    if (!n) { await say(env, chatId)(`❌ ملاحظة ${esc(id)} غير موجودة.`); return; }
+    n.status = "done";
+    n.doneBy = String(userId);
+    n.doneAt = Date.now();
+    await sput(env, AP.teamnotes, notes);
+    await say(env, chatId)(`✅ أُكملت الملاحظة <b>${esc(id)}</b>.`);
+  }
+
+  // ==========================================================================
+  // 18) وضع الصيانة المتقدم (Advanced Maintenance)
+  // ==========================================================================
+  async function getMaintAdv(env) {
+    const v = await sget(env, AP.maintAdv, null);
+    return (v && typeof v === "object") ? v : null;
+  }
+  async function cmdMaintAdv(env, chatId, userId, args) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.owner)) return;
+    const m = /^(\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2})?)\s+(\d+)\s+([\s\S]+)$/u.exec(args.trim());
+    if (!m) { await say(env, chatId)("ℹ️ الاستخدام: <code>/maintadv YYYY-MM-DD[THH:MM] المدة_بالدقائق الرسالة</code>"); return; }
+    const startAt = Date.parse(m[1].replace(" ", "T"));
+    const durationMin = Number(m[2]);
+    if (!Number.isFinite(startAt) || !Number.isFinite(durationMin) || durationMin <= 0) { await say(env, chatId)("❌ تاريخ أو مدة غير صالحة."); return; }
+    const cfg = { scheduledAt: startAt, autoResumeAt: startAt + durationMin * 60000, message: String(m[3]).slice(0, 500), durationMin, active: false, createdBy: String(userId) };
+    await sput(env, AP.maintAdv, cfg);
+    await logSecurity(env, userId, "maintadv_schedule", `start=${new Date(startAt).toISOString()} duration=${durationMin}min`);
+    await say(env, chatId)(`✅ تمت جدولة الصيانة المتقدمة.\nالبداية: <b>${new Date(startAt).toLocaleString("en-GB")}</b>\nالمدة: <b>${fmt(durationMin)}</b> دقيقة\nالرسالة: ${esc(cfg.message)}`);
+  }
+  async function cmdMaintAdvStatus(env, chatId, userId) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.admin)) return;
+    const cfg = await getMaintAdv(env);
+    if (!cfg) { await say(env, chatId)("📭 لا توجد صيانة مجدولة. جدولها بـ /maintadv."); return; }
+    const now = Date.now();
+    const lines = ["🌙 <b>حالة الصيانة المتقدمة</b>", HR];
+    if (cfg.active) {
+      const remain = Math.max(0, Math.round((cfg.autoResumeAt - now) / 60000));
+      lines.push(`الحالة: <b>مفعّلة الآن ⚠️</b> — متبقٍ <b>${fmt(remain)}</b> دقيقة`);
+    } else if (cfg.scheduledAt > now) {
+      const until = Math.round((cfg.scheduledAt - now) / 60000);
+      lines.push(`الحالة: <b>مجدولة</b> — تبدأ خلال <b>${fmt(until)}</b> دقيقة`);
+    } else {
+      lines.push("الحالة: <b>منتهية</b>");
+    }
+    lines.push(`البداية: ${new Date(Number(cfg.scheduledAt)).toLocaleString("en-GB")}`, `المدة: ${fmt(cfg.durationMin)} دقيقة`, `الرسالة: ${esc(cfg.message)}`, "", "للإلغاء: /maintadvcancel");
+    await say(env, chatId)(lines.join("\n"));
+  }
+  async function cmdMaintAdvCancel(env, chatId, userId) {
+    if (!await requireRole(env, userId, chatId, ROLE_LEVELS.owner)) return;
+    const cfg = await getMaintAdv(env);
+    if (!cfg) { await say(env, chatId)("📭 لا توجد صيانة مجدولة للإلغاء."); return; }
+    if (cfg.active && setMaintenance) { try { await setMaintenance(env, false); } catch { /* ignore */ } }
+    await sdel(env, AP.maintAdv);
+    await logSecurity(env, userId, "maintadv_cancel", "");
+    await say(env, chatId)("✅ تم إلغاء الصيانة المتقدمة.");
+  }
+  async function maintAdvTick(env) {
+    const cfg = await getMaintAdv(env);
+    if (!cfg) return;
+    const now = Date.now();
+    if (!cfg.active && now >= cfg.scheduledAt) {
+      cfg.active = true;
+      cfg.activatedAt = now;
+      if (setMaintenance) { try { await setMaintenance(env, true); } catch { /* ignore */ } }
+      await sput(env, AP.maintAdv, cfg);
+      await notifyAdmins(env, `🌙 بدأت الصيانة المجدولة الآن. المدة: ${fmt(cfg.durationMin)} دقيقة. الرسالة: ${esc(cfg.message)}`);
+      return;
+    }
+    if (cfg.active && now >= cfg.autoResumeAt) {
+      if (setMaintenance) { try { await setMaintenance(env, false); } catch { /* ignore */ } }
+      await sdel(env, AP.maintAdv);
+      await notifyAdmins(env, "✅ انتهت الصيانة المجدولة وتمت استعادة البوت بالكامل.");
+    }
+  }
+
+  // ==========================================================================
   // COMMANDS
   // ==========================================================================
   const COMMANDS = {
@@ -712,6 +1310,36 @@ export function createAdminPro(api) {
     strings: { desc: "سلاسل الواجهة القابلة للتعديل", run: (c) => cmdStrings(c.env, c.chatId, c.userId) },
     setstring: { desc: "تعديل سلسلة واجهة", run: (c) => cmdSetString(c.env, c.chatId, c.userId, c.args) },
     resetstring: { desc: "إعادة سلسلة للافتراضي", run: (c) => cmdResetString(c.env, c.chatId, c.userId, c.args) },
+    addpoints: { desc: "إضافة نقاط لمستخدم", run: (c) => cmdAddPoints(c.env, c.chatId, c.userId, c.args) },
+    setpoints: { desc: "ضبط نقاط مستخدم", run: (c) => cmdSetPoints(c.env, c.chatId, c.userId, c.args) },
+    leaderboard: { desc: "لوحة متصدرين النقاط", run: (c) => cmdLeaderboard(c.env, c.chatId, c.userId) },
+    badges: { desc: "شارات مستخدم", run: (c) => cmdBadges(c.env, c.chatId, c.userId, c.args) },
+    antispam: { desc: "حالة وإعدادات مضاد السبام", run: (c) => cmdAntispam(c.env, c.chatId, c.userId, c.args) },
+    spamlist: { desc: "المستخدمون المُعلمون بالسبام", run: (c) => cmdSpamList(c.env, c.chatId, c.userId) },
+    spamclear: { desc: "مسح علامة سبام لمستخدم", run: (c) => cmdSpamClear(c.env, c.chatId, c.userId, c.args) },
+    searchhistory: { desc: "سجل بحث مستخدم", run: (c) => cmdSearchHistory(c.env, c.chatId, c.userId, c.args) },
+    addevent: { desc: "إضافة حدث/مناسبة مجدولة", run: (c) => cmdAddEvent(c.env, c.chatId, c.userId, c.args) },
+    events: { desc: "قائمة الأحداث المجدولة", run: (c) => cmdEvents(c.env, c.chatId, c.userId) },
+    delevent: { desc: "حذف حدث مجدول", run: (c) => cmdDelEvent(c.env, c.chatId, c.userId, c.args) },
+    voicegaps: { desc: "كلمات بلا تسجيل صوتي", run: (c) => cmdVoiceGaps(c.env, c.chatId, c.userId) },
+    rebuildvoice: { desc: "إعادة بناء صوت كلمة", run: (c) => cmdRebuildVoice(c.env, c.chatId, c.userId, c.args) },
+    myref: { desc: "رابط الدعوة الخاص بي", run: (c) => cmdMyRef(c.env, c.chatId, c.userId) },
+    toptop: { desc: "أفضل الدعاة بالإحالات", run: (c) => cmdTopRef(c.env, c.chatId, c.userId) },
+    refinfo: { desc: "تفاصيل إحالات مستخدم", run: (c) => cmdRefInfo(c.env, c.chatId, c.userId, c.args) },
+    report: { desc: "الإبلاغ عن مستخدم", run: (c) => cmdReport(c.env, c.chatId, c.userId, c.args) },
+    reports: { desc: "قائمة البلاغات المفتوحة", run: (c) => cmdReports(c.env, c.chatId, c.userId) },
+    reportclose: { desc: "إغلاق بلاغ", run: (c) => cmdReportClose(c.env, c.chatId, c.userId, c.args) },
+    rollout: { desc: "تدريج ميزة بنسبة مئوية", run: (c) => cmdRollout(c.env, c.chatId, c.userId, c.args) },
+    rolloutallow: { desc: "سماح مستخدم بميزة", run: (c) => cmdRolloutAllow(c.env, c.chatId, c.userId, c.args) },
+    rolloutdeny: { desc: "منع مستخدم من ميزة", run: (c) => cmdRolloutDeny(c.env, c.chatId, c.userId, c.args) },
+    rollouts: { desc: "عرض تدريج الميزات", run: (c) => cmdRollouts(c.env, c.chatId, c.userId) },
+    teamnote: { desc: "إضافة ملاحظة للفريق", run: (c) => cmdTeamNote(c.env, c.chatId, c.userId, c.args) },
+    teamnotes: { desc: "قائمة ملاحظات الفريق", run: (c) => cmdTeamNotes(c.env, c.chatId, c.userId, c.args) },
+    teamassign: { desc: "تعيين ملاحظة لمستخدم", run: (c) => cmdTeamAssign(c.env, c.chatId, c.userId, c.args) },
+    teamdone: { desc: "إكمال ملاحظة فريق", run: (c) => cmdTeamDone(c.env, c.chatId, c.userId, c.args) },
+    maintadv: { desc: "جدولة صيانة متقدمة", run: (c) => cmdMaintAdv(c.env, c.chatId, c.userId, c.args) },
+    maintadvstatus: { desc: "حالة الصيانة المتقدمة", run: (c) => cmdMaintAdvStatus(c.env, c.chatId, c.userId) },
+    maintadvcancel: { desc: "إلغاء الصيانة المتقدمة", run: (c) => cmdMaintAdvCancel(c.env, c.chatId, c.userId) },
   };
 
   // ==========================================================================
@@ -725,8 +1353,9 @@ export function createAdminPro(api) {
     const name = match[1].toLowerCase();
     const entry = COMMANDS[name];
     if (!entry) return false;
-    // /support متاح للجميع؛ بقية الأوامر تتطلب أدمن على الأقل
-    if (name !== "support" && !isAdminUser(env, userId) && !(await hasRole(env, userId, ROLE_LEVELS.viewer))) {
+    // هذه الأوامر متاحة للجميع؛ بقية الأوامر تتطلب أدمن على الأقل
+    const PUBLIC_COMMANDS = ["support", "report", "myref", "myrole"];
+    if (!PUBLIC_COMMANDS.includes(name) && !isAdminUser(env, userId) && !(await hasRole(env, userId, ROLE_LEVELS.viewer))) {
       await say(env, chatId)("⛔ هذا الأمر مخصص لفريق الإدارة فقط.");
       return true;
     }
@@ -803,7 +1432,10 @@ export function createAdminPro(api) {
     try { await campaignTick(env); } catch { /* ignore */ }
     try { await alertsTick(env); } catch { /* ignore */ }
     try { await weeklyTick(env); } catch { /* ignore */ }
+    try { await antispamTick(env); } catch { /* ignore */ }
+    try { await eventsTick(env); } catch { /* ignore */ }
+    try { await maintAdvTick(env); } catch { /* ignore */ }
   }
 
-  return { handle, handleCallback, tick, commands: COMMANDS };
+  return { handle, handleCallback, tick, commands: COMMANDS, addPoints, registerReferral, isFeatureEnabled, noteRequest };
 }
