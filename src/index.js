@@ -4,6 +4,7 @@ import cardManifest from "../data/cards.json" with { type: "json" };
 import welcomeImageBase64 from "./welcome-image.js";
 import { createAdminExtras } from "./admin-extra.js";
 import { createAdminExtras2 } from "./admin-extra2.js";
+import { createAdminPro } from "./admin-pro.js";
 
 const BOT_TITLE = "📖 القاموس القبطي البحيري";
 const PAGE_SIZE = 1;
@@ -1142,6 +1143,23 @@ const ADMIN_COMMANDS = [
   { command: "livewords", description: "الأكثر بحثًا الآن" },
   { command: "voicecoverage", description: "تغطية الأصوات" },
   { command: "a2help", description: "أوامر الحزمة الثانية" },
+  { command: "proadmin", description: "لوحة تحكم احترافية تفاعلية" },
+  { command: "prohelp", description: "أوامر الحزمة الاحترافية" },
+  { command: "setrole", description: "تعيين صلاحية مستخدم" },
+  { command: "roles", description: "عرض كل الصلاحيات" },
+  { command: "myrole", description: "صلاحيتي الحالية" },
+  { command: "targeted", description: "إعلان مستهدف بشرائح" },
+  { command: "tickets", description: "قائمة تذاكر الدعم" },
+  { command: "ticket", description: "الرد على تذكرة دعم" },
+  { command: "ticketclose", description: "إغلاق تذكرة دعم" },
+  { command: "support", description: "فتح تذكرة دعم" },
+  { command: "alerts", description: "حالة التنبيهات الذكية" },
+  { command: "weekly", description: "ملخص أسبوعي فوري" },
+  { command: "securitylog", description: "سجل تدقيق الأمان" },
+  { command: "exportsecurity", description: "تصدير سجل الأمان" },
+  { command: "strings", description: "سلاسل الواجهة القابلة للتعديل" },
+  { command: "setstring", description: "تعديل سلسلة واجهة" },
+  { command: "resetstring", description: "إعادة سلسلة للافتراضي" },
 ];
 const commandMenuReady = new Set();
 
@@ -4955,6 +4973,10 @@ async function handleUpdate(update, env, ctx) {
       await adminExtras2.handleCallback({ env, callback });
       return;
     }
+    if (String(callback.data ?? "").startsWith("ap|")) {
+      await adminPro.handleCallback({ env, callback });
+      return;
+    }
     if (String(callback.data ?? "").startsWith("ad|")) {
       await handleAdminDashboardCallback(env, callback, ctx);
       return;
@@ -5154,6 +5176,7 @@ async function handleUpdate(update, env, ctx) {
   inBackground(ctx, adminExtras.processSchedules(env));
   // Auto jobs: scheduled maintenance, daily digest, auto backup, sync watcher (one check per minute).
   inBackground(ctx, adminExtras2.tick(env));
+  inBackground(ctx, adminPro.tick(env));
   inBackground(ctx, autoWordOfTheDay(env, message.chat.id, ctx));
   // Batch 5: MOTD (رسالة اليوم) once per day on /start for regular users.
   if (!isAdmin(env, userId) && (text === "/start" || text.startsWith("/start "))) inBackground(ctx, maybeSendMotd(env, message.chat.id, userId));
@@ -5194,11 +5217,14 @@ async function handleUpdate(update, env, ctx) {
     await setArchiveChat(env, message, "here");
     return;
   }
+  // admin-pro: /support متاح لجميع المستخدمين لفتح تذاكر الدعم
+  if (text === "/support" || (text && text.startsWith("/support "))) { if (await adminPro.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return; }
   if (isAdmin(env, userId) && isPrivate) {
     const admin = await getUser(env, userId);
     // Extra admin pack (src/admin-extra.js). Unknown commands fall through to the handlers below.
     if (await adminExtras.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return;
     if (await adminExtras2.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return;
+    if (await adminPro.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return;
     if (text === "/cancel" && admin?.bc) {
       await saveUser(env, userId, { ...admin, bc: undefined });
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "تم إلغاء الإرسال الجماعي." });
@@ -6075,6 +6101,14 @@ const adminExtras2 = createAdminExtras2({
   customMaintenanceMessage,
   recentSearches,
   botVersion: BOT_VERSION,
+});
+
+const adminPro = createAdminPro({
+  telegram, escapeHtml, storeCall, getUser, saveUser, bannedSet, readAnalyticsReport,
+  readErrorLog, sendTextFile, logAdminAction, adminIds, driveConfig, callAppsScript,
+  records, formatUptime, readMisses, flushMisses, cacheInfo, botVersion: BOT_VERSION,
+  adminStatsOp: () => (activeEnv ? storeCall(activeEnv, { op: "adminStats" }).catch(() => ({})) : Promise.resolve({})),
+  getUserHistory, maintenanceOn, setMaintenance, recentSearches,
 });
 
 // Serialized background chain: fast-ack hands each update to ctx.waitUntil, but updates
