@@ -1190,6 +1190,8 @@ const ADMIN_COMMANDS = [
   { command: "maintadv", description: "جدولة صيانة متقدمة" },
   { command: "maintadvstatus", description: "حالة الصيانة المتقدمة" },
   { command: "maintadvcancel", description: "إلغاء الصيانة المتقدمة" },
+  { command: "exitsupport", description: "إنهاء وضع محادثة الدعم" },
+  { command: "mytickets", description: "تذاكر الدعم الخاصة بي" },
 ];
 const commandMenuReady = new Set();
 
@@ -5247,8 +5249,8 @@ async function handleUpdate(update, env, ctx) {
     await setArchiveChat(env, message, "here");
     return;
   }
-  // admin-pro: أوامر متاحة لجميع المستخدمين (تذاكر، بلاغات، إحالات، صلاحية)
-  if (text && /^\/(support|report|myref|myrole)(@\S+)?(\s|$)/u.test(text)) { if (await adminPro.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return; }
+  // admin-pro: أوامر عامة + محادثة الدعم النصية المتصلة (handle يرجع false بسرعة لغير المعالج فلا يكسر البحث العادي)
+  if (isPrivate && !isAdmin(env, userId)) { if (await adminPro.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return; }
   if (isAdmin(env, userId) && isPrivate) {
     const admin = await getUser(env, userId);
     // Extra admin pack (src/admin-extra.js). Unknown commands fall through to the handlers below.
