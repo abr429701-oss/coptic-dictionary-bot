@@ -30,6 +30,7 @@ const AP = {
   teamnotes: "pro:teamnotes",
   teamnoteSeq: "pro:teamnote:seq",
   maintAdv: "pro:maint:advanced",
+  supportFlow: "pro:support:flow",
 };
 const HR = "━━━━━━━━━━━━";
 const ROLE_LEVELS = { viewer: 1, mod: 2, admin: 3, owner: 4 };
@@ -431,17 +432,62 @@ export function createAdminPro(api) {
   // ==========================================================================
   // تذاكر الدعم (/support, /tickets, /ticket, /ticketclose)
   // ==========================================================================
-  async function cmdSupport(env, chatId, userId, args, fromName) {
-    if (!args.trim()) {
-      await say(env, chatId)("ℹ️ اكتب مشكلتك بعد الأمر: <code>/support نص المشكلة</code>");
-      return;
+  // ----- أدوات حالة محادثة الدعم (supportFlow) -----
+  async function getSupportFlow(env) {
+    const v = await sget(env, AP.supportFlow, {});
+    return (v && typeof v === "object") ? v : {};
+  }
+  async function setSupportFlow(env, userId, ticketId) {
+    const flow = await getSupportFlow(env);
+    flow[String(userId)] = { ticketId: String(ticketId), activeSince: Date.now() };
+    await sput(env, AP.supportFlow, flow);
+  }
+  async function clearSupportFlow(env, userId) {
+    const flow = await getSupportFlow(env);
+    delete flow[String(userId)];
+    await sput(env, AP.supportFlow, flow);
+  }
+  function findOpenTicket(tickets, userId) {
+    const id = String(userId);
+    return tickets.find((t) => String(t.userId) === id && t.status === "open") || null;
+  }
+  function lastThreadMessages(t, n) {
+    const all = [{ by: "user", text: t.text, at: t.createdAt }, ...(Array.isArray(t.replies) ? t.replies : [])];
+    return all.slice(-n);
+  }
+  async function appendUserMessage(env, chatId, userId, text, fromName) {
+    const tickets = await getTickets(env);
+    const existing = findOpenTicket(tickets, userId);
+    if (existing) {
+      existing.replies = existing.replies || [];
+      existing.replies.push({ by: "user", text: String(text).slice(0, 2000), at: Date.now() });
+      await sput(env, AP.tickets, tickets);
+      await setSupportFlow(env, userId, existing.id);
+      await say(env, chatId)(`✅ أُلحقت رسالتك بتذكرتك المفتوحة <b>${esc(existing.id)}</b>.`);
+      await notifyAdmins(env, `💬 <b>رسالة جديدة في تذكرة</b> ${esc(existing.id)}\n${HR}\nالمستخدم: <code>${esc(userId)}</code> ${esc(fromName ? `(${fromName})` : "")}\nالنص: ${esc(String(text).slice(0, 300))}`);
+      return existing.id;
     }
     const ticketId = await nextTicketId(env);
-    const tickets = await getTickets(env);
-    tickets.push({ id: ticketId, userId: String(userId), name: String(fromName ?? "").slice(0, 60), chatId: String(chatId), text: String(args).slice(0, 2000), status: "open", createdAt: Date.now(), replies: [] });
+    tickets.push({ id: ticketId, userId: String(userId), name: String(fromName ?? "").slice(0, 60), chatId: String(chatId), text: String(text).slice(0, 2000), status: "open", createdAt: Date.now(), replies: [] });
     await sput(env, AP.tickets, tickets.slice(-200));
-    await say(env, chatId)(`✅ ${esc(DEFAULT_STRINGS.support_thanks)}\nرقم تذكرتك: <b>${esc(ticketId)}</b>`);
-    await notifyAdmins(env, `🎫 <b>تذكرة دعم جديدة</b>\n${HR}\nالرقم: <b>${esc(ticketId)}</b>\nالمستخدم: <code>${esc(userId)}</code> ${esc(fromName ? `(${fromName})` : "")}\nالنص: ${esc(String(args).slice(0, 300))}`);
+    await setSupportFlow(env, userId, ticketId);
+    await say(env, chatId)(`✅ ${esc(DEFAULT_STRINGS.support_thanks)}\nرقم تذكرتك: <b>${esc(ticketId)}</b>\nيمكنك متابعة المحادثة بإرسال رسائل نصية مباشرة. لإنهاء وضع الدعم: /exitsupport`);
+    await notifyAdmins(env, `🎫 <b>تذكرة دعم جديدة</b>\n${HR}\nالرقم: <b>${esc(ticketId)}</b>\nالمستخدم: <code>${esc(userId)}</code> ${esc(fromName ? `(${fromName})` : "")}\nالنص: ${esc(String(text).slice(0, 300))}`);
+    return ticketId;
+  }
+  async function cmdSupport(env, chatId, userId, args, fromName) {
+    if (!args.trim()) {
+      const tickets = await getTickets(env);
+      const existing = findOpenTicket(tickets, userId);
+      if (existing) {
+        await setSupportFlow(env, userId, existing.id);
+        await say(env, chatId)(`ℹ️ لديك تذكرة مفتوحة بالفعل: <b>${esc(existing.id)}</b>. أرسل رسالتك النصية الآن وستُلحق بها. لإنهاء الدعم: /exitsupport`);
+      } else {
+        await say(env, chatId)("ℹ️ اكتب مشكلتك بعد الأمر: <code>/support نص المشكلة</code>");
+      }
+      return;
+    }
+    await appendUserMessage(env, chatId, userId, args, fromName);
   }
   async function cmdTickets(env, chatId, userId) {
     if (!await requireRole(env, userId, chatId, ROLE_LEVELS.mod)) return;
@@ -450,7 +496,12 @@ export function createAdminPro(api) {
     if (!open.length) { await say(env, chatId)("📭 لا توجد تذاكر مفتوحة حاليًا."); return; }
     const lines = ["🎫 <b>قائمة التذاكر المفتوحة</b>", HR];
     for (const t of open.slice(-20)) {
-      lines.push(`• <b>${esc(t.id)}</b> — <code>${esc(t.userId)}</code> ${esc(t.name ? `(${t.name})` : "")}\n  ${esc(String(t.text).slice(0, 120))}`);
+      lines.push(`• <b>${esc(t.id)}</b> — <code>${esc(t.userId)}</code> ${esc(t.name ? `(${t.name})` : "")}`);
+      const thread = lastThreadMessages(t, 3);
+      thread.forEach((m) => {
+        const who = m.by === "user" ? "👤" : "🛡️";
+        lines.push(`  ${who} ${esc(String(m.text).slice(0, 100))}`);
+      });
     }
     lines.push("", "للرد: <code>/ticket TKT-XXXX الرد</code>\nللإغلاق: <code>/ticketclose TKT-XXXX</code>");
     await say(env, chatId)(lines.join("\n"));
@@ -462,11 +513,14 @@ export function createAdminPro(api) {
     const tickets = await getTickets(env);
     const t = tickets.find((x) => x.id === m[1]);
     if (!t) { await say(env, chatId)(`❌ تذكرة ${esc(m[1])} غير موجودة.`); return; }
+    t.replies = t.replies || [];
     t.replies.push({ by: String(userId), text: String(m[2]).slice(0, 2000), at: Date.now() });
     await sput(env, AP.tickets, tickets);
-    await telegram(env, "sendMessage", { chat_id: t.chatId, text: `📩 <b>رد على تذكرتك ${esc(t.id)}</b>\n${HR}\n${esc(String(m[2]))}`, parse_mode: "HTML", disable_web_page_preview: true }).catch(() => null);
+    // إعادة تفعيل وضع الدعم للمستخدم حتى يتمكن من المتابعة (لا يُغيَّر الحالة — تظل مفتوحة)
+    await setSupportFlow(env, t.userId, t.id);
+    await telegram(env, "sendMessage", { chat_id: t.chatId, text: `📩 <b>رد على تذكرتك ${esc(t.id)}</b>\n${HR}\n${esc(String(m[2]))}\n\nيمكنك الرد بإرسال رسالة نصية مباشرة. لإنهاء الدعم: /exitsupport`, parse_mode: "HTML", disable_web_page_preview: true }).catch(() => null);
     await logSecurity(env, userId, "ticket_reply", `ticket=${t.id}`);
-    await say(env, chatId)(`✅ تم إرسال الرد على <b>${esc(t.id)}</b> وإشعار المستخدم.`);
+    await say(env, chatId)(`✅ تم إرسال الرد على <b>${esc(t.id)}</b>، إشعار المستخدم، وإعادة تفعيل محادثة الدعم.`);
   }
   async function cmdTicketClose(env, chatId, userId, args) {
     if (!await requireRole(env, userId, chatId, ROLE_LEVELS.mod)) return;
@@ -479,9 +533,28 @@ export function createAdminPro(api) {
     t.closedAt = Date.now();
     t.closedBy = String(userId);
     await sput(env, AP.tickets, tickets);
-    await telegram(env, "sendMessage", { chat_id: t.chatId, text: `✅ تم إغلاق تذكرتك <b>${esc(t.id)}</b>. إذا كانت المشكلة مستمرة، افتح تذكرة جديدة عبر /support.`, parse_mode: "HTML" }).catch(() => null);
+    // إنهاء وضع الدعم للمستخدم المرتبط بالتذكرة
+    await clearSupportFlow(env, t.userId);
+    await telegram(env, "sendMessage", { chat_id: t.chatId, text: `✅ تم إغلاق تذكرتك <b>${esc(t.id)}</b>. يمكنك الآن متابعة استخدام البوت طبيعيًا. إذا كانت المشكلة مستمرة، افتح تذكرة جديدة عبر /support.`, parse_mode: "HTML" }).catch(() => null);
     await logSecurity(env, userId, "ticket_close", `ticket=${t.id}`);
-    await say(env, chatId)(`✅ تم إغلاق التذكرة <b>${esc(t.id)}</b> وإشعار المستخدم.`);
+    await say(env, chatId)(`✅ تم إغلاق التذكرة <b>${esc(t.id)}</b>، إنهاء وضع الدعم للمستخدم، وإشعاره.`);
+  }
+  async function cmdExitSupport(env, chatId, userId) {
+    await clearSupportFlow(env, userId);
+    await say(env, chatId)("✅ تم إنهاء وضع الدعم. يمكنك الآن متابعة استخدام البوت طبيعيًا (البحث في القاموس).");
+  }
+  async function cmdMyTickets(env, chatId, userId) {
+    const tickets = await getTickets(env);
+    const mine = tickets.filter((t) => String(t.userId) === String(userId));
+    if (!mine.length) { await say(env, chatId)("📭 ليس لديك تذاكر دعم. افتح واحدة عبر /support."); return; }
+    const lines = ["🎫 <b>تذاكر الدعم الخاصة بك</b>", HR];
+    mine.slice(-10).reverse().forEach((t) => {
+      const state = t.status === "open" ? "🟢 مفتوحة" : "⚪ مغلقة";
+      const last = lastThreadMessages(t, 1)[0];
+      lines.push(`• <b>${esc(t.id)}</b> — ${state}\n  آخر رسالة: ${esc(String(last?.text ?? t.text).slice(0, 100))}`);
+    });
+    lines.push("", "لإنهاء وضع الدعم الحالي: /exitsupport");
+    await say(env, chatId)(lines.join("\n"));
   }
 
   // ==========================================================================
@@ -790,7 +863,7 @@ export function createAdminPro(api) {
   // ==========================================================================
   // 10) كشف السبام والحماية التلقائية (Anti-Spam)
   // ==========================================================================
-  function noteRequest(env, userId) {
+  function bumpSpamCounter(env, userId) {
     const id = String(userId);
     const now = Date.now();
     const rec = spamCounters.get(id) || { count: 0, windowStart: now };
@@ -1340,6 +1413,9 @@ export function createAdminPro(api) {
     maintadv: { desc: "جدولة صيانة متقدمة", run: (c) => cmdMaintAdv(c.env, c.chatId, c.userId, c.args) },
     maintadvstatus: { desc: "حالة الصيانة المتقدمة", run: (c) => cmdMaintAdvStatus(c.env, c.chatId, c.userId) },
     maintadvcancel: { desc: "إلغاء الصيانة المتقدمة", run: (c) => cmdMaintAdvCancel(c.env, c.chatId, c.userId) },
+    exitsupport: { desc: "إنهاء وضع محادثة الدعم", run: (c) => cmdExitSupport(c.env, c.chatId, c.userId) },
+    done: { desc: "إنهاء وضع محادثة الدعم", run: (c) => cmdExitSupport(c.env, c.chatId, c.userId) },
+    mytickets: { desc: "تذاكر الدعم الخاصة بي", run: (c) => cmdMyTickets(c.env, c.chatId, c.userId) },
   };
 
   // ==========================================================================
@@ -1347,14 +1423,27 @@ export function createAdminPro(api) {
   // ==========================================================================
   async function handle({ env, chatId, userId, text, raw }) {
     const source = String(raw ?? text ?? "").trim();
-    if (!source.startsWith("/")) return false;
+    // محادثة الدعم المتصلة: رسالة نصية عادية من مستخدم لديه وضع دعم نشط
+    if (!source.startsWith("/")) {
+      const flow = await getSupportFlow(env);
+      if (flow[String(userId)]) {
+        try {
+          const fromName = raw?.from?.first_name || raw?.from?.username || "";
+          await appendUserMessage(env, chatId, userId, source, fromName);
+        } catch (error) {
+          await say(env, chatId)(`❌ تعذّر إلحاق رسالة الدعم: ${esc(error instanceof Error ? error.message : "خطأ")}`);
+        }
+        return true;
+      }
+      return false;
+    }
     const match = /^\/([a-zA-Z_0-9]+)(?:@[^\s]+)?(?:\s+([\s\S]*))?$/u.exec(source);
     if (!match) return false;
     const name = match[1].toLowerCase();
     const entry = COMMANDS[name];
     if (!entry) return false;
     // هذه الأوامر متاحة للجميع؛ بقية الأوامر تتطلب أدمن على الأقل
-    const PUBLIC_COMMANDS = ["support", "report", "myref", "myrole"];
+    const PUBLIC_COMMANDS = ["support", "report", "myref", "myrole", "exitsupport", "done", "mytickets"];
     if (!PUBLIC_COMMANDS.includes(name) && !isAdminUser(env, userId) && !(await hasRole(env, userId, ROLE_LEVELS.viewer))) {
       await say(env, chatId)("⛔ هذا الأمر مخصص لفريق الإدارة فقط.");
       return true;
@@ -1437,5 +1526,5 @@ export function createAdminPro(api) {
     try { await maintAdvTick(env); } catch { /* ignore */ }
   }
 
-  return { handle, handleCallback, tick, commands: COMMANDS, addPoints, registerReferral, isFeatureEnabled, noteRequest };
+  return { handle, handleCallback, tick, commands: COMMANDS, addPoints, registerReferral, isFeatureEnabled, bumpSpamCounter };
 }
