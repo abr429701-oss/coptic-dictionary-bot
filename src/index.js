@@ -1160,6 +1160,36 @@ const ADMIN_COMMANDS = [
   { command: "strings", description: "سلاسل الواجهة القابلة للتعديل" },
   { command: "setstring", description: "تعديل سلسلة واجهة" },
   { command: "resetstring", description: "إعادة سلسلة للافتراضي" },
+  { command: "addpoints", description: "إضافة نقاط لمستخدم" },
+  { command: "setpoints", description: "ضبط نقاط مستخدم" },
+  { command: "leaderboard", description: "لوحة متصدرين النقاط" },
+  { command: "badges", description: "شارات مستخدم" },
+  { command: "antispam", description: "حالة وإعدادات مضاد السبام" },
+  { command: "spamlist", description: "المستخدمون المُعلمون بالسبام" },
+  { command: "spamclear", description: "مسح علامة سبام" },
+  { command: "searchhistory", description: "سجل بحث مستخدم" },
+  { command: "addevent", description: "إضافة حدث مجدول" },
+  { command: "events", description: "قائمة الأحداث المجدولة" },
+  { command: "delevent", description: "حذف حدث مجدول" },
+  { command: "voicegaps", description: "كلمات بلا تسجيل صوتي" },
+  { command: "rebuildvoice", description: "إعادة بناء صوت كلمة" },
+  { command: "myref", description: "رابط الدعوة الخاص بي" },
+  { command: "toptop", description: "أفضل الدعاة بالإحالات" },
+  { command: "refinfo", description: "تفاصيل إحالات مستخدم" },
+  { command: "report", description: "الإبلاغ عن مستخدم" },
+  { command: "reports", description: "قائمة البلاغات المفتوحة" },
+  { command: "reportclose", description: "إغلاق بلاغ" },
+  { command: "rollout", description: "تدريج ميزة بنسبة مئوية" },
+  { command: "rolloutallow", description: "سماح مستخدم بميزة" },
+  { command: "rolloutdeny", description: "منع مستخدم من ميزة" },
+  { command: "rollouts", description: "عرض تدريج الميزات" },
+  { command: "teamnote", description: "إضافة ملاحظة للفريق" },
+  { command: "teamnotes", description: "قائمة ملاحظات الفريق" },
+  { command: "teamassign", description: "تعيين ملاحظة لمستخدم" },
+  { command: "teamdone", description: "إكمال ملاحظة فريق" },
+  { command: "maintadv", description: "جدولة صيانة متقدمة" },
+  { command: "maintadvstatus", description: "حالة الصيانة المتقدمة" },
+  { command: "maintadvcancel", description: "إلغاء الصيانة المتقدمة" },
 ];
 const commandMenuReady = new Set();
 
@@ -5217,8 +5247,8 @@ async function handleUpdate(update, env, ctx) {
     await setArchiveChat(env, message, "here");
     return;
   }
-  // admin-pro: /support متاح لجميع المستخدمين لفتح تذاكر الدعم
-  if (text === "/support" || (text && text.startsWith("/support "))) { if (await adminPro.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return; }
+  // admin-pro: أوامر متاحة لجميع المستخدمين (تذاكر، بلاغات، إحالات، صلاحية)
+  if (text && /^\/(support|report|myref|myrole)(@\S+)?(\s|$)/u.test(text)) { if (await adminPro.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return; }
   if (isAdmin(env, userId) && isPrivate) {
     const admin = await getUser(env, userId);
     // Extra admin pack (src/admin-extra.js). Unknown commands fall through to the handlers below.
