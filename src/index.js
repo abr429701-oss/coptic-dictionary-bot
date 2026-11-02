@@ -1303,21 +1303,17 @@ function prepareWordVoice(env, record, media = null, { skipRecorded = false } = 
       ]) : [null, null];
       if (cachedNeural?.fileId) return { fileId: cachedNeural.fileId, neural: true };
       if (cachedHuman?.fileId) return { fileId: cachedHuman.fileId, neural: true };
-      // Start both in parallel, but do not wait for the human fetch when a
-      // fresh neural file is already ready: the human file is only a fallback
-      // for words without a fresh neural file, so waiting for it used to add
-      // its whole fetch time to every fresh-neural word.
-      const neuralPromise = fetchPrebuiltSpeech(env, record).catch(() => null);
-      const humanPromise = fetchHumanSpeech(env, record).catch(() => null);
-      const neural = await neuralPromise;
-      if (neural && isSingleWordOgg(neural)) {
-        // Only the new single-word files are remembered by Telegram file_id; older files are never cached.
-        return { audio: neural, neural: true, wordId: record.id, cacheable: true };
-      }
-      const human = await humanPromise;
+      const [neural, human] = await Promise.all([
+        fetchPrebuiltSpeech(env, record).catch(() => null),
+        fetchHumanSpeech(env, record).catch(() => null),
+      ]);
       if (neural) {
+        // Only the new single-word files are remembered by Telegram file_id; older files are never cached.
+        const fresh = isSingleWordOgg(neural);
+        const voice = { audio: neural, neural: true, wordId: record.id, cacheable: fresh };
+        if (fresh) return voice;
         if (human) return { audio: human, neural: true, human: true, wordId: record.id };
-        return { audio: neural, neural: true, wordId: record.id, cacheable: false };
+        return voice;
       }
       if (human) return { audio: human, neural: true, human: true, wordId: record.id };
     }
@@ -1339,8 +1335,9 @@ const CAPTION_MAX = 1024;
 // as ONE Telegram message, so they appear at the same instant instead of as two separate updates.
 async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1, searchedWord = "", caption = "", options = {}) {
   const chatText = String(caption ?? "").slice(0, CAPTION_MAX);
-  // بلا أي مؤشر «جارٍ إرسال ملف صوتي…»: الصوت يُجهَّز بالفعل بالتوازي قبل هذه اللحظة،
-  // والمؤشر لا يفعل سوى إظهار عبارة يكرهها المستخدم وتأخير إحساس الوصول.
+  // Show "recording voice…" in the chat right away so the user sees progress while the
+  // audio is being prepared/fetched, instead of a silent pause.
+  telegram(env, "sendChatAction", { chat_id: chatId, action: "upload_voice" }).catch(() => null);
   const voiceT0 = Date.now();
   let voice = await prepared;
   if (!voice) {
@@ -4347,13 +4344,6 @@ async function answerInline(env, inlineQuery) {
   let indexes = short ? await findPrefixMatches(env, normalizedQuery) : await findMatches(raw, env);
   if (!indexes.length && short) indexes = await findMatches(raw, env);
   indexes = indexes.slice(0, INLINE_LIMIT);
-  // Speculative prefetch: warm the dual-layer audio cache (RAM + Edge) for the
-  // top results so a tap sends the voice with zero download wait. Fire-and-forget;
-  // never blocks the inline answer. Keyed by word id, so row reordering is safe.
-  indexes.slice(0, 3).forEach((index) => {
-    const rec = records[index];
-    if (rec?.id != null) fetchPrebuiltSpeech(env, rec).catch(() => {});
-  });
   const voices = await recordedVoices(env, indexes);
   const results = indexes.map((index) => inlineArticle(index, normalizedQuery, voices[records[index].id], audioUrl(env, records[index].id)));
   const response = await answer(results, INLINE_CACHE_SECONDS);
