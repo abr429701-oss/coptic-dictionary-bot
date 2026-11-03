@@ -9,7 +9,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import worker, { UserStore } from "../src/index.js";
 import { translateFieldValue, VALUE_TRANSLATIONS } from "../src/field-translations.js";
-import { resetAudioCaches } from "../src/neural-voice.js";
+import { resetAudioCaches, HUMAN_AUDIO_VERSION } from "../src/neural-voice.js";
 import records from "../data/dictionary.json" with { type: "json" };
 
 // The in-isolate audio memory must never leak one test's fetched word into the next test.
@@ -1822,4 +1822,31 @@ test("VOICE_CAPTION on: the result text and the voice go out as a single message
   assert.match(String(voice.payload.caption ?? ""), /الكلمة/u, "the result text must ride on the voice caption");
   const separateTexts = calls.filter((call) => call.url.endsWith("/sendMessage") && /الكلمة/u.test(String(call.payload?.text ?? "")));
   assert.equal(separateTexts.length, 0, "the result text must not be sent as its own message");
+});
+
+// Regression for the reported bug: ⲫⲱⲥ (id 9251) has audio on BOTH source branches, yet the
+// bot stayed silent when the remembered Telegram file_id went stale (older voice build).
+// The stale id must be discarded and the voice rebuilt from source bytes — never dropped silently.
+test("ⲫⲱⲥ regression: a stale cached file_id must not silence the voice", async () => {
+  resetAudioCaches();
+  const target = records.find((record) => String(record.id) === "9251") ?? findCopticRecord("ⲫⲱⲥ");
+  assert.ok(target, "the dictionary must contain ⲫⲱⲥ");
+  const calls = [];
+  fakeTelegramApi(calls);
+  const kvEnv = { ...env, USERS: fakeKv() };
+  kvEnv.USERS.store.set(`ttsid:human:${HUMAN_AUDIO_VERSION}:9251`, { fileId: "stale-file-id" });
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const u = String(url);
+    // Telegram rejects the remembered file_id exactly the way it does after a voice rebuild.
+    if (u.endsWith("/sendVoice") && !(options.body instanceof FormData)) {
+      return Response.json({ ok: false, error_code: 400, description: "Bad Request: wrong file identifier specified" });
+    }
+    return original(url, options);
+  };
+  try {
+    await worker.fetch(updateRequest({ message: { text: "ⲫⲱⲥ", chat: { id: 4242 }, from: { id: 4242 } } }), kvEnv);
+    const byteSend = calls.find((call) => call.url.endsWith("/sendVoice") && call.options.body instanceof FormData);
+    assert.ok(byteSend, "after the stale file_id was rejected, the voice must be rebuilt from source bytes and sent");
+  } finally { globalThis.fetch = original; }
 });

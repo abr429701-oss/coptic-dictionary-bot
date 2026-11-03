@@ -1332,9 +1332,9 @@ async function repeatedRecording(env, fileId) {
 
 // Starts the lookup (admin recording) or speech generation right away, so it is ready when the text is sent.
 // Generated Matthew audio from the audio-human branch is the default voice.
-function prepareWordVoice(env, record, media = null, { skipRecorded = false } = {}) {
+function prepareWordVoice(env, record, media = null, { skipRecorded = false, ignoreCachedFileIds = false } = {}) {
   return (async () => {
-    if (!skipRecorded && env.USERS && record?.id != null) {
+    if (!skipRecorded && !ignoreCachedFileIds && env.USERS && record?.id != null) {
       try {
         const saved = media ? { value: (await media).voice } : await storeCall(env, { op: "get", key: voiceKey(record.id) });
         if (saved?.value?.fileId) return await repeatedRecording(env, saved.value.fileId);
@@ -1355,7 +1355,7 @@ function prepareWordVoice(env, record, media = null, { skipRecorded = false } = 
       // fully before even starting the human fetch, doubling the wait on words that only
       // have one of the two. Priority is unchanged: fresh single-word neural > human > older neural.
       // Both fetches are .catch(() => null): a neural 404/throw still falls back to human audio.
-      const [cachedNeural, cachedHuman] = env.USERS ? await Promise.all([
+      const [cachedNeural, cachedHuman] = (!ignoreCachedFileIds && env.USERS) ? await Promise.all([
         storeCall(env, { op: "get", key: nKey }).then((r) => r.value).catch(() => null),
         storeCall(env, { op: "get", key: hKey }).then((r) => r.value).catch(() => null),
       ]) : [null, null];
@@ -1429,7 +1429,18 @@ async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1, 
     // A remembered file_id can become invalid (old build, deleted file). Try one fresh send below.
     console.error("sendVoice by file_id failed", result?.description ?? "unknown");
     voice = { ...voice, fileId: undefined };
-    if (!voice.audio) return { ok: false, reason: result?.description ?? "file_id rejected" };
+    if (!voice.audio) {
+      // ROOT-CAUSE FIX: an unusable cached file_id with no bytes in hand used to abandon
+      // the voice SILENTLY (no message, no log with the word) — the user just saw text
+      // with no audio even though the audio sources exist. Rebuild from the source
+      // branches before giving up, and say so in the log.
+      const rebuilt = await prepareWordVoice(env, record, null, { skipRecorded: true, ignoreCachedFileIds: true });
+      if (rebuilt?.audio) voice = { ...rebuilt, fileId: undefined };
+      if (!voice.audio) {
+        console.error("sendVoice abandoned: file_id rejected and source fetch failed", { word: String(record?.coptic ?? "").slice(0, 30), reason: result?.description ?? "unknown" });
+        return { ok: false, reason: result?.description ?? "file_id rejected and source fetch failed" };
+      }
+    }
   }
   const body = voice.audio;
   if (!body || !body.byteLength) return { ok: false, reason: "empty audio" };
@@ -1481,7 +1492,7 @@ async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1, 
     }
     await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
   }
-  console.error("Voice send failed", lastError);
+  console.error("Voice send failed", { word: String(record?.coptic ?? "").slice(0, 30), reason: lastError });
   return { ok: false, reason: lastError };
 }
 
