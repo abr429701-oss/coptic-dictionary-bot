@@ -1864,7 +1864,8 @@ async function sendRecord(env, chatId, index, partIndex = -1, searchKey = "") {
 async function sendMeaningStep(env, chatId, baseIndex, firstPart, step) {
   const options = meaningOptions(baseIndex, "", firstPart);
   if (!options[step]) return;
-  await sendOption(env, chatId, options, baseIndex, step, undefined, undefined, "", false);
+  // Send the word voice for each meaning too (same word, consistent with every other result path).
+  await sendOption(env, chatId, options, baseIndex, step, undefined, undefined, "", true);
 }
 async function sendOption(env, chatId, options, baseIndex, step, fallback = undefined, callbackFor = undefined, searchKey = "", sendVoice = true, ctx = undefined) {
   if (searchKey) await detectScriptKind(env, searchKey);
@@ -5080,8 +5081,9 @@ async function handleUpdate(update, env, ctx) {
       const chain = await exactChain(env, kind, normalizedChainQuery);
       const step = Number(chainPick[1]);
       if (chatForPick && chain[step]) {
-        const sendVoice = ARABIC_LETTER.test(normalizedChainQuery);
-        await inBackground(ctx, sendOption(env, chatForPick, chain, chain[0].index, step, undefined, chainCallback(chainQuery), chainQuery, sendVoice));
+        // Every result in the chain sends its voice (recorded if present, else TTS fallback),
+        // exactly like the first result. ARABIC_LETTER.test() here wrongly silenced non-Arabic queries.
+        await inBackground(ctx, sendOption(env, chatForPick, chain, chain[0].index, step, undefined, chainCallback(chainQuery), chainQuery, true));
       }
       return;
     }
