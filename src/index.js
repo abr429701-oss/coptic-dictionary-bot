@@ -1343,13 +1343,21 @@ function prepareWordVoice(env, record, media = null, { skipRecorded = false } = 
       }
     }
     if (record?.id != null) {
+      // In-memory file_id cache first (no DO round-trip), then DO, then fetch.
+      const nKey = neuralKey(record.id);
+      const hKey = humanKey(record.id);
+      const memNeural = voiceFileIdCache.get(nKey);
+      if (memNeural) return { fileId: memNeural, neural: true };
+      const memHuman = voiceFileIdCache.get(hKey);
+      if (memHuman) return { fileId: memHuman, neural: true };
       // Cached file_ids for both sources are read in PARALLEL (two DO reads), then both
       // audio sources are fetched in PARALLEL too. The old code awaited the neural fetch
       // fully before even starting the human fetch, doubling the wait on words that only
       // have one of the two. Priority is unchanged: fresh single-word neural > human > older neural.
+      // Both fetches are .catch(() => null): a neural 404/throw still falls back to human audio.
       const [cachedNeural, cachedHuman] = env.USERS ? await Promise.all([
-        storeCall(env, { op: "get", key: neuralKey(record.id) }).then((r) => r.value).catch(() => null),
-        storeCall(env, { op: "get", key: humanKey(record.id) }).then((r) => r.value).catch(() => null),
+        storeCall(env, { op: "get", key: nKey }).then((r) => r.value).catch(() => null),
+        storeCall(env, { op: "get", key: hKey }).then((r) => r.value).catch(() => null),
       ]) : [null, null];
       if (cachedNeural?.fileId) return { fileId: cachedNeural.fileId, neural: true };
       if (cachedHuman?.fileId) return { fileId: cachedHuman.fileId, neural: true };
@@ -1373,13 +1381,27 @@ function prepareWordVoice(env, record, media = null, { skipRecorded = false } = 
   })();
 }
 
-// Text + voice can travel as ONE Telegram message (voice with the result as its caption),
-// which is the only way both arrive at literally the same instant. VOICE_CAPTION=off
-// restores the older two-message behaviour.
+// Text + voice travel as ONE Telegram message (voice with the result as its caption) when
+// VOICE_CAPTION is not "off". Production (wrangler.jsonc) sets it "on"; the test suite's
+// default env keeps "off" to exercise the two-message fallback path. Default is on.
 const voiceCaptionMode = (env) => String(env?.VOICE_CAPTION ?? "on") !== "off";
 
-// Telegram caps captions at 1024 characters; anything longer is sent as its own message.
+// In-memory cache of Telegram file_ids for word voices (keyed by neuralKey/humanKey). Avoids
+// a Durable Object round-trip on every lookup; populated after each successful send. Capped.
+const voiceFileIdCache = new Map();
+function rememberVoiceFileId(key, fileId) {
+  if (!key || !fileId) return;
+  voiceFileIdCache.set(key, fileId);
+  if (voiceFileIdCache.size > 6000) voiceFileIdCache.clear();
+}
+
+// Telegram caps captions at 1024 characters; anything longer is truncated in the caption and
+// the full text is sent immediately after the voice (never before it).
 const CAPTION_MAX = 1024;
+function captionFor(text) {
+  const t = String(text ?? "");
+  return t.length <= CAPTION_MAX ? t : `${t.slice(0, CAPTION_MAX - 1)}…`;
+}
 
 // Sends one prepared voice. `caption` is optional: when present the text and the voice travel
 // as ONE Telegram message, so they appear at the same instant instead of as two separate updates.
@@ -1433,9 +1455,14 @@ async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1, 
         const sentId = parsed.result?.voice?.file_id;
         if (voice.repeatFor && env.USERS && sentId) {
           await storeCall(env, { op: "put", key: repeatedRecordingKey(voice.repeatFor), value: { fileId: sentId } }).catch(() => {});
+          rememberVoiceFileId(repeatedRecordingKey(voice.repeatFor), sentId);
         } else if (voice.neural && voice.cacheable !== false && voice.wordId != null && env.USERS && sentId) {
           // Remember Telegram's file_id so this word is uploaded once, then reused forever.
-          await storeCall(env, { op: "put", key: voice.human ? humanKey(voice.wordId) : neuralKey(voice.wordId), value: { fileId: sentId } }).catch(() => {});
+          const fkey = voice.human ? humanKey(voice.wordId) : neuralKey(voice.wordId);
+          await storeCall(env, { op: "put", key: fkey, value: { fileId: sentId } }).catch(() => {});
+          rememberVoiceFileId(fkey, sentId);
+        } else if (sentId && voice.wordId != null) {
+          rememberVoiceFileId(voice.human ? humanKey(voice.wordId) : neuralKey(voice.wordId), sentId);
         }
         return { ok: true, fileId: sentId, messageId: parsed.result?.message_id };
       }
@@ -1826,9 +1853,15 @@ async function prepareSearch(env, chatId, query, page = 0, messageId = undefined
     // separate text message, because Telegram cannot hold them in a caption.
     const audioEnabled = await featureEnabled(env, "audio");
     const autoVoice = audioEnabled ? await voiceAutoOn(env, chatId) : false;
-    const captionMode = voiceCaptionMode(env);
-    if (captionMode && messageId === undefined && autoVoice && text.length <= CAPTION_MAX) {
-      const sent = await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery, text, { textFallback: text });
+    const captionMode = voiceCaptionMode(env); // on in production: voice+text travel as one message
+    let voiceAttempted = false;
+    if (captionMode && messageId === undefined && autoVoice) {
+      voiceAttempted = true;
+      // Caption capped at 1024 chars; longer results are truncated in the caption and the full
+      // text is sent immediately AFTER the voice (never before it). Voice is prepared first;
+      // sendChatAction=upload_voice shows a silent indicator while it is fetched.
+      const caption = captionFor(text);
+      const sent = await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery, caption, { textFallback: null });
       if (sent.ok) {
         // Attach the "next meaning" button to the voice message itself.
         if (more.reply_markup) {
@@ -1838,11 +1871,16 @@ async function prepareSearch(env, chatId, query, page = 0, messageId = undefined
             reply_markup: more.reply_markup,
           }).catch(() => null);
         }
-        return { ok: true, result: { message_id: sent.messageId, caption: text } };
+        if (text.length > CAPTION_MAX) {
+          await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) }).catch(() => null);
+        }
+        return { ok: true, result: { message_id: sent.messageId, caption } };
       }
+      // Voice unavailable or failed: never block the user; fall through and deliver text now.
+      if (sent.reason !== "no-audio") logError(env, new Error(`voice send failed: ${sent.reason ?? "unknown"}`), { where: "search-voice", word: String(record?.coptic ?? "").slice(0, 30) });
     }
     const response = await deliver({ text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
-    if (messageId === undefined && autoVoice) await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery, "", { textFallback: null });
+    if (messageId === undefined && autoVoice && !voiceAttempted) await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery, "", { textFallback: null });
     return response;
   };
 }
@@ -1881,20 +1919,30 @@ async function sendOption(env, chatId, options, baseIndex, step, fallback = unde
   const more = moreMeaning(options, baseIndex, step + 1, callbackFor ?? (searchKey ? chainCallback(searchKey) : undefined), true, uiLanguage(searchKey));
   const text = widenResultText(`${formatRecord(record, selected.part, searchKey)}${more.notice ?? ""}`).slice(0, MAX_MESSAGE_LENGTH);
   const wantVoice = sendVoice && await featureEnabled(env, "audio") && await voiceAutoOn(env, chatId);
-  const captionMode = voiceCaptionMode(env);
+  const captionMode = voiceCaptionMode(env); // on in production: voice+text travel as one message
+  let voiceAttempted = false;
   if (!(await sendCardEntry(env, chatId, record, text, media, more.reply_markup, cardLanguage))) {
-    if (wantVoice && captionMode && text.length <= CAPTION_MAX) {
-      const sent = await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, searchKey, text, { textFallback: text });
+    if (wantVoice && captionMode) {
+      voiceAttempted = true;
+      // Voice is prepared first (silent upload_voice indicator), then voice+caption sent in
+      // one request. Long captions are truncated and the full text is sent right after.
+      const caption = captionFor(text);
+      const sent = await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, searchKey, caption, { textFallback: null });
       if (sent.ok) {
         if (more.reply_markup && sent.messageId) {
           await telegram(env, "editMessageReplyMarkup", { chat_id: chatId, message_id: sent.messageId, reply_markup: more.reply_markup }).catch(() => null);
         }
+        if (text.length > CAPTION_MAX) {
+          await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) }).catch(() => null);
+        }
         return;
       }
+      if (sent.reason !== "no-audio") logError(env, new Error(`voice send failed: ${sent.reason ?? "unknown"}`), { where: "option-voice", word: String(record?.coptic ?? "").slice(0, 30) });
     }
+    // Voice unavailable or failed: deliver the text immediately, never block.
     await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
   }
-  if (wantVoice) await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, searchKey, "", { textFallback: text });
+  if (wantVoice && !voiceAttempted) await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, searchKey, "", { textFallback: text });
 }
 
 // Registered users live in one SQLite-backed Durable Object (no extra Cloudflare token permission needed).
