@@ -528,7 +528,16 @@ async function handleMenuButton(env, callback) {
     const key = button.kind === "photo" ? "photo" : button.kind === "video" ? "video" : button.kind === "audio" ? "audio" : "document";
     const caption = String(button.text ?? "").trim() ? button.text : button.label;
     const res = await telegram(env, method, { chat_id: chatId, [key]: button.fileId, ...(caption ? { caption } : {}) });
-    if (!res?.ok) await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تعذّر إرسال هذا المحتوى حاليًا. جرّب لاحقًا أو أبلغ الإدارة." });
+    if (!res?.ok) {
+      await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تعذّر إرسال هذا المحتوى حاليًا. جرّب لاحقًا أو أبلغ الإدارة." });
+      // Video-send fix (2026-11-05): a normal user keeps the generic text,
+      // but an admin also sees Telegram's real reason (e.g. "wrong file
+      // identifier" when a video button holds a document/photo file_id),
+      // so a broken button can be diagnosed instead of failing silently.
+      if (isAdmin(env, userId)) {
+        await telegram(env, "sendMessage", { chat_id: chatId, text: `🛠 سبب الرفض من تيليجرام: ${res?.description ?? `خطأ ${res?.error_code ?? "غير معروف"}`}` });
+      }
+    }
     return;
   }
 }

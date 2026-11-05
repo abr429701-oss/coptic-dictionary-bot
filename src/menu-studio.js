@@ -749,6 +749,23 @@ export function createMenuStudio(deps) {
     };
     const file = pick();
     if (!file) { await send(env, chatId, "📎 أرسل صورة أو فيديو أو صوتًا أو ملفًا.", [S.BACK]); return true; }
+    // Video-send fix (2026-11-05): the chosen kind must match what actually
+    // arrived. A video sent "as a file" arrives as message.document, and a
+    // photo sent for a video button arrives as message.photo; storing either
+    // under kind "video" makes every later sendVideo fail with 400 (wrong
+    // file identifier) and the user only sees the generic "could not send"
+    // message. So on mismatch: save nothing, tell the admin what arrived
+    // vs what the button needs, and keep the media step active so they can
+    // resend correctly. When no kind was chosen yet, keep the old behaviour
+    // and use the detected kind.
+    if (state.kind && MEDIA_KINDS.includes(state.kind) && file.kind !== state.kind) {
+      const needHint = state.kind === "video" ? "أرسل الفيديو كفيديو (من زر الإرفاق اختر «فيديو») وليس كملف"
+        : state.kind === "photo" ? "أرسل صورة"
+        : state.kind === "audio" ? "أرسل ملفًا صوتيًا"
+        : "أرسل الملف كملف (من زر الإرفاق اختر «ملف»)";
+      await send(env, chatId, `⚠️ وصل ${KIND_LABELS[file.kind] ?? file.kind} لكن الزر نوعه ${KIND_LABELS[state.kind] ?? state.kind} — لم يُحفظ شيء.\n${needHint} ثم أرسله مرة أخرى.`, [S.BACK]);
+      return true;
+    }
     const menus = await loadMenus(env);
     const menu = findMenu(menus, state.menuId);
     if (!menu) { await showMenus(env, chatId, userId); return true; }
