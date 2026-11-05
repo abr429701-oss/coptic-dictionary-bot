@@ -408,40 +408,58 @@ async function ensureVideoMenuStored(env) {
   if (created) await saveMenus(env, menus);
   return { menus, menu };
 }
+// Menu fix (2026-11-05): a menu tap must never die silently. Telegram
+// rejects sendMessage with an empty inline keyboard (400) and any bad HTML
+// in parse_mode (400); telegram() only logs those, so the user saw nothing
+// at all. This helper drops an empty keyboard, then retries once as plain
+// text, then once more with no markup at all, so the user always sees
+// something (or a clear error message from the caller).
+function menuMarkupHasRows(replyMarkup) {
+  const rows = replyMarkup?.inline_keyboard ?? replyMarkup?.keyboard ?? null;
+  return Array.isArray(rows) && rows.some((row) => Array.isArray(row) && row.length > 0);
+}
+async function sendMenuMessage(env, chatId, text, replyMarkup) {
+  const markup = menuMarkupHasRows(replyMarkup) ? replyMarkup : undefined;
+  let res = await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(markup ? { reply_markup: markup } : {}) });
+  if (res?.ok) return res;
+  res = await telegram(env, "sendMessage", { chat_id: chatId, text, ...(markup ? { reply_markup: markup } : {}) });
+  if (res?.ok) return res;
+  return telegram(env, "sendMessage", { chat_id: chatId, text });
+}
 async function sendRootMenus(env, chatId, userId = chatId) {
   const stored = await loadMenus(env);
   const roots = rootMenus(stored);
   if (!roots.length) {
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "🔘 لا توجد قوائم مخصصة بعد.\n(للأدمن: أنشئ أول قائمة من /menuadmin)" });
+    await sendMenuMessage(env, chatId, "🔘 لا توجد قوائم مخصصة بعد.\n(للأدمن: أنشئ أول قائمة من /menuadmin)");
     return;
   }
   await setMenuNav(env, userId, null);
-  await telegram(env, "sendMessage", {
-    chat_id: chatId,
-    text: "🔘 <b>القوائم</b>\nاضغط زر القائمة تحت الحقل:",
-    parse_mode: "HTML",
-    reply_markup: buildRootReplyKeyboard(stored, { isAdmin: isAdmin(env, userId) }),
-  });
+  await sendMenuMessage(env, chatId, "🔘 <b>القوائم</b>\nاضغط زر القائمة تحت الحقل:", buildRootReplyKeyboard(stored, { isAdmin: isAdmin(env, userId) }));
 }
 async function openMenu(env, chatId, menuId, userId) {
   if (!chatId) return;
   const stored = await loadMenus(env);
   const menu = findMenu(stored, menuId);
   if (!menu) {
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "⚠️ هذه القائمة غير موجودة (ربما حُذفت). اعرض القوائم بـ /menu" });
+    await sendMenuMessage(env, chatId, "⚠️ هذه القائمة غير موجودة (ربما حُذفت). اعرض القوائم بـ /menu");
     return;
   }
   const admin = isAdmin(env, userId);
-  await telegram(env, "sendMessage", {
-    chat_id: chatId,
-    text: menuOpenText(menu),
-    parse_mode: "HTML",
-    reply_markup: buildMenuKeyboard(stored, menu, admin),
-  });
+  const keyboard = buildMenuKeyboard(stored, menu, admin);
+  let text = menuOpenText(menu);
+  if (!menuMarkupHasRows(keyboard)) {
+    // No visible buttons (empty menu, or every button is admin-only for a
+    // normal user): say so instead of sending an empty keyboard, which
+    // Telegram rejects and the user sees nothing.
+    text += menu.id === VIDEO_MENU_ID
+      ? `\n\n🎬 لا توجد دروس فيديو بعد.${admin ? "\nأضف أول درس من /menuadmin." : ""}`
+      : `\n\n🔘 لا توجد أزرار في هذه القائمة بعد.${admin ? "\nأضف أول زر من /menuadmin." : ""}`;
+  }
+  await sendMenuMessage(env, chatId, text, keyboard);
 }
 async function sendVideoLessons(env, chatId) {
   const { menu } = await ensureVideoMenuStored(env);
-  if (!menu) { await telegram(env, "sendMessage", { chat_id: chatId, text: "🎬 لا توجد دروس فيديو بعد." }); return; }
+  if (!menu) { await sendMenuMessage(env, chatId, "🎬 لا توجد دروس فيديو بعد."); return; }
   await openMenu(env, chatId, menu.id, chatId);
 }
 async function runMenuCommand(env, chatId, userId, command) {
@@ -489,12 +507,14 @@ async function handleMenuButton(env, callback) {
   }
   if (!plain) await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
   if (button.kind === "popup") {
-    if (plain) await telegram(env, "sendMessage", { chat_id: chatId, text: `⚠️ ${button.text ?? ""}` });
+    if (plain) await sendMenuMessage(env, chatId, `⚠️ ${button.text ?? ""}`);
     else await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, text: button.text ?? "", show_alert: true });
     return;
   }
   if (button.kind === "text") {
-    await telegram(env, "sendMessage", { chat_id: chatId, text: button.text ?? "", parse_mode: "HTML" });
+    // Button text is admin-entered and may contain bad HTML; sendMenuMessage
+    // retries as plain text instead of dying silently.
+    await sendMenuMessage(env, chatId, button.text ?? "");
     return;
   }
   if (button.kind === "submenu") {
@@ -877,12 +897,7 @@ async function openReplyMenu(env, chatId, userId, menu) {
     return;
   }
   await setMenuNav(env, userId, target.id);
-  await telegram(env, "sendMessage", {
-    chat_id: chatId,
-    text: menuOpenText(target),
-    parse_mode: "HTML",
-    reply_markup: buildReplyMenuKeyboard(stored, target, { isAdmin: isAdmin(env, userId) }),
-  });
+  await sendMenuMessage(env, chatId, menuOpenText(target), buildReplyMenuKeyboard(stored, target, { isAdmin: isAdmin(env, userId) }));
 }
 async function followMenuHit(env, chatId, userId, hit) {
   if (hit.kind === "admin") {
