@@ -6,6 +6,9 @@ import { createAdminExtras } from "./admin-extra.js";
 import { createAdminExtras2 } from "./admin-extra2.js";
 import { createAdminPro } from "./admin-pro.js";
 import { createAdminSuite } from "./admin-suite.js";
+import { createSecurity } from "./security.js";
+import { createProAdmin2 } from "./pro-admin2.js";
+import { createProUser2 } from "./pro-user2.js";
 
 const BOT_TITLE = "📖 القاموس القبطي البحيري";
 const PAGE_SIZE = 1;
@@ -1274,6 +1277,51 @@ const USER_COMMANDS = [
   { command: "voicethree", description: "النطق 3 مرات" },
   { command: "voicesettings", description: "إعدادات تكرار الصوت" },
   { command: "lang", description: "لغة الواجهة: /lang ar أو en" },
+  // ---- ميزات القاموس الـ12 (متاحة للجميع) ----
+  { command: "copticdate", description: "تاريخ اليوم بالتقويم القبطي" },
+  { command: "alphabet", description: "الحروف القبطية بأسمائها" },
+  { command: "letterstats", description: "توزيع الكلمات على الحروف" },
+  { command: "longest", description: "أطول الكلمات القبطية" },
+  { command: "origins", description: "أصول الكلمات (قبطي/يوناني...)" },
+  { command: "wordcount", description: "حجم القاموس وتغطية الصوت" },
+  { command: "startswith", description: "تصفح الكلمات بـ /startswith <حرف>" },
+  { command: "similar", description: "كلمات شقيقة بـ /similar <كلمة>" },
+  { command: "translate", description: "كل التراجم بـ /translate <كلمة>" },
+  { command: "vocab", description: "حزمة مفردات للدراسة" },
+  { command: "guess", description: "لعبة خمّن الكلمة القبطية" },
+  { command: "wod", description: "كلمة اليوم" },
+  // ---- Batch 6: ميزات مستخدم جديدة ----
+  { command: "subscribe", description: "اشتراك في كلمة اليوم" },
+  { command: "unsubscribe", description: "إلغاء اشتراك كلمة اليوم" },
+  { command: "rate", description: "قيّم نطق كلمة: /rate <كلمة> <1-5>" },
+  { command: "achievements", description: "إنجازاتك وشاراتك" },
+  { command: "streak", description: "سلسلة أيام نشاطك" },
+  { command: "report", description: "الإبلاغ عن مشكلة" },
+  { command: "daily", description: "ملخصك اليومي" },
+  { command: "compare", description: "قارن كلمتين: /compare <ك1> <ك2>" },
+  { command: "etymology", description: "أصل كلمة: /etymology <كلمة>" },
+  { command: "examples", description: "أمثلة مشابهة: /examples <كلمة>" },
+  { command: "pronounce", description: "النطق المكتوب والصوتي لكلمة" },
+  { command: "quiz2", description: "اختبار ثاني (اختيار من متعدد)" },
+  { command: "hangman", description: "لعبة الشنق بالكلمات القبطية" },
+  { command: "exportmydata", description: "تصدير بياناتك (GDPR)" },
+  { command: "deleteme", description: "حذف حسابي وبياناتي" },
+  { command: "donate", description: "ادعم المشروع" },
+  { command: "about", description: "عن البوت" },
+  { command: "largefont", description: "تبديل الخط الكبير" },
+  { command: "clearhistory", description: "مسح سجل بحثي" },
+  { command: "favorites", description: "كلماتك المفضلة" },
+  { command: "removefav", description: "إزالة من المفضلة" },
+  { command: "contribute", description: "اقترح كلمة جديدة للقاموس" },
+  { command: "theme", description: "السمة البصرية: /theme light|dark" },
+  { command: "invite", description: "رابط دعوتك الشخصي" },
+  { command: "feedback", description: "أرسل ملاحظة للإدارة" },
+  { command: "bug", description: "أبلغ عن خطأ تقني" },
+  { command: "transliterate", description: "نقل قبطي→لاتيني" },
+  { command: "copticnum", description: "رقم بالأرقام القبطية" },
+  { command: "quizstats", description: "إحصائيات اختباراتك" },
+  { command: "settings", description: "إعداداتك" },
+  { command: "notify", description: "تشغيل/إيقاف الإشعارات" },
 ];
 const ADMIN_COMMANDS = [
   ...USER_COMMANDS,
@@ -1404,6 +1452,38 @@ const ADMIN_COMMANDS = [
   { command: "mytickets", description: "تذاكر الدعم الخاصة بي" },
   { command: "retention", description: "احتفاظ وقمع المستخدمين" },
   { command: "ops", description: "حالة التشغيل والأخطاء" },
+  // ---- Batch 6: أمان وأوامر إدارية جديدة ----
+  { command: "2fa", description: "المصادقة الثنائية للأدمن" },
+  { command: "password", description: "كلمة مرور إدارية إضافية" },
+  { command: "unlock", description: "فتح جلسة إدارية بكلمة المرور" },
+  { command: "lockdown", description: "قفل شامل للبوت (عدا الأدمن)" },
+  { command: "purgeinactive", description: "حذف المستخدمين غير النشطين" },
+  { command: "massdm", description: "رسالة خاصة لقائمة معرفات" },
+  { command: "logchannel", description: "قناة سجلات الإدارة" },
+  { command: "verifygate", description: "بوابة تحقق للمستخدمين الجدد" },
+  { command: "captcha", description: "كابتشا للأعضاء الجدد" },
+  { command: "ratewarn", description: "حد تحذير السبام" },
+  { command: "welcomemedia", description: "وسائط ترحيب (رد على صورة/فيديو)" },
+  { command: "welcomesticker", description: "ستيكر ترحيبي (رد على ستيكر)" },
+  { command: "leavemsg", description: "رسالة مغادرة المجموعة" },
+  { command: "setjoinmsg", description: "رسالة انضمام للمجموعة" },
+  { command: "menueditor", description: "محرر أزرار القائمة المخصصة" },
+  { command: "menu", description: "عرض القائمة المخصصة" },
+  { command: "segment", description: "شرائح مستخدمين وإرسال مستهدف" },
+  { command: "toptags", description: "أكثر الشرائح عضوية" },
+  { command: "templateslib", description: "مكتبة القوالب المحفوظة" },
+  { command: "setlang", description: "اللغة الافتراضية للمستخدمين الجدد" },
+  { command: "donation", description: "سجل التبرعات" },
+  { command: "setshortdesc", description: "الوصف القصير للبوت" },
+  { command: "webhook", description: "معلومات Webhook" },
+  { command: "envcheck", description: "فحص متغيرات البيئة (بدون قيم)" },
+  { command: "dostat", description: "إحصائيات المخزن الدائم" },
+  { command: "bottest", description: "رسالة اختبار" },
+  { command: "dictversion", description: "إصدار وحجم القاموس" },
+  { command: "sessionlist", description: "الجلسات والتدفقات النشطة" },
+  { command: "kill", description: "إنهاء جلسة مستخدم معلقة" },
+  { command: "resetsessions", description: "مسح كل الجلسات المعلقة" },
+  { command: "broadcaststats", description: "إحصائيات آخر بث" },
 ];
 const commandMenuReady = new Set();
 
@@ -5330,6 +5410,8 @@ async function handleUpdate(update, env, ctx) {
       await adminPro.handleCallback({ env, callback });
       return;
     }
+    if (String(callback.data ?? "").startsWith("pa2|")) { await proAdmin2.handleCallback({ env, callback }); return; }
+    if (String(callback.data ?? "").startsWith("pu2|")) { await proUser2.handleCallback({ env, callback }); return; }
     if (String(callback.data ?? "").startsWith("ad|")) {
       await handleAdminDashboardCallback(env, callback, ctx);
       return;
@@ -5502,6 +5584,13 @@ async function handleUpdate(update, env, ctx) {
     return;
   }
   const adminNow = isAdmin(env, userId);
+  // Batch 6: hard lockdown — non-admins are blocked entirely until lifted.
+  if (!adminNow) {
+    try {
+      const ld = (await storeCall(env, { op: "get", key: "lockdown" })).value;
+      if (ld?.on) { await registerPromise.catch(() => null); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: String(ld.msg || "🔒 البوت متوقف حاليًا بشكل كامل (Lockdown). سيعود قريبًا.").slice(0, 500) }); return; }
+    } catch { /* lockdown unavailable — fall through */ }
+  }
   if (!adminNow && wlMode && !wlList.includes(String(userId))) {
     await registerPromise.catch(() => null);
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🔒 البوت في وضع القائمة البيضاء حاليًا. فقط المستخدمون المصرح لهم يمكنهم الاستخدام." });
@@ -5525,6 +5614,20 @@ async function handleUpdate(update, env, ctx) {
     const wait = slowCfg.seconds * 1000 - (Date.now() - last);
     if (wait > 0) { await registerPromise.catch(() => null); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `⏳ الوضع البطيء مفعّل. انتظر ${Math.ceil(wait / 1000)} ثانية قبل البحث التالي.` }); return; }
     lastUserSearchAt.set(String(userId), Date.now());
+  }
+  // Batch 6: verification gate — unverified users must press a button before searching.
+  if (!adminNow && text && !text.startsWith("/")) {
+    try {
+      const vg = (await storeCall(env, { op: "get", key: "verifygate" })).value;
+      if (vg?.on) {
+        const regUser = known ?? await getUser(env, userId);
+        if (!regUser?.verified) {
+          await registerPromise.catch(() => null);
+          await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🔐 للبحث في القاموس، أكد أنك لست روبوتًا بالضغط على الزر أدناه.", reply_markup: { inline_keyboard: [[{ text: "✅ أنا لست روبوت", callback_data: "pa2|verify" }]] } });
+          return;
+        }
+      }
+    } catch { /* gate unavailable — fall through */ }
   }
   // Batch 3: notify admins of group joins/leaves, then let the daily features tick.
   if (["group", "supergroup"].includes(message.chat.type) && (message.new_chat_members || message.left_chat_member)) {
@@ -5581,12 +5684,17 @@ async function handleUpdate(update, env, ctx) {
   if (isPrivate && !isAdmin(env, userId)) { if (await adminPro.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return; }
   if (isAdmin(env, userId) && isPrivate) {
     const admin = await getUser(env, userId);
+    // 2FA gate: sensitive admin commands require a fresh verified session.
+    const twofaGate = await security.require2fa(env, userId, text);
+    if (twofaGate.blocked) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: twofaGate.text, parse_mode: "HTML" }); return; }
     // Extra admin pack (src/admin-extra.js). Unknown commands fall through to the handlers below.
     if (await adminExtras.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return;
     if (await adminExtras2.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return;
     if (await adminPro.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return;
     // admin-suite: اللوحة الاحترافية (رسائل خاصة بالأدمن فقط)
     if (await adminSuite.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return;
+    if (await security.handleAdmin({ env, chatId: message.chat.id, userId, text })) return;
+    if (await proAdmin2.handle({ env, chatId: message.chat.id, userId, text, message })) return;
     if (text === "/cancel" && admin?.bc) {
       await saveUser(env, userId, { ...admin, bc: undefined });
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "تم إلغاء الإرسال الجماعي." });
@@ -6429,6 +6537,25 @@ async function handleUpdate(update, env, ctx) {
     });
     return;
   }
+  // Batch 6 user features (self-contained module): games, GDPR, settings, etc.
+  if (await proUser2.handle({ env, chatId: message.chat.id, userId, text })) return;
+  // ---- ميزات القاموس الـ12 (src/features.js) — موصولة هنا قبل اعتراض الأوامر المجهولة ----
+  if (text === "/copticdate") { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: copticDateNow(new Date()), parse_mode: "HTML" }); return; }
+  if (text === "/alphabet") { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: alphabetText() }); return; }
+  if (text === "/letterstats") { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: letterStatsText() }); return; }
+  if (text === "/longest") { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: longestText(), parse_mode: "HTML" }); return; }
+  if (text === "/origins") { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: originsText(), parse_mode: "HTML" }); return; }
+  if (text === "/wordcount") { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: wordCountText(), parse_mode: "HTML" }); return; }
+  if (text === "/startswith" || text.startsWith("/startswith ")) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: startsWithText(text.slice("/startswith".length).trim()), parse_mode: "HTML" }); return; }
+  if (text === "/similar" || text.startsWith("/similar ")) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: similarText(text.slice("/similar".length).trim()), parse_mode: "HTML" }); return; }
+  if (text === "/translate" || text.startsWith("/translate ")) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: translateText(text.slice("/translate".length).trim()), parse_mode: "HTML" }); return; }
+  if (text === "/vocab") { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: vocabText(), parse_mode: "HTML" }); return; }
+  if (text === "/guess" || text.startsWith("/guess ")) {
+    const arg = text.slice("/guess".length).trim();
+    const reply = arg === "انسحب" ? (handleGuessReply(userId, "انسحب") || "🏳️ ليس لديك جولة تخمين نشطة حالياً. ابدأ جديدة بـ /guess.") : startGuess(userId);
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: reply, parse_mode: "HTML" });
+    return;
+  }
   if (text.startsWith("/")) {
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
@@ -6552,6 +6679,13 @@ const adminPro = createAdminPro({
   adminStatsOp: () => (activeEnv ? storeCall(activeEnv, { op: "adminStats" }).catch(() => ({})) : Promise.resolve({})),
   getUserHistory, maintenanceOn, setMaintenance, recentSearches,
 });
+// Batch 6: 2FA security gate, extra admin commands, extra user features.
+// storeCall is wrapped so the modules call it with one arg (payload), matching
+// their internal helpers; activeEnv is bound by the time any handler runs.
+const boundStore = (payload) => storeCall(activeEnv, payload);
+const security = createSecurity({ telegram, escapeHtml, storeCall: boundStore, isAdmin, adminIds, logAdminAction, notifyAdmins });
+const proAdmin2 = createProAdmin2({ telegram, escapeHtml, storeCall: boundStore, getUser, saveUser, isAdmin, adminIds, logAdminAction, notifyAdmins });
+const proUser2 = createProUser2({ telegram, storeCall: boundStore, getUser, saveUser, isAdmin, notifyAdmins, sendTextFile });
 
 const adminSuite = createAdminSuite({
   telegram, escapeHtml, storeCall, getUser, records, logAdminAction, adminIds, botVersion: BOT_VERSION, recentSearches,
