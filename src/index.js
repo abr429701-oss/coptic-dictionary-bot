@@ -192,11 +192,199 @@ async function handleQuizAnswer(env, callback) {
     parse_mode: "HTML",
   });
 }
+
+// ---- v2 new features: quiz v2, flashcards, lessons, help/language, share, voice prefs ----
+// UI language stored per user in user.lang ("ar" default, "en").
+async function getUserLang(env, chatId) {
+  if (!env.USERS) return "ar";
+  const user = await getUser(env, String(chatId));
+  return user?.lang === "en" ? "en" : "ar";
+}
+async function setUserLang(env, userId, lang) {
+  const user = (await getUser(env, String(userId))) ?? {};
+  await saveUser(env, String(userId), { ...user, lang: lang === "en" ? "en" : "ar" });
+}
+async function sendHelp(env, chatId) {
+  const lang = await getUserLang(env, chatId);
+  await telegram(env, "sendMessage", {
+    chat_id: chatId,
+    text: helpText(lang),
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: [
+      [{ text: "📚 الدروس / Lessons", callback_data: "nf|lessons" }, { text: "🃏 بطاقات / Flashcards", callback_data: "nf|flash" }],
+      [{ text: "🧠 اختبار / Quiz", callback_data: "nf|quiz|meaning" }, { text: "🗓 اختبار اليوم", callback_data: "nf|dailyquiz" }],
+      [{ text: "🔊 صوت مرة / 3 مرات", callback_data: "nf|voicesettings" }],
+      [{ text: "العربية 🇪🇬", callback_data: "nf|lang|ar" }, { text: "English 🇬🇧", callback_data: "nf|lang|en" }],
+    ] },
+  });
+}
+async function beginQuizV2(env, chatId, type = "meaning") {
+  const q = pickQuizV2Question(type);
+  if (!q) { await telegram(env, "sendMessage", { chat_id: chatId, text: "تعذّر تجهيز سؤال الآن، جرّب مرة أخرى." }); return; }
+  quizState.set(String(chatId), { correct: q.correctIndex, options: q.options.map((o) => ({ m: o.label, correct: o.correct })), at: Date.now(), type: "v2", answerText: q.answerText });
+  if (quizState.size > 500) { for (const [k, v] of quizState) if (Date.now() - v.at > QUIZ_TTL_MS) quizState.delete(k); }
+  const typeLabel = q.type === "coptic" ? "الكلمة القبطية" : q.type === "english" ? "المعنى الإنجليزي" : "المعنى";
+  await telegram(env, "sendMessage", {
+    chat_id: chatId,
+    text: `🧠 <b>اختبار (${escapeHtml(typeLabel)})</b>\\n${q.prompt}`,
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: [
+      [q.options[0], q.options[1]].map((o, i) => ({ text: String(o.label).slice(0, 24), callback_data: `nf|q2|${i}` })),
+      [q.options[2], q.options[3]].map((o, i) => ({ text: String(o.label).slice(0, 24), callback_data: `nf|q2|${i + 2}` })),
+    ] },
+  });
+}
+async function handleQuizV2Answer(env, callback) {
+  const answer = (extra = {}) => telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, ...extra });
+  const chatId = String(callback.message?.chat?.id ?? "");
+  const state = quizState.get(chatId);
+  if (!state || state.type !== "v2" || Date.now() - state.at > QUIZ_TTL_MS) {
+    await answer({ text: "⌛ انتهت صلاحية السؤال. أرسل /dailyquiz لسؤال جديد.", show_alert: true });
+    return;
+  }
+  const chosen = Number(String(callback.data ?? "").split("|")[2]);
+  const won = chosen === state.correct;
+  quizState.delete(chatId);
+  const correctText = String(state.options[state.correct]?.m ?? state.answerText ?? "");
+  await answer({ text: won ? `🎉 أحسنت! الصحيح: ${correctText}` : `❌ خطأ. الصحيح: ${correctText}`, show_alert: true });
+  await telegram(env, "editMessageText", {
+    chat_id: callback.message.chat.id,
+    message_id: callback.message.message_id,
+    text: won ? `🎉 <b>إجابة صحيحة!</b>\\n✅ ${escapeHtml(correctText)}\\n\\nسؤال جديد: /dailyquiz` : `❌ <b>إجابة خاطئة</b>\\n✅ الصحيح: ${escapeHtml(correctText)}\\n\\nسؤال جديد: /dailyquiz`,
+    parse_mode: "HTML",
+  });
+}
+async function sendFlashcard(env, chatId, userId) {
+  const user = (await getUser(env, String(userId))) ?? {};
+  const favs = Array.isArray(user.favs) ? user.favs : [];
+  if (!favs.length) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "🃏 لا توجد كلمات مفضلة بعد. أضف كلمة للمفضلة بزر ⭐ أو بأمر /fav ثم أرسل /flashcards." });
+    return;
+  }
+  const picked = pickFlashcard(favs, user.flash ?? {});
+  if (!picked) { await telegram(env, "sendMessage", { chat_id: chatId, text: "🎉 راجعت كل بطاقاتك اليوم! أضف كلمات جديدة للمفضلة للمراجعة." }); return; }
+  flashState.set(String(chatId), { fav: picked.fav, level: picked.level, at: Date.now() });
+  await telegram(env, "sendMessage", {
+    chat_id: chatId,
+    text: `🃏 <b>بطاقة (${picked.remaining} متبقية)</b>\\n\\n<b>${escapeHtml(String(picked.fav.word ?? ""))}</b>\\n\\nحاول تتذكّر معناها، ثم اضغط لإظهارها.`,
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: [[{ text: "👁 إظهار المعنى", callback_data: "nf|fc|show" }]] },
+  });
+}
+async function handleFlashcard(env, callback) {
+  const answer = (extra = {}) => telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, ...extra });
+  const chatId = String(callback.message?.chat?.id ?? "");
+  const action = String(callback.data ?? "").split("|")[2];
+  const state = flashState.get(chatId);
+  if (!state || Date.now() - state.at > FLASH_TTL_MS) {
+    await answer({ text: "⌛ انتهت البطاقة. أرسل /flashcards لبطاقة جديدة.", show_alert: true });
+    return;
+  }
+  const userId = String(callback.from?.id ?? chatId);
+  if (action === "show") {
+    await telegram(env, "editMessageText", {
+      chat_id: callback.message.chat.id,
+      message_id: callback.message.message_id,
+      text: `🃏 <b>${escapeHtml(String(state.fav.word ?? ""))}</b>\\n\\n📖 ${escapeHtml(String(state.fav.meaning ?? ""))}\\n\\nهل كنت تعرفها؟`,
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: [[{ text: "🔁 مرة أخرى", callback_data: "nf|fc|again" }, { text: "✅ أعرفها", callback_data: "nf|fc|known" }]] },
+    });
+    return;
+  }
+  if (action === "again" || action === "known") {
+    const user = (await getUser(env, userId)) ?? {};
+    const flash = updateFlashcard(user.flash ?? {}, state.fav.word, action === "known");
+    await saveUser(env, userId, { ...user, flash });
+    flashState.delete(chatId);
+    await answer({ text: action === "known" ? "✅ تم، مستوى البطاقة ارتفع." : "🔁 تم، ستعود البطاقة قريبًا." });
+    await sendFlashcard(env, chatId, userId);
+    return;
+  }
+}
+async function handleNewFeaturesCallback(env, callback) {
+  const parts = String(callback.data ?? "").split("|");
+  const action = parts[1];
+  const chatId = callback.message?.chat?.id;
+  const userId = String(callback.from?.id ?? chatId ?? "");
+  const answer = (extra = {}) => telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, ...extra });
+  if (action === "q2") return handleQuizV2Answer(env, callback);
+  if (action === "fc") return handleFlashcard(env, callback);
+  if (action === "share") {
+    const record = recordById(Number(parts[2]));
+    if (!record) { await answer({ text: "الكلمة غير موجودة.", show_alert: true }); return; }
+    await telegram(env, "sendMessage", { chat_id: chatId, text: shareTextForRecord(env, record), parse_mode: "HTML" });
+    return;
+  }
+  if (action === "lesson") {
+    const id = Number(parts[2]);
+    await telegram(env, "sendMessage", { chat_id: chatId, text: lessonText(id), parse_mode: "HTML" });
+    return;
+  }
+  if (action === "lessons") {
+    const rows = lessonList().map((l) => [{ text: l.title, callback_data: `nf|lesson|${l.id}` }]);
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "📚 <b>الدروس المصغرة</b>\\nاختر درسًا:", parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
+    return;
+  }
+  if (action === "flash") return sendFlashcard(env, chatId, userId);
+  if (action === "quiz") return beginQuizV2(env, chatId, parts[2] || "meaning");
+  if (action === "dailyquiz") return beginQuizV2(env, chatId, dailyQuizType());
+  if (action === "lang") {
+    await setUserLang(env, userId, parts[2]);
+    await answer({ text: parts[2] === "en" ? "Language: English" : "اللغة: العربية" });
+    await sendHelp(env, chatId);
+    return;
+  }
+  if (action === "voice") {
+    const repeats = Number(parts[2]) === 1 ? 1 : 3;
+    await setVoiceRepeats(env, userId, repeats);
+    await answer({ text: repeats === 1 ? "🔊 النطق: مرة واحدة" : "🔊 النطق: 3 مرات" });
+    return;
+  }
+  if (action === "voicesettings") {
+    const current = await voiceRepeatCount(env, chatId);
+    await telegram(env, "sendMessage", {
+      chat_id: chatId,
+      text: `🔊 <b>إعدادات الصوت</b>\\n\\nالتكرار الحالي للنطق المُولَّد: <b>${current === 1 ? "مرة واحدة" : "3 مرات"}</b>\\n(الأصوات البشرية المسجلة تبقى كما هي.)`,
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: [[{ text: "1️⃣ مرة واحدة", callback_data: "nf|voice|1" }, { text: "3️⃣ 3 مرات", callback_data: "nf|voice|3" }]] },
+    });
+    return;
+  }
+}
 // Per-user voice preference: the stored word card/voice stays, only auto-sending changes.
 async function voiceAutoOn(env, chatId) {
   if (!env.USERS || Number(chatId) <= 0) return true; // groups and storage-less keep the default
   const user = await getUser(env, String(chatId));
   return user?.voiceOff !== true;
+}
+// v2: per-user generated-voice repeat count (1 or 3). Default 3 (existing behaviour).
+// Recorded voices keep the global repeat behaviour; only the generated path uses this.
+async function voiceRepeatCount(env, chatId) {
+  if (!env.USERS || Number(chatId) <= 0) return 3;
+  const user = await getUser(env, String(chatId));
+  return user?.voiceRepeats === 1 ? 1 : 3;
+}
+async function setVoiceRepeats(env, userId, repeats) {
+  const user = (await getUser(env, String(userId))) ?? {};
+  await saveUser(env, String(userId), { ...user, voiceRepeats: repeats === 1 ? 1 : 3 });
+}
+// v2 quiz state reuses the existing quizState map shape: {correct, options, at, type}
+const flashState = new Map(); // chatId -> {fav, level, at}
+const FLASH_TTL_MS = 15 * 60000;
+// Share button appended as an extra row to a result's existing "more" markup
+// (moreMeaning shape: {reply_markup:{inline_keyboard}}), so the existing
+// send/edit paths carry it unchanged and the "next meaning" button stays first.
+function withShareButton(env, record, more) {
+  if (!record?.id) return more;
+  const link = deepLink(env, record.id);
+  const btn = link
+    ? { text: "🔗 مشاركة الكلمة", url: `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(String(record.coptic ?? ""))}` }
+    : { text: "🔗 مشاركة الكلمة", callback_data: `nf|share|${record.id}` };
+  // moreMeaning returns {reply_markup:{inline_keyboard}} — append the share row
+  // AFTER the existing rows (blank terminal button / "next meaning"), never replace them.
+  const rows = [...((more?.reply_markup?.inline_keyboard) ?? [])];
+  rows.push([btn]);
+  return { ...(more ?? {}), reply_markup: { inline_keyboard: rows } };
 }
 async function userFavorites(env, userId) { const user = await getUser(env, String(userId)); return Array.isArray(user?.favs) ? user.favs.slice(0, 50) : []; }
 async function addFavorite(env, userId, entry) {
@@ -518,6 +706,7 @@ function lazy(build) {
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
 import { audioUrl, audioVersion, fetchHumanSpeech, fetchPrebuiltSpeech, isSingleWordOgg, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 import { copticDateNow, alphabetText, letterStatsText, longestText, originsText, wordCountText, startsWithText, similarText, translateText, vocabText, startGuess, handleGuessReply } from "./features.js";
+import { deepLink, shareTextForRecord, pickQuizV2Question, dailyQuizType, pickFlashcard, updateFlashcard, lessonList, lessonText, suggestSimilar, helpText, retentionText, opsText, recordById } from "./new-features.js";
 import { repeatSingleWordOgg } from "./ogg-repeat.js";
 const VOICE_PREFIX = "voiceid:";
 // The voice hash is part of the key, so a word whose voice was rebuilt is fetched and remembered again.
@@ -1077,6 +1266,14 @@ const USER_COMMANDS = [
   { command: "recent", description: "آخر عمليات بحثك" },
   { command: "voiceon", description: "تشغيل إرسال النطق تلقائيًا" },
   { command: "voiceoff", description: "إيقاف إرسال النطق تلقائيًا" },
+  { command: "help", description: "مساعدة تفاعلية ولغة الواجهة" },
+  { command: "lessons", description: "دروس قبطية مصغرة داخل البوت" },
+  { command: "flashcards", description: "مراجعة المفضلة ببطاقات" },
+  { command: "dailyquiz", description: "اختبار اليوم بأنواعه" },
+  { command: "voiceonce", description: "النطق مرة واحدة" },
+  { command: "voicethree", description: "النطق 3 مرات" },
+  { command: "voicesettings", description: "إعدادات تكرار الصوت" },
+  { command: "lang", description: "لغة الواجهة: /lang ar أو en" },
 ];
 const ADMIN_COMMANDS = [
   ...USER_COMMANDS,
@@ -1205,6 +1402,8 @@ const ADMIN_COMMANDS = [
   { command: "maintadvcancel", description: "إلغاء الصيانة المتقدمة" },
   { command: "exitsupport", description: "إنهاء وضع محادثة الدعم" },
   { command: "mytickets", description: "تذاكر الدعم الخاصة بي" },
+  { command: "retention", description: "احتفاظ وقمع المستخدمين" },
+  { command: "ops", description: "حالة التشغيل والأخطاء" },
 ];
 const commandMenuReady = new Set();
 
@@ -1345,7 +1544,7 @@ async function repeatedRecording(env, fileId) {
 
 // Starts the lookup (admin recording) or speech generation right away, so it is ready when the text is sent.
 // Generated Matthew audio from the audio-human branch is the default voice.
-function prepareWordVoice(env, record, media = null, { skipRecorded = false, ignoreCachedFileIds = false } = {}) {
+function prepareWordVoice(env, record, media = null, { skipRecorded = false, ignoreCachedFileIds = false, voiceRepeats = null } = {}) {
   return (async () => {
     if (!skipRecorded && !ignoreCachedFileIds && env.USERS && record?.id != null) {
       try {
@@ -1374,8 +1573,12 @@ function prepareWordVoice(env, record, media = null, { skipRecorded = false, ign
       ]) : [null, null];
       if (cachedNeural?.fileId) return { fileId: cachedNeural.fileId, neural: true };
       if (cachedHuman?.fileId) return { fileId: cachedHuman.fileId, neural: true };
+      // Per-user repeat count applies only to the generated voice: pass a cloned
+      // env so fetchPrebuiltSpeech reads VOICE_REPEATS from it; the recorded path
+      // above keeps the global behaviour, and fetchHumanSpeech is untouched.
+      const voiceEnv = voiceRepeats ? { ...env, VOICE_REPEATS: voiceRepeats } : env;
       const [neural, human] = await Promise.all([
-        fetchPrebuiltSpeech(env, record).catch(() => null),
+        fetchPrebuiltSpeech(voiceEnv, record).catch(() => null),
         fetchHumanSpeech(env, record).catch(() => null),
       ]);
       if (neural) {
@@ -1837,7 +2040,13 @@ async function prepareSearch(env, chatId, query, page = 0, messageId = undefined
   const matches = await findMatches(cleanQuery, env);
   if (!matches.length) {
     trackMiss(cleanQuery);
-    return () => deliver({ text: uiTextFor(cleanQuery).noResult });
+    // v2: "did you mean" — only on the no-result path, using local Levenshtein
+    // suggestions from the bundled dictionary. Buttons reuse the existing s|<row> path.
+    const suggestions = suggestSimilar(cleanQuery, 3);
+    if (!suggestions.length) return () => deliver({ text: uiTextFor(cleanQuery).noResult });
+    const text = `${uiTextFor(cleanQuery).noResult}\n\n🤔 هل تقصد:`;
+    const keyboard = suggestions.map((s) => [{ text: String(s.label).slice(0, 48), callback_data: `s|${s.index}` }]);
+    return () => deliver({ text, parse_mode: "HTML", reply_markup: { inline_keyboard: keyboard } });
   }
   if (matches.length > 1) {
     const view = renderSuggestions(cleanQuery, normalizedQuery, matches, page);
@@ -1856,7 +2065,7 @@ async function prepareSearch(env, chatId, query, page = 0, messageId = undefined
   const singleMedia = messageId === undefined ? lookupMedia(env, singleRecord, singleCardLanguage) : null;
   const singleVoiceRecord = voiceRecordForSearch(singleRecord, normalizedQuery);
   const singleVoice = messageId === undefined
-    ? prepareWordVoice(env, singleVoiceRecord, singleMedia, { skipRecorded: scriptKind(normalizedQuery) === "el" })
+    ? prepareWordVoice(env, singleVoiceRecord, singleMedia, { skipRecorded: scriptKind(normalizedQuery) === "el", voiceRepeats: await voiceRepeatCount(env, chatId) })
     : null;
   return async () => {
     const options = singleOptions;
@@ -1866,7 +2075,7 @@ async function prepareSearch(env, chatId, query, page = 0, messageId = undefined
     const media = singleMedia;
     const voiceRecord = singleVoiceRecord;
     const voice = singleVoice;
-    const more = moreMeaning(options, matchIndex, 1, undefined, true, uiLanguage(normalizedQuery));
+    const more = withShareButton(env, record, moreMeaning(options, matchIndex, 1, undefined, true, uiLanguage(normalizedQuery)));
     const text = widenResultText(`${formatRecord(record, selected.part, normalizedQuery)}${more.notice ?? ""}`).slice(0, MAX_MESSAGE_LENGTH);
     if (await sendCardEntry(env, chatId, record, text, media, more.reply_markup, cardLanguage)) {
       await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery, text, { textFallback: text });
@@ -1939,8 +2148,8 @@ async function sendOption(env, chatId, options, baseIndex, step, fallback = unde
   const media = lookupMedia(env, record, cardLanguage);
   const voiceRecord = voiceRecordForSearch(record, searchKey);
   const isGreekSearch = scriptKind(normalize(searchKey)) === "el";
-  const voice = prepareWordVoice(env, voiceRecord, media, { skipRecorded: isGreekSearch });
-  const more = moreMeaning(options, baseIndex, step + 1, callbackFor ?? (searchKey ? chainCallback(searchKey) : undefined), true, uiLanguage(searchKey));
+  const voice = prepareWordVoice(env, voiceRecord, media, { skipRecorded: isGreekSearch, voiceRepeats: await voiceRepeatCount(env, chatId) });
+  const more = withShareButton(env, record, moreMeaning(options, baseIndex, step + 1, callbackFor ?? (searchKey ? chainCallback(searchKey) : undefined), true, uiLanguage(searchKey)));
   const text = widenResultText(`${formatRecord(record, selected.part, searchKey)}${more.notice ?? ""}`).slice(0, MAX_MESSAGE_LENGTH);
   const wantVoice = sendVoice && await featureEnabled(env, "audio") && await voiceAutoOn(env, chatId);
   const captionMode = voiceCaptionMode(env); // on in production: voice+text travel as one message
@@ -2326,6 +2535,40 @@ export class UserStore {
       for (const [, value] of pending) if (!value?.drive) pendingUploads += 1;
       for (const [, value] of users) if (value?.blocked === true) blocked += 1;
       return Response.json({ users: users.size, voices: voiced.size, pendingUploads, blocked });
+    }
+    // v2: retention + funnel, computed inside the DO from stored user records
+    // (firstSeen/lastSeen are ISO strings), search history and gamify scores.
+    // No new storage keys: reuses user:, history:snapshot and gamify:scores.
+    if (op === "retention") {
+      const now = Date.now();
+      const day = 86400000;
+      const users = await storage.list({ prefix: "user:" });
+      const history = (await storage.get("history:snapshot")) ?? {};
+      const scores = (await storage.get("gamify:scores")) ?? {};
+      const cohort = (days) => {
+        let total = 0;
+        let active = 0;
+        for (const [, value] of users) {
+          const first = Date.parse(value?.firstSeen ?? value?.registeredAt ?? "") || 0;
+          if (!first || now - first > days * day) continue;
+          total += 1;
+          const last = Date.parse(value?.lastSeen ?? "") || 0;
+          if (last && now - last <= day) active += 1;
+        }
+        return { total, active };
+      };
+      let faved = 0;
+      for (const [, value] of users) if (Array.isArray(value?.favs) && value.favs.length) faved += 1;
+      const searched = Object.values(history).filter((entries) => Array.isArray(entries) && entries.length).length;
+      // gamify:scores values are objects {points, streak, lastDay, name}, not numbers.
+      const quizzed = Object.values(scores).filter((entry) => Number(entry?.points) > 0).length;
+      return Response.json({
+        total: users.size,
+        d1: cohort(1),
+        d7: cohort(7),
+        d30: cohort(30),
+        funnel: { started: users.size, searched, faved, quizzed },
+      });
     }
     if (op === "voiceIds") {
       const voiced = await storage.list({ prefix: VOICE_PREFIX });
@@ -5120,6 +5363,12 @@ async function handleUpdate(update, env, ctx) {
       await handleQuizAnswer(env, callback);
       return;
     }
+    // v2: all new-feature callbacks start with nf| (quiz v2, flashcards, lessons,
+    // help/language, voice settings, share fallback).
+    if (typeof callback.data === "string" && callback.data.startsWith("nf|")) {
+      await handleNewFeaturesCallback(env, callback);
+      return;
+    }
     if (callback.data === "noop") {
       await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
       return;
@@ -6022,6 +6271,14 @@ async function handleUpdate(update, env, ctx) {
     const user = known ?? await getUser(env, userId);
     // Referral link tracking: /start <campaign> remembers the source for new users.
     const startParam = text.startsWith("/start ") ? text.slice(7).trim() : "";
+    // v2: deep link /start word_<id> opens that word directly (shared from a result).
+    const wordLink = /^word_(\d+)$/u.exec(startParam);
+    if (wordLink) {
+      const index = recordIndexById().get(Number(wordLink[1])) ?? -1;
+      if (index >= 0) { await sendRecord(env, message.chat.id, index, -1, ""); return; }
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⚠️ هذه الكلمة غير موجودة في القاموس." });
+      return;
+    }
     if (startParam && !user?.registeredAt) {
       inBackground(ctx, trackReflink(env, startParam));
       if (env.USERS) await saveUser(env, userId, { ...user, reflink: startParam });
@@ -6063,7 +6320,59 @@ async function handleUpdate(update, env, ctx) {
     if (user?.awaitingContact) { await saveUser(env, userId, { ...user, awaitingContact: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء رسالة التواصل مع الإدارة." }); return; }
   }
   // ---- Batch 5 user features: quiz, favorites, my stats, recent, voice preference ----
-  if (text === "/quiz") { await beginQuiz(env, message.chat.id); return; }
+  // v2 commands: /quiz keeps its old meaning-type behaviour; /quiz <type> adds the
+  // two new types. /help, /lessons, /flashcards, /dailyquiz, /lang, /voiceonce,
+  // /voicethree, /voicesettings are new.
+  if (text === "/quiz" || text.startsWith("/quiz ")) {
+    const arg = text.slice("/quiz".length).trim().toLowerCase();
+    if (arg === "coptic" || arg === "english" || arg === "meaning") { await beginQuizV2(env, message.chat.id, arg); return; }
+    if (arg) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "أنواع الاختبار: /quiz meaning أو /quiz coptic أو /quiz english" }); return; }
+    await beginQuiz(env, message.chat.id); return;
+  }
+  if (text === "/dailyquiz") { await beginQuizV2(env, message.chat.id, dailyQuizType()); return; }
+  if (text === "/help") { await sendHelp(env, message.chat.id); return; }
+  if (text === "/lessons" || text.startsWith("/lessons ")) {
+    const arg = text.slice("/lessons".length).trim();
+    if (arg) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: lessonText(Number(arg)), parse_mode: "HTML" }); return; }
+    const rows = lessonList().map((l) => [{ text: l.title, callback_data: `nf|lesson|${l.id}` }]);
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "📚 <b>الدروس المصغرة</b>\nاختر درسًا:", parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
+    return;
+  }
+  if (text === "/flashcards") { await sendFlashcard(env, message.chat.id, userId); return; }
+  if (text === "/lang" || text.startsWith("/lang ")) {
+    const arg = text.slice("/lang".length).trim().toLowerCase();
+    if (arg === "ar" || arg === "en") { await setUserLang(env, userId, arg); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: arg === "en" ? "✅ Language set to English. /help" : "✅ تم ضبط اللغة على العربية. /help" }); return; }
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "الاستخدام: /lang ar أو /lang en" });
+    return;
+  }
+  if (text === "/voiceonce") { await setVoiceRepeats(env, userId, 1); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🔊 تم: النطق المُولَّد سيُرسل مرة واحدة. (الأصوات المسجلة تبقى كما هي.)" }); return; }
+  if (text === "/voicethree") { await setVoiceRepeats(env, userId, 3); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🔊 تم: النطق المُولَّد سيُرسل 3 مرات." }); return; }
+  if (text === "/voicesettings") {
+    const current = await voiceRepeatCount(env, message.chat.id);
+    await telegram(env, "sendMessage", {
+      chat_id: message.chat.id,
+      text: `🔊 <b>إعدادات الصوت</b>\n\nالتكرار الحالي للنطق المُولَّد: <b>${current === 1 ? "مرة واحدة" : "3 مرات"}</b>\n(الأصوات البشرية المسجلة تبقى كما هي.)`,
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: [[{ text: "1️⃣ مرة واحدة", callback_data: "nf|voice|1" }, { text: "3️⃣ 3 مرات", callback_data: "nf|voice|3" }]] },
+    });
+    return;
+  }
+  if (text === "/retention" || text === "/ops") {
+    if (!isAdmin(env, userId)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⛔ هذا الأمر للأدمن فقط." }); return; }
+    if (text === "/retention") {
+      const data = await storeCall(env, { op: "retention" }).catch(() => null);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: retentionText(data), parse_mode: "HTML" });
+      return;
+    }
+    const [analytics, errors] = await Promise.all([
+      readAnalyticsReport(env).catch(() => null),
+      readErrorLog(env).catch(() => []),
+    ]);
+    const started = BOT_STARTED_AT;
+    const lastError = Array.isArray(errors) && errors[0] ? (errors[0].message ?? errors[0].error ?? String(errors[0]).slice(0, 200)) : null;
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: opsText({ uptime: formatUptime(Date.now() - started), records: records.length, searches: analytics?.searches ?? 0, errors: Array.isArray(errors) ? errors.length : 0, updatedAt: analytics?.updatedAt ?? null, lastError }), parse_mode: "HTML" });
+    return;
+  }
   if (text === "/fav" || text === "/⭐") {
     const last = lastLookup.get(String(message.chat.id));
     if (!last?.coptic) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⭐ ابحث عن كلمة أولًا ثم اضغط /fav لحفظها في مفضلتك." }); return; }
