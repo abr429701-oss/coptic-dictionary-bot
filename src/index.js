@@ -516,6 +516,7 @@ function lazy(build) {
 
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
 import { audioUrl, audioVersion, fetchHumanSpeech, fetchPrebuiltSpeech, isSingleWordOgg, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
+import { copticDateNow, alphabetText, letterStatsText, longestText, originsText, wordCountText, startsWithText, similarText, translateText, vocabText, startGuess, handleGuessReply } from "./features.js";
 import { repeatSingleWordOgg } from "./ogg-repeat.js";
 const VOICE_PREFIX = "voiceid:";
 // The voice hash is part of the key, so a word whose voice was rebuilt is fetched and remembered again.
@@ -1110,6 +1111,17 @@ const ADMIN_COMMANDS = [
   { command: "dicthealth", description: "صحة القاموس" },
   { command: "fieldreport", description: "امتلاء حقول القاموس" },
   { command: "randomword", description: "كلمة عشوائية" },
+  { command: "copticdate", description: "تاريخ اليوم بالتقويم القبطي" },
+  { command: "alphabet", description: "الحروف القبطية بأسمائها" },
+  { command: "letterstats", description: "توزيع الكلمات على الحروف" },
+  { command: "longest", description: "أطول الكلمات القبطية" },
+  { command: "origins", description: "أصول الكلمات (قبطي/يوناني...)" },
+  { command: "wordcount", description: "حجم القاموس وتغطية الصوت" },
+  { command: "startswith", description: "تصفح الكلمات بـ /startswith <حرف>" },
+  { command: "similar", description: "كلمات شقيقة بـ /similar <كلمة>" },
+  { command: "translate", description: "كل التراجم بـ /translate <كلمة>" },
+  { command: "vocab", description: "حزمة مفردات للدراسة" },
+  { command: "guess", description: "لعبة خمّن الكلمة القبطية" },
   { command: "wordsearch", description: "بحث إداري في القاموس" },
   { command: "topwords", description: "أكثر الكلمات بحثًا" },
   { command: "misses", description: "كلمات بلا نتائج" },
@@ -6131,6 +6143,26 @@ async function handleUpdate(update, env, ctx) {
       }
       return;
     }
+    // ---- ميزات القاموس الجديدة (src/features.js — كلها من بيانات القاموس المرفقة الحقيقية) ----
+    if (text === "/copticdate") { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: copticDateNow(new Date()), parse_mode: "HTML" }); return; }
+    if (text === "/alphabet") { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: alphabetText() }); return; }
+    if (text === "/letterstats") { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: letterStatsText() }); return; }
+    if (text === "/longest") { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: longestText(), parse_mode: "HTML" }); return; }
+    if (text === "/origins") { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: originsText(), parse_mode: "HTML" }); return; }
+    if (text === "/wordcount") { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: wordCountText(), parse_mode: "HTML" }); return; }
+    if (text.startsWith("/startswith ")) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: startsWithText(text.slice("/startswith ".length).trim()), parse_mode: "HTML" }); return; }
+    if (text.startsWith("/similar ")) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: similarText(text.slice("/similar ".length).trim()), parse_mode: "HTML" }); return; }
+    if (text.startsWith("/translate ")) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: translateText(text.slice("/translate ".length).trim()), parse_mode: "HTML" }); return; }
+    if (text === "/vocab") { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: vocabText(), parse_mode: "HTML" }); return; }
+    if (text === "/guess" || text.startsWith("/guess ")) {
+      const arg = text.slice("/guess".length).trim();
+      const reply = arg === "انسحب" ? handleGuessReply(userId, "انسحب") : startGuess(userId);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: reply, parse_mode: "HTML" });
+      return;
+    }
+    // ردّ لعبة التخمين: رسالة نصية عادية من مستخدم لديه جولة نشطة تُعالَج كإجابة أولًا.
+    const guessReply = handleGuessReply(userId, text);
+    if (guessReply) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: guessReply, parse_mode: "HTML" }); return; }
     // Batch 4: word blacklist (moderation) — blocked queries return no results.
     if (!isAdmin(env, userId) && await isBlacklistedWord(env, text)) {
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⚠️ لا تتوفر نتائج لهذا البحث حاليًا." });

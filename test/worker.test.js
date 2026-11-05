@@ -1850,3 +1850,83 @@ test("ⲫⲱⲥ regression: a stale cached file_id must not silence the voice", 
     assert.ok(byteSend, "after the stale file_id was rejected, the voice must be rebuilt from source bytes and sent");
   } finally { globalThis.fetch = original; }
 });
+
+// ---- الميزات الجديدة (src/features.js) — كلها من بيانات القاموس المرفقة الحقيقية ----
+test("features: copticdate computes a real anchored date", async () => {
+  const { copticDateNow, copticDateParts } = await import("../src/features.js");
+  // anchor sanity: 11 September 2026 is 1 Tout 1743
+  assert.deepEqual(copticDateParts(Date.UTC(2026, 8, 11)), { year: 1743, month: 1, day: 1 });
+  assert.match(copticDateNow(new Date()), /التاريخ القبطي/u);
+});
+
+test("features: alphabet uses real letter names from the dictionary", async () => {
+  const { alphabetText } = await import("../src/features.js");
+  const text = alphabetText();
+  assert.match(text, /الحروف القبطية/u);
+  assert.match(text, /ⲁ/u, "the alphabet must include alef with its sheet-derived name");
+});
+
+test("features: letterstats, origins and wordcount produce real counts", async () => {
+  const { letterStatsText, originsText, wordCountText } = await import("../src/features.js");
+  assert.match(letterStatsText(), /توزيع/u);
+  assert.match(originsText(), /أصول/u);
+  const wc = wordCountText();
+  assert.match(wc, /17,2\d\d|17,3\d\d|16,\d{3}/u, "wordcount must show the real bundled record count");
+  assert.match(wc, /مدخل له ملف صوت/u);
+});
+
+test("features: longest, startsWith, similar, translate, vocab", async () => {
+  const { longestText, startsWithText, similarText, translateText, vocabText } = await import("../src/features.js");
+  assert.match(longestText(), /أطول/u);
+  assert.match(startsWithText("ⲫ"), /كلمة تبدأ/u);
+  assert.match(startsWithText(""), /الاستخدام/u);
+  assert.match(similarText("ⲫⲱⲥ"), /شقيقة|لم أجد/u);
+  assert.match(translateText("ⲫⲱⲥ"), /ⲫⲱⲥ/u);
+  assert.match(translateText("zzzz-nothing"), /لم أجد/u);
+  assert.match(vocabText(), /حزمة مفردات/u);
+});
+
+test("features: guess game full round on real dictionary data", async () => {
+  const { startGuess, handleGuessReply } = await import("../src/features.js");
+  const question = startGuess(777);
+  assert.match(question, /خمّن/u);
+  // a wrong answer identifies the real answer without leaking it beforehand
+  const wrong = handleGuessReply(777, "ⲍⲍⲍⲍ");
+  assert.match(wrong, /الكلمة الصحيحة/u);
+  const round2 = startGuess(888);
+  assert.match(round2, /خمّن/u);
+});
+
+test("bot commands: /copticdate, /alphabet, /wordcount, /vocab, /guess answer via the worker", async () => {
+  resetAudioCaches();
+  const kvEnv = { ...env, USERS: fakeKv() };
+  for (const command of ["/copticdate", "/alphabet", "/wordcount", "/vocab", "/guess"]) {
+    const calls = [];
+    fakeTelegramApi(calls);
+    await worker.fetch(updateRequest({ message: { text: command, chat: { id: 4242 }, from: { id: 4242 } } }), kvEnv);
+    const sent = calls.find((call) => call.url.endsWith("/sendMessage") && !/انضم مستخدم|الملخص الأسبوعي/u.test(String(call.payload?.text ?? "")));
+    assert.ok(sent, `${command} must send a reply`);
+  }
+});
+
+test("bot commands: /translate, /similar, /startswith, /longest, /origins, /letterstats answer via the worker", async () => {
+  resetAudioCaches();
+  const kvEnv = { ...env, USERS: fakeKv() };
+  for (const command of ["/translate ⲫⲱⲥ", "/similar ⲫⲱⲥ", "/startswith ⲫ", "/longest", "/origins", "/letterstats"]) {
+    const calls = [];
+    fakeTelegramApi(calls);
+    await worker.fetch(updateRequest({ message: { text: command, chat: { id: 4242 }, from: { id: 4242 } } }), kvEnv);
+    const sent = calls.find((call) => call.url.endsWith("/sendMessage") && !/انضم مستخدم|الملخص الأسبوعي/u.test(String(call.payload?.text ?? "")));
+    assert.ok(sent, `${command} must send a reply`);
+  }
+});
+
+test("bot: plain search still works after the features block (no regression)", async () => {
+  resetAudioCaches();
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.fetch(updateRequest({ message: { text: "ⲫⲱⲥ", chat: { id: 4242 }, from: { id: 4242 } } }), kvEnv);
+  assert.ok(calls.some((call) => call.url.endsWith("/sendVoice")), "plain ⲫⲱⲥ search must still send the voice");
+  assert.ok(calls.some((call) => call.url.endsWith("/sendMessage")), "plain ⲫⲱⲥ search must still send the text");
+});
