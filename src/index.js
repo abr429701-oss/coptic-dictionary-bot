@@ -5,6 +5,7 @@ import welcomeImageBase64 from "./welcome-image.js";
 import { createAdminExtras } from "./admin-extra.js";
 import { createAdminExtras2 } from "./admin-extra2.js";
 import { createAdminPro } from "./admin-pro.js";
+import { createAdminSuite } from "./admin-suite.js";
 
 const BOT_TITLE = "📖 القاموس القبطي البحيري";
 const PAGE_SIZE = 1;
@@ -5077,6 +5078,11 @@ async function handleUpdate(update, env, ctx) {
       await adminExtras2.handleCallback({ env, callback });
       return;
     }
+    if (String(callback.data ?? "").startsWith("aps|")) {
+      if (isAdmin(env, callback.from?.id)) await adminSuite.handlePanelCallback({ env, callback });
+      else await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id }).catch(() => null);
+      return;
+    }
     if (String(callback.data ?? "").startsWith("ap|")) {
       await adminPro.handleCallback({ env, callback });
       return;
@@ -5330,6 +5336,8 @@ async function handleUpdate(update, env, ctx) {
     if (await adminExtras.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return;
     if (await adminExtras2.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return;
     if (await adminPro.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return;
+    // admin-suite: اللوحة الاحترافية (رسائل خاصة بالأدمن فقط)
+    if (await adminSuite.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return;
     if (text === "/cancel" && admin?.bc) {
       await saveUser(env, userId, { ...admin, bc: undefined });
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "تم إلغاء الإرسال الجماعي." });
@@ -6235,6 +6243,12 @@ const adminPro = createAdminPro({
   adminStatsOp: () => (activeEnv ? storeCall(activeEnv, { op: "adminStats" }).catch(() => ({})) : Promise.resolve({})),
   getUserHistory, maintenanceOn, setMaintenance, recentSearches,
 });
+
+const adminSuite = createAdminSuite({
+  telegram, escapeHtml, storeCall, getUser, records, logAdminAction, adminIds, botVersion: BOT_VERSION, recentSearches,
+});
+// إلحاق أوامر الحزمة الجديدة بعد إنشائها (ADMIN_COMMANDS معلنة أعلى الملف قبل توفر adminSuite).
+ADMIN_COMMANDS.push(...adminSuite.commandList);
 
 // Serialized background chain: fast-ack hands each update to ctx.waitUntil, but updates
 // still execute one after another so message sequences (e.g. /record then a voice note)
