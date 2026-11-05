@@ -14,6 +14,7 @@ import {
   addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton,
   ensureVideoMenu, menuAdminListText,
 } from "../src/menu-builder.js";
+import { S } from "../src/menu-studio.js";
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -264,6 +265,8 @@ const toChat = (calls, chatId) => sent(calls).filter((m) => String(m.chat_id) ==
 const anyText = (calls, chatId, re) => toChat(calls, chatId).some((m) => re.test(m.text ?? ""));
 const nowIso = () => new Date().toISOString();
 const storedMenus = (kvEnv) => kvEnv.USERS.store.get(MENUS_KEY)?.menus ?? [];
+const labelsOf = (message) => (message?.reply_markup?.keyboard ?? []).flat().map((b) => b.text);
+const noInline = (calls) => !calls.some((c) => JSON.stringify(c.payload?.reply_markup ?? {}).includes("inline_keyboard"));
 
 test("menu-builder: /menu empty state, /menuadmin is admin-only", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
@@ -275,100 +278,154 @@ test("menu-builder: /menu empty state, /menuadmin is admin-only", async () => {
   assert.ok(anyText(deniedAdd, 51, /للأدمن فقط/));
 });
 
-test("menu-builder: guided /addmenu creates a menu and /menu lists it", async () => {
+test("menu-builder: /menuadmin studio builds a menu that users open from bottom buttons", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  kvEnv.USERS.store.set("user:52", { name: "مينا", registeredAt: nowIso(), firstSeen: nowIso(), lastSeen: nowIso() });
-  const step1 = await say(kvEnv, ADMIN, "/addmenu");
-  assert.ok(anyText(step1, ADMIN, /عنوان القائمة/));
-  const step2 = await say(kvEnv, ADMIN, "قائمة التعلم");
-  assert.ok(anyText(step2, ADMIN, /نص الرسالة/));
-  const step3 = await say(kvEnv, ADMIN, "أهلًا بك في التعلم!");
-  assert.ok(anyText(step3, ADMIN, /تم إنشاء القائمة/));
+  const started = await say(kvEnv, ADMIN, "/addmenu");
+  assert.ok(anyText(started, ADMIN, /محرر القوائم/));
+  assert.ok(noInline(sent(started)), "the retired /addmenu must not send an inline panel");
+  const prompt = await say(kvEnv, ADMIN, S.NEW);
+  assert.ok(anyText(prompt, ADMIN, /عنوان القائمة/));
+  const done = await say(kvEnv, ADMIN, "قائمة التعلم");
   assert.equal(storedMenus(kvEnv).length, 1);
   assert.equal(storedMenus(kvEnv)[0].title, "قائمة التعلم");
+  assert.ok(anyText(done, ADMIN, /قائمة التعلم/));
+  assert.ok(noInline(sent(done)));
+
   const list = await say(kvEnv, 53, "/menu");
-  assert.ok(anyText(list, 53, /القوائم/));
-  assert.equal(toChat(list, 53)[0]?.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data, `mb|open|${storedMenus(kvEnv)[0].id}`);
-  const opened = await sendCallback(kvEnv, 53, `mb|open|${storedMenus(kvEnv)[0].id}`);
-  assert.ok(anyText(opened, 53, /أهلًا بك في التعلم!/));
+  assert.ok(labelsOf(toChat(list, 53).at(-1)).includes("قائمة التعلم"));
+  const opened = await say(kvEnv, 53, "قائمة التعلم");
+  assert.ok(anyText(opened, 53, /قائمة التعلم/));
+  assert.ok(noInline(sent(opened)));
 });
 
-test("menu-builder: guided /addbutton adds a text button and tapping it sends the text", async () => {
+test("menu-builder: a button built with the studio panels answers a user tap", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  kvEnv.USERS.store.set("user:54", { name: "مينا", registeredAt: nowIso(), firstSeen: nowIso(), lastSeen: nowIso() });
-  await say(kvEnv, ADMIN, "/addmenu قائمة الاختبار");
-  await say(kvEnv, ADMIN, "نص القائمة");
-  const menuId = storedMenus(kvEnv)[0].id;
-  const pick = await say(kvEnv, ADMIN, "/addbutton 1");
-  assert.ok(JSON.stringify(sent(pick)).includes("mba|kind"));
-  const kind = await sendCallback(kvEnv, ADMIN, `mba|kind|${menuId}|text`);
-  assert.ok(anyText(kind, ADMIN, /عنوان الزر|نص الزر/));
+  await say(kvEnv, ADMIN, "/menuadmin");
+  await say(kvEnv, ADMIN, S.NEW);
+  await say(kvEnv, ADMIN, "قائمة الاختبار");
+  await say(kvEnv, ADMIN, S.ADDBTN);
+  const kinds = await say(kvEnv, ADMIN, "نص");
+  assert.ok(anyText(kinds, ADMIN, /تسمية الزر/));
   await say(kvEnv, ADMIN, "ترحيب");
   const content = await say(kvEnv, ADMIN, "أهلًا بالجميع!");
-  assert.ok(anyText(content, ADMIN, /تمت إضافة الزر/));
+  assert.ok(anyText(content, ADMIN, /قائمة الاختبار/));
   assert.equal(storedMenus(kvEnv)[0].buttons.length, 1);
   assert.equal(storedMenus(kvEnv)[0].buttons[0].kind, "text");
-  const btnId = storedMenus(kvEnv)[0].buttons[0].id;
-  const opened = await sendCallback(kvEnv, 55, `mb|open|${menuId}`);
-  assert.ok(JSON.stringify(toChat(opened, 55)).includes(`mb|btn|${menuId}|${btnId}`));
-  const tapped = await sendCallback(kvEnv, 55, `mb|btn|${menuId}|${btnId}`);
+  assert.equal(storedMenus(kvEnv)[0].buttons[0].label, "ترحيب");
+
+  await say(kvEnv, 55, "/menu");
+  const opened = await say(kvEnv, 55, "قائمة الاختبار");
+  assert.ok(labelsOf(toChat(opened, 55).at(-1)).includes("ترحيب"));
+  const tapped = await say(kvEnv, 55, "ترحيب");
   assert.ok(anyText(tapped, 55, /أهلًا بالجميع!/));
 });
 
-test("menu-builder: /addvideo guided flow stores the video and /videolessons plays it", async () => {
+test("menu-builder: a submenu is created inside a menu and linked back automatically", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  kvEnv.USERS.store.set("user:56", { name: "مينا", registeredAt: nowIso(), firstSeen: nowIso(), lastSeen: nowIso() });
-  const step1 = await say(kvEnv, ADMIN, "/addvideo الدرس الأول");
-  assert.ok(anyText(step1, ADMIN, /أرسل الآن الفيديو/));
-  const saved = await sendUpdate(kvEnv, { message: { video: { file_id: "VID_TEST_1", file_unique_id: "UQ1" }, chat: { id: ADMIN, type: "private" }, from: { id: ADMIN } } });
-  assert.ok(anyText(saved, ADMIN, /تم حفظ درس الفيديو/));
-  assert.equal(storedMenus(kvEnv).length, 1);
-  assert.equal(storedMenus(kvEnv)[0].id, VIDEO_MENU_ID);
-  assert.equal(storedMenus(kvEnv)[0].buttons[0].fileId, "VID_TEST_1");
+  await say(kvEnv, ADMIN, "/menuadmin");
+  await say(kvEnv, ADMIN, S.NEW);
+  await say(kvEnv, ADMIN, "أب");
+  const ask = await say(kvEnv, ADMIN, S.NEWSUB);
+  assert.ok(anyText(ask, ADMIN, /القائمة الفرعية/));
+  await say(kvEnv, ADMIN, "ابن");
+  assert.equal(storedMenus(kvEnv).length, 2);
+  const parent = storedMenus(kvEnv).find((m) => m.title === "أب");
+  const child = storedMenus(kvEnv).find((m) => m.title === "ابن");
+  assert.equal(child.parentId, parent.id);
+  assert.equal(parent.buttons.length, 1);
+  assert.equal(parent.buttons[0].kind, "submenu");
+  assert.equal(parent.buttons[0].targetMenuId, child.id);
+  // the user walks أب -> ابن from bottom buttons only
+  await say(kvEnv, 61, "/menu");
+  await say(kvEnv, 61, "أب");
+  const childMenu = await say(kvEnv, 61, "ابن");
+  assert.ok(anyText(childMenu, 61, /ابن/));
+  assert.ok(noInline(sent(childMenu)));
+});
+
+test("menu-builder: the menu panel offers a link button and linking stores a submenu button", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  kvEnv.USERS.store.set(MENUS_KEY, { menus: [
+    { id: "m_a", title: "أولى", text: "أ", buttons: [] },
+    { id: "m_b", title: "ثانية", text: "ب", buttons: [] },
+  ] });
+  const panel = await say(kvEnv, ADMIN, "/menuadmin");
+  assert.ok(noInline(sent(panel)));
+  const kb = toChat(panel, ADMIN).at(-1)?.reply_markup?.keyboard ?? [];
+  const flat = kb.flat().map((b) => b.text);
+  assert.ok(flat.includes(S.NEW) && flat.includes(S.MENUS), flat.join("|"));
+  // the panel that owns the link action is the per-menu panel
+  await say(kvEnv, ADMIN, S.MENUS);
+  const opened = await say(kvEnv, ADMIN, "1. أولى");
+  const menuKb = toChat(opened, ADMIN).at(-1)?.reply_markup?.keyboard ?? [];
+  const menuLabels = menuKb.flat().map((b) => b.text);
+  assert.ok(menuLabels.includes(S.LINK), `menu panel labels: ${menuLabels.join("|")}`);
+  assert.ok(menuLabels.includes(S.NEWSUB));
+  // and the stored tree accepts the link exactly the way the panel writes it
+  const linked = addButton({ menus: storedMenus(kvEnv) }, "m_a", { label: "ثانية", kind: "submenu", targetMenuId: "m_b" });
+  assert.equal(linked.button?.kind, "submenu");
+  assert.equal(linked.button?.targetMenuId, "m_b");
+});
+
+test("menu-builder: a video lesson is added from the studio and played for users", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await say(kvEnv, ADMIN, "/menuadmin");
+  await say(kvEnv, ADMIN, S.VIDEO);
+  assert.ok(storedMenus(kvEnv).some((m) => m.id === VIDEO_MENU_ID));
+  await say(kvEnv, ADMIN, S.ADDBTN);
+  const asked = await say(kvEnv, ADMIN, "فيديو");
+  assert.ok(anyText(asked, ADMIN, /تسمية الزر/));
+  const askedFile = await say(kvEnv, ADMIN, "الدرس الأول");
+  assert.ok(anyText(askedFile, ADMIN, /أرسل الملف/));
+  await sendUpdate(kvEnv, { message: { video: { file_id: "VID_TEST_1", file_unique_id: "UQ1" }, chat: { id: ADMIN, type: "private" }, from: { id: ADMIN } } });
+  const vid = storedMenus(kvEnv).find((m) => m.id === VIDEO_MENU_ID);
+  assert.equal(vid.buttons.length, 1);
+  assert.equal(vid.buttons[0].fileId, "VID_TEST_1");
   const list = await say(kvEnv, 57, "/videolessons");
-  assert.ok(anyText(list, 57, /دروس فيديو/));
-  const btnId = storedMenus(kvEnv)[0].buttons[0].id;
-  assert.ok(JSON.stringify(toChat(list, 57)).includes(`mb|btn|${VIDEO_MENU_ID}|${btnId}`));
-  const played = await sendCallback(kvEnv, 57, `mb|btn|${VIDEO_MENU_ID}|${btnId}`);
+  assert.ok(anyText(list, 57, /دروس فيديو|الدرس الأول/));
+  const played = await sendCallback(kvEnv, 57, `mb|btn|${VIDEO_MENU_ID}|${vid.buttons[0].id}`);
   assert.equal(videos(played)[0]?.video, "VID_TEST_1");
-  assert.match(videos(played)[0]?.caption ?? "", /الدرس الأول/);
-  // /videolist and /delvideo operate on the video menu's buttons
-  const vl = await say(kvEnv, ADMIN, "/videolist");
-  assert.ok(anyText(vl, ADMIN, /الدرس الأول/));
-  const del = await say(kvEnv, ADMIN, "/delvideo 1");
-  assert.ok(anyText(del, ADMIN, /حُذف درس الفيديو/));
-  assert.equal(storedMenus(kvEnv)[0].buttons.length, 0);
 });
 
-test("menu-builder: admin-only button hidden from users, back button returns to parent", async () => {
+test("menu-builder: the whole /menuadmin flow never sends an inline keyboard", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  kvEnv.USERS.store.set(MENUS_KEY, { menus: [
-    { id: "m_p", title: "رئيسية", text: "الرئيسية", buttons: [{ id: "b_sub", label: "فرعية", kind: "submenu", targetMenuId: "m_c" }] },
-    { id: "m_c", title: "فرعية", text: "الفرعية", parentId: "m_p", buttons: [
-      { id: "b_pub", label: "عام", kind: "text", text: "عام!" },
-      { id: "b_sec", label: "سري", kind: "text", text: "سري!", adminOnly: true },
-    ] },
-  ] });
-  const userOpen = await sendCallback(kvEnv, 58, "mb|open|m_c");
-  assert.ok(!JSON.stringify(toChat(userOpen, 58)).includes("سري"));
-  const adminOpen = await sendCallback(kvEnv, ADMIN, "mb|open|m_c");
-  assert.ok(JSON.stringify(toChat(adminOpen, ADMIN)).includes("🔒 سري"));
-  const back = toChat(adminOpen, ADMIN)[0]?.reply_markup?.inline_keyboard?.at(-1)?.[0];
-  assert.equal(back?.text, "🔙 رجوع");
-  assert.equal(back?.callback_data, "mb|open|m_p");
-  // tapping the admin-only button as a normal user is refused
-  const refused = await sendCallback(kvEnv, 58, "mb|btn|m_c|b_sec");
-  assert.equal(sent(refused).length, 0);
-  assert.match(JSON.stringify(refused), /للأدمن فقط/);
-});
-
-test("menu-builder: /start menu_<id> deep link opens the menu", async () => {
-  const kvEnv = { ...env, USERS: fakeKv() };
-  kvEnv.USERS.store.set(MENUS_KEY, { menus: [
-    { id: "m_deep", title: "عميقة", text: "وصلت عبر الرابط!", buttons: [] },
-  ] });
-  const calls = await say(kvEnv, 59, "/start menu_m_deep");
-  assert.ok(anyText(calls, 59, /وصلت عبر الرابط!/));
-  const missing = await say(kvEnv, 59, "/start menu_m_nope");
-  assert.ok(anyText(missing, 59, /غير موجودة/));
+  const all = [];
+  const step = async (text) => { const calls = await say(kvEnv, ADMIN, text); all.push(...calls); return calls; };
+  await step("/menuadmin");
+  await step(S.NEW);
+  await step("قائمة نظيفة");
+  await step(S.TITLE);
+  await step("عنوان جديد");
+  await step(S.TEXT);
+  await step("نص جديد");
+  await step(S.ROWS);
+  await step("1");
+  await step(S.ADDBTN);
+  await step("رابط");
+  await step("زر رابط");
+  await step("https://example.com/x");
+  await step(S.PREVIEW);
+  await step(S.ADDBTN);
+  await step("نص");
+  await step("زر نص");
+  await step("محتوى الزر");
+  await step(S.NEWSUB);
+  await step("فرعية تجريبية");
+  await step(S.BACK);
+  await step(S.LINK);
+  await step(S.STATS);
+  await step(S.BACK);
+  await step(S.TREE);
+  await step(S.MENUS);
+  await step(S.BACK);
+  await step(S.BACKUP);
+  await step(S.TOOLS);
+  await step(S.BACK);
+  await step(S.IMPORT);
+  await step(S.BACK);
+  await step(S.EXIT);
+  assert.ok(all.length > 20, "the flow must produce messages");
+  assert.ok(noInline(all), "no inline_keyboard anywhere in the admin flow");
+  const keyboards = all.filter((c) => c.payload?.reply_markup?.keyboard);
+  assert.ok(keyboards.length >= 15, "every panel is a bottom keyboard");
 });

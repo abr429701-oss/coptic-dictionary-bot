@@ -331,7 +331,7 @@ async function handleNewFeaturesCallback(env, callback) {
     return;
   }
   if (action === "videolessons") return sendVideoLessons(env, chatId);
-  if (action === "menu") return sendRootMenus(env, chatId);
+  if (action === "menu") return sendRootMenus(env, chatId, userId);
   if (action === "flash") return sendFlashcard(env, chatId, userId);
   if (action === "quiz") return beginQuizV2(env, chatId, parts[2] || "meaning");
   if (action === "dailyquiz") return beginQuizV2(env, chatId, dailyQuizType());
@@ -408,18 +408,19 @@ async function ensureVideoMenuStored(env) {
   if (created) await saveMenus(env, menus);
   return { menus, menu };
 }
-async function sendRootMenus(env, chatId) {
+async function sendRootMenus(env, chatId, userId = chatId) {
   const stored = await loadMenus(env);
   const roots = rootMenus(stored);
   if (!roots.length) {
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "🔘 لا توجد قوائم مخصصة بعد.\n(للأدمن: أنشئ أول قائمة بـ /addmenu)" });
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "🔘 لا توجد قوائم مخصصة بعد.\n(للأدمن: أنشئ أول قائمة من /menuadmin)" });
     return;
   }
+  await setMenuNav(env, userId, null);
   await telegram(env, "sendMessage", {
     chat_id: chatId,
-    text: "🔘 <b>القوائم</b>\nاختر قائمة:",
+    text: "🔘 <b>القوائم</b>\nاضغط زر القائمة تحت الحقل:",
     parse_mode: "HTML",
-    reply_markup: buildRootKeyboard(stored),
+    reply_markup: buildRootReplyKeyboard(stored, { isAdmin: isAdmin(env, userId) }),
   });
 }
 async function openMenu(env, chatId, menuId, userId) {
@@ -455,7 +456,7 @@ async function runMenuCommand(env, chatId, userId, command) {
   if (command === "/flashcards") { await sendFlashcard(env, chatId, userId); return; }
   if (command === "/help") { await sendHelp(env, chatId); return; }
   if (command === "/dailyquiz") { await beginQuizV2(env, chatId, dailyQuizType()); return; }
-  if (command === "/menu") { await sendRootMenus(env, chatId); return; }
+  if (command === "/menu") { await sendRootMenus(env, chatId, chatId); return; }
   if (command === "/random") {
     const index = Math.floor(Math.random() * records.length);
     await sendRecord(env, chatId, index, -1, "");
@@ -466,6 +467,7 @@ async function runMenuCommand(env, chatId, userId, command) {
 async function handleMenuButton(env, callback) {
   const chatId = callback.message?.chat?.id;
   if (!chatId) return;
+  const plain = callback.id === PLAIN_CALLBACK;
   const parts = String(callback.data ?? "").split("|");
   const menuId = parts[2] ?? "";
   const buttonId = parts[3] ?? "";
@@ -474,23 +476,32 @@ async function handleMenuButton(env, callback) {
   const menu = findMenu(stored, menuId);
   const button = findButton(menu, buttonId);
   if (!button) {
-    await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, text: "الزر غير موجود (ربما حُذف). أرسل /menu لعرض القوائم الحالية.", show_alert: true });
+    const text = "الزر غير موجود (ربما حُذف). أرسل /menu لعرض القوائم الحالية.";
+    if (plain) await telegram(env, "sendMessage", { chat_id: chatId, text });
+    else await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, text, show_alert: true });
     return;
   }
   if (button.adminOnly && !isAdmin(env, userId)) {
-    await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, text: "⛔ هذا الزر للأدمن فقط.", show_alert: true });
+    const text = "⛔ هذا الزر للأدمن فقط.";
+    if (plain) await telegram(env, "sendMessage", { chat_id: chatId, text });
+    else await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, text, show_alert: true });
     return;
   }
-  await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
+  if (!plain) await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
   if (button.kind === "popup") {
-    await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, text: button.text ?? "", show_alert: true });
+    if (plain) await telegram(env, "sendMessage", { chat_id: chatId, text: `⚠️ ${button.text ?? ""}` });
+    else await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, text: button.text ?? "", show_alert: true });
     return;
   }
   if (button.kind === "text") {
     await telegram(env, "sendMessage", { chat_id: chatId, text: button.text ?? "", parse_mode: "HTML" });
     return;
   }
-  if (button.kind === "submenu") { await openMenu(env, chatId, button.targetMenuId, userId); return; }
+  if (button.kind === "submenu") {
+    if (plain) await openReplyMenu(env, chatId, userId, button.targetMenuId);
+    else await openMenu(env, chatId, button.targetMenuId, userId);
+    return;
+  }
   if (button.kind === "command") { await runMenuCommand(env, chatId, String(userId ?? chatId), button.command); return; }
   if (button.kind === "photo" || button.kind === "video" || button.kind === "audio" || button.kind === "document") {
     const method = button.kind === "photo" ? "sendPhoto" : button.kind === "video" ? "sendVideo" : button.kind === "audio" ? "sendAudio" : "sendDocument";
@@ -498,278 +509,6 @@ async function handleMenuButton(env, callback) {
     const caption = String(button.text ?? "").trim() ? button.text : button.label;
     const res = await telegram(env, method, { chat_id: chatId, [key]: button.fileId, ...(caption ? { caption } : {}) });
     if (!res?.ok) await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تعذّر إرسال هذا المحتوى حاليًا. جرّب لاحقًا أو أبلغ الإدارة." });
-    return;
-  }
-}
-async function beginAddMenu(env, chatId, userId, titleArg, parentId = null) {
-  const title = cleanMenuTitle(titleArg);
-  if (title) {
-    await setAdminFlow(env, userId, { kind: "mb_newmenu_text", title, parentId });
-    await telegram(env, "sendMessage", { chat_id: chatId, text: `🔘 العنوان: «${escapeHtml(title)}»\n\nأرسل الآن نص الرسالة التي تظهر عند فتح القائمة (حتى 3000 حرف). للإلغاء أرسل /cancel.`, parse_mode: "HTML" });
-    return;
-  }
-  await setAdminFlow(env, userId, { kind: "mb_newmenu_title", parentId });
-  await telegram(env, "sendMessage", { chat_id: chatId, text: "🔘 أرسل عنوان القائمة الجديدة (حتى 80 حرفًا). للإلغاء أرسل /cancel." });
-}
-function kindPickerKeyboard(menuId) {
-  const rows = [];
-  for (let i = 0; i < BUTTON_KINDS.length; i += 2) {
-    rows.push(BUTTON_KINDS.slice(i, i + 2).map((k) => ({ text: KIND_LABELS[k], callback_data: `mba|kind|${menuId}|${k}` })));
-  }
-  return { inline_keyboard: rows };
-}
-async function sendKindPicker(env, chatId, menuId) {
-  await telegram(env, "sendMessage", {
-    chat_id: chatId,
-    text: "🔘 اختر نوع الزر:",
-    reply_markup: kindPickerKeyboard(menuId),
-  });
-}
-async function beginAddMenuButton(env, chatId, userId, menuArg) {
-  const stored = await loadMenus(env);
-  const found = parseMenuTarget(menuArg, stored);
-  if (!found) {
-    if (!menuArg) {
-      const roots = rootMenus(stored);
-      if (!roots.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: "🔘 لا توجد قوائم بعد. أنشئ قائمة أولاً بـ /addmenu" }); return; }
-      await telegram(env, "sendMessage", {
-        chat_id: chatId,
-        text: "🔘 اختر القائمة التي ستضيف إليها زرًا:",
-        reply_markup: { inline_keyboard: roots.map((m) => [{ text: m.title, callback_data: `mba|addbtn|${m.id}` }]) },
-      });
-      return;
-    }
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ لم أجد قائمة بهذا الرقم أو المعرّف. اعرض القوائم بـ /menuadmin" });
-    return;
-  }
-  await sendKindPicker(env, chatId, found.menu.id);
-}
-async function startAddButtonForKind(env, chatId, userId, menuId, kind) {
-  if (!BUTTON_KINDS.includes(kind)) return;
-  await setAdminFlow(env, userId, { kind: "mb_addbtn_label", menuId, actionKind: kind });
-  await telegram(env, "sendMessage", { chat_id: chatId, text: `🔘 نوع الزر: <b>${escapeHtml(KIND_LABELS[kind])}</b>\n\nأدخل نص الزر (العنوان الذي سيظهر على الزر، حتى 40 حرفًا). للإلغاء أرسل /cancel.`, parse_mode: "HTML" });
-}
-async function promptAddButtonContent(env, chatId, userId, flow) {
-  const kind = flow.actionKind;
-  if (MEDIA_KINDS.includes(kind)) {
-    await setAdminFlow(env, userId, { ...flow, kind: "mb_addbtn_media" });
-    const noun = kind === "photo" ? "الصورة" : kind === "video" ? "الفيديو" : kind === "audio" ? "الصوت" : "الملف";
-    await telegram(env, "sendMessage", { chat_id: chatId, text: `🔘 الزر: «${escapeHtml(flow.label)}»\n\nأرسل الآن ${noun} ليُحفظ مع الزر (يمكنك إضافة تعليق نصي معه كتسمية توضيحية). للإلغاء أرسل /cancel.`, parse_mode: "HTML" });
-    return;
-  }
-  if (kind === "submenu") {
-    await setAdminFlow(env, userId, { ...flow, kind: "mb_addbtn_target" });
-    const stored = await loadMenus(env);
-    const blocked = new Set([flow.menuId, ...descendantMenuIds(stored, flow.menuId)]);
-    const candidates = normalizeMenus(stored).menus.filter((m) => !blocked.has(m.id));
-    if (!candidates.length) {
-      await clearAdminFlow(env, userId);
-      await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ لا توجد قائمة فرعية متاحة — أنشئ قائمة أولاً بـ /addmenu ثم أضف الزر." });
-      return;
-    }
-    await telegram(env, "sendMessage", {
-      chat_id: chatId,
-      text: `🔘 الزر: «${escapeHtml(flow.label)}»\n\nاختر القائمة الفرعية التي سيفتحها الزر:`,
-      parse_mode: "HTML",
-      reply_markup: { inline_keyboard: candidates.map((m) => [{ text: m.title, callback_data: `mba|target|${flow.menuId}|${m.id}` }]) },
-    });
-    return;
-  }
-  await setAdminFlow(env, userId, { ...flow, kind: "mb_addbtn_content" });
-  const hint = kind === "text" ? "أرسل الآن نص الرسالة التي ستُرسل عند الضغط على الزر."
-    : kind === "popup" ? "أرسل الآن نص التنبيه المنبثق (حتى 200 حرف)."
-    : kind === "url" ? "أرسل الآن الرابط (يبدأ بـ https://)."
-    : `أرسل الآن الأمر (المتاح: ${ALLOWED_COMMANDS.join(" ")}) — مثال: /quiz`;
-  await telegram(env, "sendMessage", { chat_id: chatId, text: `🔘 الزر: «${escapeHtml(flow.label)}»\n\n${hint} للإلغاء أرسل /cancel.`, parse_mode: "HTML" });
-}
-async function createMenuButtonFromFlow(env, chatId, userId, flow, content) {
-  const stored = await loadMenus(env);
-  const menu = findMenu(stored, flow.menuId);
-  if (!menu) { await clearAdminFlow(env, userId); await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ القائمة غير موجودة." }); return; }
-  const { menus, button } = addButton(stored, flow.menuId, { label: flow.label, kind: flow.actionKind, ...content });
-  if (!button) {
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تعذّرت إضافة الزر (ربما وصلت القائمة إلى 20 زرًا). جرّب مرة أخرى." });
-    return;
-  }
-  if (!await saveMenus(env, menus)) {
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تعذّر حفظ الزر حاليًا، جرّب مرة أخرى." });
-    return;
-  }
-  await clearAdminFlow(env, userId);
-  await logAdminAction(env, userId, "addbutton", `${menu.title} / ${flow.label} (${flow.actionKind})`);
-  if (flow.actionKind === "video" && menu.id === VIDEO_MENU_ID) {
-    await telegram(env, "sendMessage", { chat_id: chatId, text: `✅ تم حفظ درس الفيديو «${escapeHtml(flow.label)}» (رقم ${menu.buttons.length + 1}).\nجرّبه بـ /videolessons — وسيظهر كزر لكل المستخدمين.`, parse_mode: "HTML" });
-    return;
-  }
-  await telegram(env, "sendMessage", { chat_id: chatId, text: `✅ تمت إضافة الزر «${escapeHtml(flow.label)}» (${escapeHtml(KIND_LABELS[flow.actionKind])}) إلى قائمة «${escapeHtml(menu.title)}».\nجرّبه بـ /menu`, parse_mode: "HTML" });
-}
-async function finishAddMenuButtonMedia(env, message, userId, admin) {
-  const flow = admin?.adminFlow;
-  const kind = flow?.actionKind;
-  let fileId = "";
-  let fileUniqueId = "";
-  if (kind === "video" && message.video) { fileId = message.video.file_id; fileUniqueId = message.video.file_unique_id ?? ""; }
-  else if (kind === "photo" && message.photo?.length) { const p = message.photo[message.photo.length - 1]; fileId = p.file_id; fileUniqueId = p.file_unique_id ?? ""; }
-  else if (kind === "audio" && message.audio) { fileId = message.audio.file_id; fileUniqueId = message.audio.file_unique_id ?? ""; }
-  else if (kind === "document" && message.document) { fileId = message.document.file_id; fileUniqueId = message.document.file_unique_id ?? ""; }
-  if (!fileId) {
-    const noun = kind === "photo" ? "صورة" : kind === "video" ? "فيديو" : kind === "audio" ? "ملفًا صوتيًا" : "ملفًا";
-    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `❌ لم يصل ${noun} صالح. أرسل ${noun}، أو /cancel للإلغاء.` });
-    return;
-  }
-  const caption = String(message.caption ?? "").slice(0, 1000);
-  await createMenuButtonFromFlow(env, message.chat.id, userId, flow, { fileId, fileUniqueId, text: caption });
-}
-async function beginAddVideo(env, chatId, userId, titleArg) {
-  const { menu } = await ensureVideoMenuStored(env);
-  if (!menu) { await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تعذّر تجهيز قائمة دروس الفيديو حاليًا." }); return; }
-  const title = cleanButtonLabel(titleArg);
-  if (title) {
-    await setAdminFlow(env, userId, { kind: "mb_addbtn_media", menuId: menu.id, actionKind: "video", label: title });
-    await telegram(env, "sendMessage", { chat_id: chatId, text: `🎬 العنوان: «${escapeHtml(title)}»\n\nأرسل الآن الفيديو (كملف فيديو) ليُحفظ كدرس. للإلغاء أرسل /cancel.`, parse_mode: "HTML" });
-    return;
-  }
-  await setAdminFlow(env, userId, { kind: "mb_addbtn_label", menuId: menu.id, actionKind: "video" });
-  await telegram(env, "sendMessage", { chat_id: chatId, text: "🎬 أرسل عنوان درس الفيديو (حتى 40 حرفًا)، ثم سأطلب منك الفيديو. للإلغاء أرسل /cancel." });
-}
-async function sendMenuAdminPanel(env, chatId) {
-  const stored = await loadMenus(env);
-  const rows = normalizeMenus(stored).menus.map((m) => [{ text: m.title, callback_data: `mba|show|${m.id}` }]);
-  rows.push([{ text: "➕ قائمة جديدة", callback_data: "mba|new" }]);
-  await telegram(env, "sendMessage", {
-    chat_id: chatId,
-    text: menuAdminListText(stored),
-    parse_mode: "HTML",
-    reply_markup: { inline_keyboard: rows },
-  });
-}
-async function sendMenuAdminDetail(env, chatId, menuId) {
-  const stored = await loadMenus(env);
-  const menu = findMenu(stored, menuId);
-  if (!menu) { await telegram(env, "sendMessage", { chat_id: chatId, text: "⚠️ هذه القائمة غير موجودة." }); return; }
-  const rows = [
-    [{ text: "➕ إضافة زر", callback_data: `mba|addbtn|${menu.id}` }, { text: "✏️ نص القائمة", callback_data: `mba|text|${menu.id}` }],
-    [{ text: "➕ قائمة فرعية هنا", callback_data: `mba|newsub|${menu.id}` }],
-  ];
-  for (const b of menu.buttons) {
-    rows.push([
-      { text: `✏️ ${b.label.slice(0, 24)}${b.adminOnly ? " 🔒" : ""}`, callback_data: `mba|edit|${menu.id}|${b.id}` },
-      { text: b.adminOnly ? "🔓 إظهار" : "🔒 أدمن فقط", callback_data: `mba|lock|${menu.id}|${b.id}` },
-      { text: "⬆️", callback_data: `mba|mv|${menu.id}|${b.id}|up` },
-      { text: "⬇️", callback_data: `mba|mv|${menu.id}|${b.id}|down` },
-      { text: "🗑", callback_data: `mba|del|${menu.id}|${b.id}` },
-    ]);
-  }
-  rows.push([{ text: "🗑 حذف القائمة", callback_data: `mba|delmenu|${menu.id}` }, { text: "🔙 القوائم", callback_data: "mba|list" }]);
-  await telegram(env, "sendMessage", {
-    chat_id: chatId,
-    text: menuAdminDetailText(stored, menu.id),
-    parse_mode: "HTML",
-    reply_markup: { inline_keyboard: rows },
-  });
-}
-async function handleMenuAdminCallback(env, callback) {
-  const chatId = callback.message?.chat?.id;
-  if (!chatId) return;
-  if (!isAdmin(env, callback.from?.id)) {
-    await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, text: "⛔ هذا الإجراء للأدمن فقط.", show_alert: true });
-    return;
-  }
-  const parts = String(callback.data ?? "").split("|");
-  const action = parts[1];
-  const userId = String(callback.from?.id ?? "");
-  await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
-  if (action === "list") return sendMenuAdminPanel(env, chatId);
-  if (action === "new") {
-    await setAdminFlow(env, userId, { kind: "mb_newmenu_title", parentId: null });
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "🔘 أرسل عنوان القائمة الجديدة (حتى 80 حرفًا). للإلغاء أرسل /cancel." });
-    return;
-  }
-  if (action === "newsub") {
-    await setAdminFlow(env, userId, { kind: "mb_newmenu_title", parentId: parts[2] ?? null });
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "🔘 أرسل عنوان القائمة الفرعية الجديدة (حتى 80 حرفًا). للإلغاء أرسل /cancel." });
-    return;
-  }
-  if (action === "show") return sendMenuAdminDetail(env, chatId, parts[2] ?? "");
-  if (action === "text") {
-    await setAdminFlow(env, userId, { kind: "mb_menu_text", menuId: parts[2] ?? "" });
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "🔘 أرسل نص الرسالة الجديد الذي يظهر عند فتح القائمة (حتى 3000 حرف). للإلغاء أرسل /cancel." });
-    return;
-  }
-  if (action === "addbtn") return sendKindPicker(env, chatId, parts[2] ?? "");
-  if (action === "kind") return startAddButtonForKind(env, chatId, userId, parts[2] ?? "", parts[3] ?? "");
-  if (action === "target") {
-    const admin = await getUser(env, userId);
-    const flow = admin?.adminFlow;
-    if (flow?.kind !== "mb_addbtn_target") { await telegram(env, "sendMessage", { chat_id: chatId, text: "⚠️ لا توجد إضافة زر جارية. ابدأ من /menuadmin" }); return; }
-    await createMenuButtonFromFlow(env, chatId, userId, flow, { targetMenuId: parts[3] ?? "" });
-    return;
-  }
-  if (action === "edit") {
-    const stored = await loadMenus(env);
-    const button = findButton(findMenu(stored, parts[2] ?? ""), parts[3] ?? "");
-    if (!button) { await telegram(env, "sendMessage", { chat_id: chatId, text: "⚠️ الزر غير موجود." }); return; }
-    await setAdminFlow(env, userId, { kind: "mb_editbtn_label", menuId: parts[2] ?? "", buttonId: parts[3] ?? "", actionKind: button.kind });
-    await telegram(env, "sendMessage", { chat_id: chatId, text: `✏️ الزر الحالي: «${escapeHtml(button.label)}» [${escapeHtml(KIND_LABELS[button.kind])}]\n\nأرسل العنوان الجديد للزر، أو - للإبقاء عليه كما هو. للإلغاء أرسل /cancel.`, parse_mode: "HTML" });
-    return;
-  }
-  if (action === "lock") {
-    const stored = await loadMenus(env);
-    const menu = findMenu(stored, parts[2] ?? "");
-    const button = findButton(menu, parts[3] ?? "");
-    if (!button) return;
-    const { menus } = updateButton(stored, menu.id, button.id, { adminOnly: !button.adminOnly });
-    await saveMenus(env, menus);
-    await sendMenuAdminDetail(env, chatId, menu.id);
-    return;
-  }
-  if (action === "mv") {
-    const { menus, moved } = moveButton(await loadMenus(env), parts[2] ?? "", parts[3] ?? "", parts[4] === "up" ? "up" : "down");
-    if (moved) await saveMenus(env, menus);
-    await sendMenuAdminDetail(env, chatId, parts[2] ?? "");
-    return;
-  }
-  if (action === "del") {
-    const stored = await loadMenus(env);
-    const menu = findMenu(stored, parts[2] ?? "");
-    const button = findButton(menu, parts[3] ?? "");
-    if (!button) return;
-    await telegram(env, "sendMessage", {
-      chat_id: chatId,
-      text: `🗑 حذف الزر «${escapeHtml(button.label)}» من قائمة «${escapeHtml(menu.title)}»؟`,
-      parse_mode: "HTML",
-      reply_markup: { inline_keyboard: [[{ text: "✅ نعم، احذف", callback_data: `mba|delok|${menu.id}|${button.id}` }, { text: "❌ إلغاء", callback_data: `mba|show|${menu.id}` }]] },
-    });
-    return;
-  }
-  if (action === "delok") {
-    const stored = await loadMenus(env);
-    const { menus, removed } = deleteButton(stored, parts[2] ?? "", parts[3] ?? "");
-    if (!removed) { await telegram(env, "sendMessage", { chat_id: chatId, text: "⚠️ الزر غير موجود." }); return; }
-    await saveMenus(env, menus);
-    await logAdminAction(env, userId, "delbutton", removed.label);
-    await sendMenuAdminDetail(env, chatId, parts[2] ?? "");
-    return;
-  }
-  if (action === "delmenu") {
-    const stored = await loadMenus(env);
-    const menu = findMenu(stored, parts[2] ?? "");
-    if (!menu) return;
-    await telegram(env, "sendMessage", {
-      chat_id: chatId,
-      text: `🗑 حذف القائمة «${escapeHtml(menu.title)}» وكل أزرارها؟ (قوائمها الفرعية ستنتقل إلى القائمة الأب.)`,
-      parse_mode: "HTML",
-      reply_markup: { inline_keyboard: [[{ text: "✅ نعم، احذف", callback_data: `mba|delmenuok|${menu.id}` }, { text: "❌ إلغاء", callback_data: "mba|list" }]] },
-    });
-    return;
-  }
-  if (action === "delmenuok") {
-    const stored = await loadMenus(env);
-    const { menus, removed } = deleteMenu(stored, parts[2] ?? "");
-    if (!removed) { await telegram(env, "sendMessage", { chat_id: chatId, text: "⚠️ القائمة غير موجودة." }); return; }
-    await saveMenus(env, menus);
-    await logAdminAction(env, userId, "delmenu", removed.title);
-    await sendMenuAdminPanel(env, chatId);
     return;
   }
 }
@@ -1113,6 +852,65 @@ import { audioUrl, audioVersion, fetchHumanSpeech, fetchPrebuiltSpeech, isSingle
 import { copticDateNow, alphabetText, letterStatsText, longestText, originsText, wordCountText, startsWithText, similarText, translateText, vocabText, startGuess, handleGuessReply } from "./features.js";
 import { deepLink, shareTextForRecord, pickQuizV2Question, dailyQuizType, pickFlashcard, updateFlashcard, lessonList, lessonText, suggestSimilar, helpText, retentionText, opsText, recordById } from "./new-features.js";
 import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VIDEO_MENU_ID, cleanMenuTitle, cleanMenuText, cleanButtonLabel, cleanUrl, cleanCommand, normalizeMenus, findMenu, findButton, rootMenus, descendantMenuIds, buildMenuKeyboard, buildRootKeyboard, menuOpenText, menuAdminListText, menuAdminDetailText, parseMenuTarget, parseButtonTarget, addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton, ensureVideoMenu } from "./menu-builder.js";
+import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
+
+// ---- reply-keyboard menus (real buttons under the field, no inline) --------
+// The position of a user inside the menus is remembered so a plain-text tap can
+// be resolved without any callback data.
+const PLAIN_CALLBACK = "__plain__";
+async function menuNavOf(env, userId) {
+  const user = await getUser(env, userId);
+  return user?.menuNav ? String(user.menuNav) : null;
+}
+async function setMenuNav(env, userId, menuId) {
+  const user = (await getUser(env, userId)) ?? {};
+  const next = { ...user };
+  if (menuId) next.menuNav = String(menuId); else delete next.menuNav;
+  await saveUser(env, userId, next);
+}
+async function openReplyMenu(env, chatId, userId, menu) {
+  if (!chatId) return;
+  const stored = await loadMenus(env);
+  const target = typeof menu === "string" ? findMenu(stored, menu) : menu;
+  if (!target) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "⚠️ هذه القائمة غير موجودة. أرسل /menu لعرض القوائم." });
+    return;
+  }
+  await setMenuNav(env, userId, target.id);
+  await telegram(env, "sendMessage", {
+    chat_id: chatId,
+    text: menuOpenText(target),
+    parse_mode: "HTML",
+    reply_markup: buildReplyMenuKeyboard(stored, target, { isAdmin: isAdmin(env, userId) }),
+  });
+}
+async function followMenuHit(env, chatId, userId, hit) {
+  if (hit.kind === "admin") {
+    await studio.handleCommand(env, chatId, userId);
+    return true;
+  }
+  if (hit.kind === "menu") { await openReplyMenu(env, chatId, userId, hit.menu); return true; }
+  if (hit.kind === "button") {
+    await handleMenuButton(env, {
+      id: PLAIN_CALLBACK,
+      from: { id: userId },
+      message: { chat: { id: chatId } },
+      data: `mb|btn|${hit.menu.id}|${hit.button.id}`,
+    });
+    return true;
+  }
+  return false;
+}
+const studio = createMenuStudio({
+  telegram,
+  escapeHtml,
+  loadMenus,
+  saveMenus,
+  getUser,
+  saveUser,
+  logAdminAction,
+  isAdmin,
+});
 import { repeatSingleWordOgg } from "./ogg-repeat.js";
 const VOICE_PREFIX = "voiceid:";
 // The voice hash is part of the key, so a word whose voice was rebuilt is fetched and remembered again.
@@ -5621,6 +5419,8 @@ async function clearAdminFlow(env, userId) {
 async function handleAdminFlow(env, message, userId, user, text) {
   const flow = user?.adminFlow;
   if (!flow || !text || text.startsWith("/")) return false;
+  // The mb_* wizard was replaced by the /menuadmin bottom-button studio.
+  if (String(flow.kind ?? "").startsWith("mb_")) { await clearAdminFlow(env, userId); return false; }
   if (flow.kind === "dict_find") { await clearAdminFlow(env, userId); await beginDictionaryEdit(env, message.chat.id, userId, text); return true; }
   if (flow.kind === "delete_find") { await clearAdminFlow(env, userId); await beginDeleteWord(env, message.chat.id, userId, text); return true; }
   if (flow.kind === "mb_newmenu_title") {
@@ -5970,8 +5770,11 @@ async function handleUpdate(update, env, ctx) {
     }
     // menu builder: "mba|" is the admin panel, "mb|open|" opens a menu,
     // "mb|btn|" presses a button on a menu.
+    // Legacy inline admin panels are retired. Any old message still carrying an
+    // "mba|" button opens the bottom-button editor instead of an inline keyboard.
     if (typeof callback.data === "string" && callback.data.startsWith("mba|")) {
-      await handleMenuAdminCallback(env, callback);
+      await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, text: "لوحة القوائم القديمة أُلغيت — استخدم /menuadmin (أزرار أسفل الشاشة).", show_alert: true }).catch(() => null);
+      if (callback.message?.chat?.id) await studio.handleCommand(env, callback.message.chat.id, String(callback.from?.id ?? ""));
       return;
     }
     if (typeof callback.data === "string" && callback.data.startsWith("mb|")) {
@@ -6220,6 +6023,31 @@ async function handleUpdate(update, env, ctx) {
     return;
   }
   // admin-pro: أوامر عامة + محادثة الدعم النصية المتصلة (handle يرجع false بسرعة لغير المعالج فلا يكسر البحث العادي)
+  // ---- reply-keyboard menus (no inline keyboards anywhere) ----------------
+  // The admin studio consumes its own panel taps and typed steps; every user's
+  // tap on a menu button arrives here as plain text and is answered as a real
+  // message. This runs before adminPro/search so a button label is never
+  // mistaken for a dictionary query.
+  if (isPrivate && text && text === "/cancel") {
+    const st = isAdmin(env, userId) ? await studio.readUser(env, userId) : null;
+    if (st?.menuStudio) {
+      await studio.writeState(env, userId, null);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء العملية الحالية.", reply_markup: { remove_keyboard: true } });
+      return;
+    }
+  }
+  if (isPrivate && isAdmin(env, userId) && (message.photo || message.video || message.audio || message.document)
+    && await studio.handleMedia(env, message.chat.id, userId, message)) return;
+  if (isPrivate && text && !text.startsWith("/")) {
+    if (isAdmin(env, userId) && await studio.handleText(env, message.chat.id, userId, text)) return;
+    const chatMenus = await loadMenus(env);
+    const navId = await menuNavOf(env, userId);
+    const isRootLabel = rootMenus(chatMenus).some((m) => String(m.title).trim() === text);
+    if (navId || isRootLabel || (isAdmin(env, userId) && text === STUDIO_HOME_LABEL)) {
+      const hit = resolveMenuLabel(chatMenus, text, { currentMenuId: navId, isAdmin: isAdmin(env, userId) });
+      if (hit && await followMenuHit(env, message.chat.id, userId, hit)) return;
+    }
+  }
   if (isPrivate && !isAdmin(env, userId)) { if (await adminPro.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return; }
   if (isAdmin(env, userId) && isPrivate) {
     const admin = await getUser(env, userId);
@@ -6776,78 +6604,16 @@ async function handleUpdate(update, env, ctx) {
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء العملية الحالية." });
       return;
     }
-    if ((message.photo || message.video || message.audio || message.document) && admin?.adminFlow?.kind === "mb_addbtn_media") {
-      await finishAddMenuButtonMedia(env, message, userId, admin);
+    if ((message.photo || message.video || message.audio || message.document) && (await studio.handleMedia(env, message.chat.id, userId, message))) {
       return;
     }
-    if (text === "/menuadmin") { await sendMenuAdminPanel(env, message.chat.id); return; }
-    if (text === "/addmenu" || text.startsWith("/addmenu ")) {
-      await beginAddMenu(env, message.chat.id, userId, text.slice("/addmenu".length).trim());
-      return;
-    }
-    if (text === "/addbutton" || text.startsWith("/addbutton ")) {
-      await beginAddMenuButton(env, message.chat.id, userId, text.slice("/addbutton".length).trim());
-      return;
-    }
-    if (text === "/delmenu" || text.startsWith("/delmenu ")) {
-      const arg = text.slice("/delmenu".length).trim();
-      if (!arg) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /delmenu <رقم|معرّف> — اعرض الأرقام بـ /menuadmin" }); return; }
-      const { menus, removed } = deleteMenu(await loadMenus(env), arg);
-      if (!removed) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ لم أجد قائمة بهذا الرقم أو المعرّف." }); return; }
-      if (!await saveMenus(env, menus)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ تعذّر الحذف حاليًا." }); return; }
-      await logAdminAction(env, userId, "delmenu", removed.title);
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ حُذفت القائمة «${escapeHtml(removed.title)}» وأزرارها.`, parse_mode: "HTML" });
-      return;
-    }
-    if (text === "/delbutton" || text.startsWith("/delbutton ")) {
-      const parts = text.slice("/delbutton".length).trim().split(/\s+/u);
-      if (parts.length < 2) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /delbutton <قائمة: رقم|معرّف> <زر: رقم|معرّف>" }); return; }
-      const stored = await loadMenus(env);
-      const foundMenu = parseMenuTarget(parts[0], stored);
-      if (!foundMenu) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ لم أجد القائمة. اعرض الأرقام بـ /menuadmin" }); return; }
-      const { menus, removed } = deleteButton(stored, foundMenu.menu.id, parts[1]);
-      if (!removed) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ لم أجد الزر في هذه القائمة." }); return; }
-      if (!await saveMenus(env, menus)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ تعذّر الحذف حاليًا." }); return; }
-      await logAdminAction(env, userId, "delbutton", removed.label);
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ حُذف الزر «${escapeHtml(removed.label)}» من قائمة «${escapeHtml(foundMenu.menu.title)}».`, parse_mode: "HTML" });
-      return;
-    }
-    if (text === "/movebtn" || text.startsWith("/movebtn ")) {
-      const parts = text.slice("/movebtn".length).trim().split(/\s+/u);
-      if (parts.length < 3 || (parts[2] !== "up" && parts[2] !== "down")) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /movebtn <قائمة> <زر> <up|down>" }); return; }
-      const stored = await loadMenus(env);
-      const foundMenu = parseMenuTarget(parts[0], stored);
-      if (!foundMenu) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ لم أجد القائمة." }); return; }
-      const target = parseButtonTarget(parts[1], foundMenu.menu);
-      if (!target) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ لم أجد الزر في هذه القائمة." }); return; }
-      const { menus, moved } = moveButton(stored, foundMenu.menu.id, target.button.id, parts[2]);
-      if (!moved) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⚠️ لا يمكن نقل هذا الزر أكثر في هذا الاتجاه." }); return; }
-      await saveMenus(env, menus);
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تم نقل الزر «${escapeHtml(target.button.label)}» ${parts[2] === "up" ? "لأعلى" : "لأسفل"}.` });
-      return;
-    }
-    if (text === "/addvideo" || text.startsWith("/addvideo ")) {
-      await beginAddVideo(env, message.chat.id, userId, text.slice("/addvideo".length).trim());
-      return;
-    }
-    if (text === "/videolist") {
-      const { menu } = await ensureVideoMenuStored(env);
-      const lines = ["🎬 <b>دروس الفيديو</b>", ""];
-      if (!menu?.buttons.length) lines.push("لا توجد دروس فيديو بعد.\nأضف أول درس بـ /addvideo");
-      else menu.buttons.forEach((b, i) => lines.push(`${i + 1}. ${escapeHtml(b.label)} — <code>${escapeHtml(b.id)}</code>`));
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: lines.join("\n"), parse_mode: "HTML" });
-      return;
-    }
-    if (text === "/delvideo" || text.startsWith("/delvideo ")) {
-      const arg = text.slice("/delvideo".length).trim();
-      if (!arg) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /delvideo <رقم|معرّف> — اعرض الأرقام بـ /videolist" }); return; }
-      const stored = await loadMenus(env);
-      const { menus: kept } = ensureVideoMenu(stored);
-      const { menus, removed } = deleteButton(kept, VIDEO_MENU_ID, arg);
-      if (!removed) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ لم أجد درسًا بهذا الرقم أو المعرّف. اعرض القائمة بـ /videolist" }); return; }
-      if (!await saveMenus(env, menus)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "❌ تعذّر الحذف حاليًا." }); return; }
-      await logAdminAction(env, userId, "delvideo", removed.label);
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ حُذف درس الفيديو «${escapeHtml(removed.label)}».`, parse_mode: "HTML" });
+    if (text === "/menuadmin") { await studio.handleCommand(env, message.chat.id, userId); return; }
+    // The menu editor has a single entry point now: /menuadmin opens the
+    // bottom-button studio. The old /addmenu, /addbutton, /delbutton, /movebtn,
+    // /addvideo, /videolist and /delvideo commands no longer send inline panels.
+    if (/^\/(addmenu|addbutton|delmenu|delbutton|movebtn|addvideo|videolist|delvideo)\b/u.test(text)) {
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🧩 محرر القوائم يعمل الآن بأزرار أسفل الشاشة.\nاستخدم /menuadmin ثم اختر من الأزرار (لا توجد أزرار inline بعد الآن).", reply_markup: { remove_keyboard: true } });
+      await studio.handleCommand(env, message.chat.id, userId);
       return;
     }
     if (admin?.adminFlow?.kind === "uploadaudio" && (message.voice || message.audio)) {
@@ -7008,7 +6774,7 @@ async function handleUpdate(update, env, ctx) {
     }
     const menuLink = /^menu_(.+)$/u.exec(startParam);
     if (menuLink) {
-      await openMenu(env, message.chat.id, menuLink[1], userId);
+      await openReplyMenu(env, message.chat.id, userId, menuLink[1]);
       return;
     }
     if (startParam && !user?.registeredAt) {
@@ -7071,7 +6837,7 @@ async function handleUpdate(update, env, ctx) {
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "📚 <b>الدروس المصغرة</b>\nاختر درسًا:", parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
     return;
   }
-  if (text === "/menu") { await sendRootMenus(env, message.chat.id); return; }
+  if (text === "/menu") { await sendRootMenus(env, message.chat.id, userId); return; }
   if (text === "/videolessons") { await sendVideoLessons(env, message.chat.id); return; }
   if (text === "/flashcards") { await sendFlashcard(env, message.chat.id, userId); return; }
   if (text === "/lang" || text.startsWith("/lang ")) {

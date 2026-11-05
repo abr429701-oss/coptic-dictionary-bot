@@ -68,6 +68,10 @@ function normalizeButton(raw, menuIds) {
   const kind = String(raw.kind ?? "");
   if (!id || id.length > 40 || !label || !BUTTON_KINDS.includes(kind)) return null;
   const button = { id, label, kind, adminOnly: raw.adminOnly === true };
+  // `row` is the visual row on the reply keyboard (0 = first row). Missing means
+  // "one button per row", which is what a builder starts with.
+  const row = Number(raw.row);
+  if (Number.isInteger(row) && row >= 0) button.row = Math.min(50, row);
   if (kind === "text" || kind === "popup") {
     button.text = String(raw.text ?? "").slice(0, kind === "popup" ? 200 : 3000);
     if (!button.text.trim()) return null;
@@ -76,6 +80,7 @@ function normalizeButton(raw, menuIds) {
     button.fileId = String(raw.fileId ?? "").trim();
     if (!button.fileId) return null;
     button.fileKind = kind;
+    button.fileUniqueId = String(raw.fileUniqueId ?? "").trim().slice(0, 80);
     button.text = String(raw.text ?? "").slice(0, 1000); // caption, may be empty
   }
   if (kind === "url") {
@@ -105,7 +110,14 @@ export function normalizeMenus(value) {
     const id = String(item.id ?? "").trim();
     const title = cleanMenuTitle(item.title);
     if (!id || id.length > 40 || !title || byId.has(id)) continue;
-    byId.set(id, { id, title, text: cleanMenuText(item.text) || title, parentId: null, buttons: [], _rawButtons: Array.isArray(item.buttons) ? item.buttons : [] });
+    const menu = { id, title, text: cleanMenuText(item.text) || title, parentId: null, buttons: [], _rawButtons: Array.isArray(item.buttons) ? item.buttons : [] };
+    // Optional navigation row: which label to show for Back/Home, and whether each
+    // of them appears at all (the admin studio can switch them off per menu).
+    if (item.showBack === false) menu.showBack = false;
+    if (item.showHome === false) menu.showHome = false;
+    if (item.backLabel) menu.backLabel = cleanButtonLabel(item.backLabel);
+    if (item.homeLabel) menu.homeLabel = cleanButtonLabel(item.homeLabel);
+    byId.set(id, menu);
   }
   // Second pass: parents must exist (otherwise root), then buttons (submenu
   // targets must exist too).
