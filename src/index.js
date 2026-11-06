@@ -536,6 +536,10 @@ async function handleImportLearn(env, chatId, userId, text, ctx) {
   }
   const progress = importProgress(state, items);
   if (progress.complete) {
+    // The stored menus may still be the old importer's (one button per
+    // item): rebuild them into the one-button-per-lesson layout even
+    // though nothing is left to upload.
+    await rebuildLearnMenus(env, state);
     await telegram(env, "sendMessage", { chat_id: chatId, text: learnProgressText(progress), parse_mode: "HTML" });
     return;
   }

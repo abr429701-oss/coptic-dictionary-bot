@@ -531,6 +531,33 @@ test("learn-import: rebuild drops old per-lesson submenus left by the previous v
   assert.ok(menus.some((m) => m.id === "m_learn_l2"));
 });
 
+test("learn-import: /importlearn on an already-complete import still rebuilds menus (drops v1 submenus)", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedMenus(kvEnv);
+  // State as the previous importer left it: 50/50 done. Menus as the
+  // previous importer left them: level menus plus per-lesson submenus
+  // with one button per item. Before the fix, /importlearn short-
+  // circuited on "complete" and never rebuilt, so users kept seeing
+  // the old separate item buttons.
+  kvEnv.USERS.store.set(LEARN_IMPORT_KEY, fullState());
+  kvEnv.USERS.store.set(MENUS_KEY, { menus: [
+    ...storedMenus(kvEnv),
+    { id: "m_learn_l1", title: "المستوى الأول", text: "المستوى الأول", parentId: null, buttons: [{ id: "b_learn_l1_01", label: "الدرس الاول", kind: "submenu", targetMenuId: "m_learn_l1_01" }] },
+    { id: "m_learn_l1_01", title: "الدرس الاول", text: "الدرس الاول", parentId: "m_learn_l1", buttons: [{ id: "b_learn_l1_01_video", label: "🎬 فيديو الدرس", kind: "video", fileId: "OLD", fileUniqueId: "U", fileKind: "video", text: "" }] },
+    { id: "m_learn_l2_06", title: "الدرس السادس", text: "الدرس السادس", parentId: "m_learn_l2", buttons: [] },
+  ] });
+  const calls = await sayMsg(kvEnv, ADMIN, "/importlearn");
+  assert.ok(anyMessage(calls, /50\/50/), "complete import must still report 50/50");
+  assert.equal(calls.filter((c) => c.method === "sendVideo").length, 0, "nothing left to upload");
+  const menus = storedMenus(kvEnv);
+  assert.equal(menus.filter((m) => String(m.id).startsWith("m_learn_")).length, 2, "exactly the two level menus");
+  assert.ok(!menus.some((m) => m.id === "m_learn_l1_01"), "old lesson submenu must be gone");
+  assert.ok(!menus.some((m) => m.id === "m_learn_l2_06"), "old lesson submenu must be gone");
+  const l1 = menus.find((m) => m.id === "m_learn_l1");
+  assert.equal(l1.buttons.length, 17);
+  assert.ok(l1.buttons.every((b) => b.kind === "lesson" && b.lessonId), "level buttons are single lesson buttons");
+});
+
 test("learn-import: /importlearn reset clears state and learn menus only", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   seedMenus(kvEnv);
