@@ -383,7 +383,11 @@ test("menu-builder: a video lesson is added from the studio and played for users
   assert.equal(vid.buttons[0].fileId, "VID_TEST_1");
   const list = await say(kvEnv, 57, "/videolessons");
   assert.ok(anyText(list, 57, /دروس فيديو|الدرس الأول/));
-  const played = await sendCallback(kvEnv, 57, `mb|btn|${VIDEO_MENU_ID}|${vid.buttons[0].id}`);
+  const listMessages = toChat(list, 57);
+  const videoKeyboard = listMessages.at(-1)?.reply_markup?.keyboard ?? [];
+  assert.ok(!listMessages.some((message) => message.reply_markup?.inline_keyboard), "video lessons must not use inline keyboard");
+  assert.ok(videoKeyboard.flat().some((button) => button.text === "الدرس الأول"), "video lesson must be a reply-keyboard button");
+  const played = await say(kvEnv, 57, "الدرس الأول");
   assert.equal(videos(played)[0]?.video, "VID_TEST_1");
 });
 

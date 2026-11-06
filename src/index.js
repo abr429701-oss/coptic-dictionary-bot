@@ -217,7 +217,7 @@ async function sendHelp(env, chatId) {
       [{ text: "📚 الدروس / Lessons", callback_data: "nf|lessons" }, { text: "🃏 بطاقات / Flashcards", callback_data: "nf|flash" }],
       [{ text: "🧠 اختبار / Quiz", callback_data: "nf|quiz|meaning" }, { text: "🗓 اختبار اليوم", callback_data: "nf|dailyquiz" }],
       [{ text: "🔊 صوت مرة / 3 مرات", callback_data: "nf|voicesettings" }],
-      [{ text: "🔘 القوائم / Menu", callback_data: "nf|menu" }, { text: "🎬 دروس فيديو / Video", callback_data: "nf|videolessons" }],
+      [{ text: "🔘 القوائم / Menu", callback_data: "nf|menu" }],
       [{ text: "العربية 🇪🇬", callback_data: "nf|lang|ar" }, { text: "English 🇬🇧", callback_data: "nf|lang|en" }],
     ] },
   });
@@ -326,8 +326,7 @@ async function handleNewFeaturesCallback(env, callback) {
   }
   if (action === "lessons") {
     const rows = lessonList().map((l) => [{ text: l.title, callback_data: `nf|lesson|${l.id}` }]);
-    rows.push([{ text: "🎬 دروس الفيديو", callback_data: "nf|videolessons" }]);
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "📚 <b>الدروس المصغرة</b>\\nاختر درسًا:", parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "📚 <b>الدروس المصغرة</b>\\nاختر درسًا:\\n\\n🎬 لدروس الفيديو أرسل /videolessons", parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
     return;
   }
   if (action === "videolessons") return sendVideoLessons(env, chatId);
@@ -460,14 +459,16 @@ async function openMenu(env, chatId, menuId, userId) {
 async function sendVideoLessons(env, chatId) {
   const { menu } = await ensureVideoMenuStored(env);
   if (!menu) { await sendMenuMessage(env, chatId, "🎬 لا توجد دروس فيديو بعد."); return; }
-  await openMenu(env, chatId, menu.id, chatId);
+  // Video lessons intentionally use the normal reply keyboard. A tap is sent
+  // back as plain text and handled by followMenuHit(), so this flow never
+  // creates an inline keyboard or callback_data for video lessons.
+  await openReplyMenu(env, chatId, chatId, menu.id);
 }
 async function runMenuCommand(env, chatId, userId, command) {
   if (command === "/quiz") { await beginQuiz(env, chatId); return; }
   if (command === "/lessons") {
     const rows = lessonList().map((l) => [{ text: l.title, callback_data: `nf|lesson|${l.id}` }]);
-    rows.push([{ text: "🎬 دروس الفيديو", callback_data: "nf|videolessons" }]);
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "📚 <b>الدروس المصغرة</b>\nاختر درسًا:", parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "📚 <b>الدروس المصغرة</b>\nاختر درسًا:\n\n🎬 لدروس الفيديو أرسل /videolessons", parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
     return;
   }
   if (command === "/videolessons") { await sendVideoLessons(env, chatId); return; }
@@ -906,7 +907,16 @@ async function openReplyMenu(env, chatId, userId, menu) {
     return;
   }
   await setMenuNav(env, userId, target.id);
-  await sendMenuMessage(env, chatId, menuOpenText(target), buildReplyMenuKeyboard(stored, target, { isAdmin: isAdmin(env, userId) }));
+  const admin = isAdmin(env, userId);
+  const keyboard = buildReplyMenuKeyboard(stored, target, { isAdmin: admin });
+  let text = menuOpenText(target);
+  const visibleButtons = (target.buttons ?? []).some((button) => admin || !button.adminOnly);
+  if (!visibleButtons) {
+    text += target.id === VIDEO_MENU_ID
+      ? `\n\n🎬 لا توجد دروس فيديو بعد.${admin ? "\nأضف أول درس من /menuadmin." : ""}`
+      : `\n\n🔘 لا توجد أزرار في هذه القائمة بعد.${admin ? "\nأضف أول زر من /menuadmin." : ""}`;
+  }
+  await sendMenuMessage(env, chatId, text, keyboard);
 }
 async function followMenuHit(env, chatId, userId, hit) {
   if (hit.kind === "admin") {
@@ -6857,8 +6867,7 @@ async function handleUpdate(update, env, ctx) {
     const arg = text.slice("/lessons".length).trim();
     if (arg) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: lessonText(Number(arg)), parse_mode: "HTML" }); return; }
     const rows = lessonList().map((l) => [{ text: l.title, callback_data: `nf|lesson|${l.id}` }]);
-    rows.push([{ text: "🎬 دروس الفيديو", callback_data: "nf|videolessons" }]);
-    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "📚 <b>الدروس المصغرة</b>\nاختر درسًا:", parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "📚 <b>الدروس المصغرة</b>\nاختر درسًا:\n\n🎬 لدروس الفيديو أرسل /videolessons", parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
     return;
   }
   if (text === "/menu") { await sendRootMenus(env, message.chat.id, userId); return; }
