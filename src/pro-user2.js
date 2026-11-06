@@ -5,7 +5,6 @@ import audioManifest from "../data/audio-manifest.json" with { type: "json" };
 import { quickLookup } from "./features.js";
 
 const COPTIC_TO_LATIN = { "ⲁ":"a","ⲃ":"v","ⲅ":"g","ⲇ":"d","ⲉ":"e","ⲋ":"s","ⲍ":"z","ⲏ":"ē","ⲑ":"th","ⲓ":"i","ⲕ":"k","ⲗ":"l","ⲙ":"m","ⲛ":"n","ⲝ":"x","ⲟ":"o","ⲡ":"p","ⲣ":"r","ⲥ":"s","ⲧ":"t","ⲩ":"u","ⲫ":"ph","ⲭ":"kh","ⲯ":"ps","ⲱ":"ō","ϣ":"š","ϥ":"f","ϧ":"ḫ","ϩ":"h","ϫ":"j","ϭ":"č","ϯ":"ti","ⳉ":"ḫ" };
-const COPTIC_NUMERALS = { 1:"ⲁ",2:"ⲃ",3:"ⲅ",4:"ⲇ",5:"ⲉ",6:"ⲋ",7:"ⲍ",8:"ⲏ",9:"ⲑ",10:"ⲓ",20:"ⲕ",30:"ⲗ",40:"ⲙ",50:"ⲛ",60:"ⲝ",70:"ⲟ",80:"ⲡ",90:"ⲣ",100:"ⲥ",200:"ⲧ",300:"ⲩ",400:"ⲫ",500:"ⲭ",600:"ⲯ",700:"ⲱ",800:"ϣ",900:"ϥ",1000:"ϩ",2000:"ϫ",3000:"ϭ",4000:"ϯ",5000:"ⳉ",6000:"Ⳉ",7000:"Ⳋ",8000:"ⳋ",9000:"Ⳍ" };
 
 function escapeHtml(value) { return String(value ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 function stripMarks(value) { return String(value ?? "").replace(/[\u0300-\u036f\u064b-\u065f\u0670\u06d6-\u06ed]/gu,"").replace(/`/gu,"").replace(/\s*\([^)]*\)/gu,"").replace(/\s+/gu," ").trim(); }
@@ -27,36 +26,12 @@ export function createProUser2({ telegram, storeCall, getUser, saveUser, isAdmin
   function transliterate(coptic) {
     return [...stripMarks(coptic)].map((c) => COPTIC_TO_LATIN[c] ?? c).join("");
   }
-  function copticNumeral(n) {
-    const num = Math.max(0, Math.min(99999, Math.floor(Number(n) || 0)));
-    if (num === 0) return "ⲟⲩ (صفر)";
-    let out = "";
-    let rem = num;
-    const units = [1000, 100, 10, 1];
-    for (const u of units) {
-      const d = Math.floor(rem / u);
-      if (d > 0) { out += COPTIC_NUMERALS[d * u] ?? ""; rem -= d * u; }
-    }
-    return out || "—";
-  }
 
   const handlers = {
     async subscribe(env, chatId, userId, on) {
       const u = (await getUser(env, userId)) ?? {};
       await saveUser(env, userId, { ...u, wodSub: on });
       await send(env, chatId, on ? "🔔 تم اشتراكك في كلمة اليوم. ستستلمها تلقائيًا." : "🔕 تم إلغاء اشتراكك في كلمة اليوم.");
-      return true;
-    },
-    async rate(env, chatId, userId, arg) {
-      const parts = arg.split(/\s+/u);
-      const stars = Number(parts[parts.length - 1]);
-      const word = parts.slice(0, -1).join(" ").trim();
-      if (!word || !(stars >= 1 && stars <= 5)) { await send(env, chatId, "✏️ الاستخدام: /rate <الكلمة> <تقييم من 1 إلى 5>\nمثال: /rate ⲁⲛⲁⲩ 5"); return true; }
-      const key = `ratings:${stripMarks(word).toLowerCase().slice(0, 60)}`;
-      const cur = (await doGet(key, { sum: 0, count: 0 })) || { sum: 0, count: 0 };
-      cur.sum += stars; cur.count += 1;
-      await doPut(key, cur);
-      await send(env, chatId, `⭐ شكرًا لتقييمك (${stars}/5). متوسط تقييم «${escapeHtml(word.slice(0, 40))}» الآن: ${(cur.sum / cur.count).toFixed(1)} من ${cur.count} تقييم.`);
       return true;
     },
     async flashcards(env, chatId, userId) {
@@ -67,22 +42,6 @@ export function createProUser2({ telegram, storeCall, getUser, saveUser, isAdmin
       flashState.set(String(userId), { cards, index: 0, revealed: false, at: Date.now() });
       const c = cards[0];
       await telegram(env, "sendMessage", { chat_id: chatId, text: `🃏 <b>بطاقة 1/${cards.length}</b>\n\n🔤 <b>${escapeHtml(stripMarks(c.coptic))}</b> [${escapeHtml(String(c.pronunciation ?? "").trim())}]\n\nاضغط «إظهار المعنى» لرؤية الترجمة.`, parse_mode: "HTML", reply_markup: { inline_keyboard: [[{ text: "👁 إظهار المعنى", callback_data: "pu2|fc|show" }, { text: "⏭ التالية", callback_data: "pu2|fc|next" }], [{ text: "⏹ إنهاء", callback_data: "pu2|fc|stop" }]] } }).catch(() => null);
-      return true;
-    },
-    async achievements(env, chatId, userId) {
-      const u = (await getUser(env, userId)) ?? {};
-      const favs = Array.isArray(u.favorites) ? u.favorites.length : 0;
-      const searches = Number(u.searchCount ?? u.gamify?.points ?? 0);
-      const streak = Number(u.gamify?.streak ?? u.streak ?? 0);
-      const badges = [];
-      if (searches >= 1) badges.push("🌱 مبتدئ — أول بحث");
-      if (searches >= 50) badges.push("📚 طالب — 50 بحث");
-      if (searches >= 500) badges.push("🎓 باحث — 500 بحث");
-      if (favs >= 5) badges.push("⭐ جامع — 5 كلمات مفضلة");
-      if (streak >= 3) badges.push(`🔥 متواصل — سلسلة ${streak} أيام`);
-      if (u.registeredAt) badges.push("✅ مسجّل — أكمل التسجيل");
-      if (!badges.length) badges.push("ابحث عن كلمات واحفظ مفضلاتك لكسب إنجازات!");
-      await send(env, chatId, `🏆 <b>إنجازاتك</b>\n\n${badges.map((b) => `• ${b}`).join("\n")}\n\nإحصائيات: ${searches} بحث · ${favs} مفضلة · سلسلة ${streak} أيام`);
       return true;
     },
     async streak(env, chatId, userId) {
@@ -119,14 +78,6 @@ export function createProUser2({ telegram, storeCall, getUser, saveUser, isAdmin
       if (!a || !b) { await send(env, chatId, `❌ لم أجد ${!a ? `«${escapeHtml(parts[0])}»` : ""}${!a && !b ? " و" : ""}${!b ? `«${escapeHtml(parts[1])}»` : ""} في القاموس.`); return true; }
       const row = (label, va, vb) => `${label}:\n  ① ${escapeHtml(String(va ?? "—").slice(0, 60))}\n  ② ${escapeHtml(String(vb ?? "—").slice(0, 60))}`;
       await send(env, chatId, `⚖️ <b>مقارنة</b>\n① ${escapeHtml(stripMarks(a.coptic))}\n② ${escapeHtml(stripMarks(b.coptic))}\n\n${row("🇪🇬 عربي", a.meaning, b.meaning)}\n${row("🇬🇧 إنجليزي", a.english, b.english)}\n${row("🏛️ أصل", a.origin, b.origin)}\n${row("📦 نوع", a.kind, b.kind)}`);
-      return true;
-    },
-    async etymology(env, chatId, arg) {
-      const hit = quickLookup(arg);
-      if (!hit) { await send(env, chatId, `❌ لم أجد «${escapeHtml(arg?.slice(0, 40) ?? "")}».`); return true; }
-      const origin = String(hit.origin ?? "").trim() || "غير محدد";
-      const same = records.filter((r) => String(r.origin ?? "").trim() === origin).length;
-      await send(env, chatId, `🏛️ <b>أصل الكلمة</b> «${escapeHtml(stripMarks(hit.coptic))}»\n\nالأصل: <b>${escapeHtml(origin)}</b>\nاليوناني: ${escapeHtml(String(hit.greek ?? "—").slice(0, 80))}\nالنوع: ${escapeHtml(String(hit.kind ?? "—"))}\nكلمات أخرى بنفس الأصل في القاموس: ${same.toLocaleString("en-US")}`);
       return true;
     },
     async examples(env, chatId, arg) {
@@ -177,27 +128,12 @@ export function createProUser2({ telegram, storeCall, getUser, saveUser, isAdmin
       else { await send(env, chatId, "⚠️ تعذّر إرسال الملف حاليًا."); }
       return true;
     },
-    async deleteme(env, chatId, userId, arg) {
-      if (arg !== "confirm") { await send(env, chatId, "⚠️ <b>حذف حسابك</b>: سيتم مسح اسمك وسجلك وبياناتك من البوت نهائيًا (لا يمكن التراجع).\nلتأكيد الحذف أرسل: /deleteme confirm\nللإلغاء: تجاهل الرسالة."); return true; }
-      const u = (await getUser(env, userId)) ?? {};
-      await saveUser(env, userId, { deleted: true, deletedAt: new Date().toISOString(), name: undefined, favorites: [], history: [], lang: undefined, wodSub: false });
-      await send(env, chatId, "🗑 تم حذف حسابك وبياناتك. يمكنك إعادة التسجيل في أي وقت بـ /start.");
-      await notifyAdmins?.(env, `🗑 مستخدم <code>${escapeHtml(String(userId))}</code> حذف حسابه (طلب GDPR).`);
-      return true;
-    },
     async donate(env, chatId) {
       await send(env, chatId, "💝 <b>ادعم القاموس القبطي</b>\n\nهذا البوت مشروع تعليمي مجاني مفتوح المصدر. إذا أعجبك، يمكنك دعمه:\n• مشاركة البوت مع الأصدقاء (@ + اسم البوت)\n• اقتراح كلمات ناقصة عبر /suggest\n• تسجيل نطق الكلمات (تواصل مع الإدارة عبر /contact)\n\nكل مساعدة تساعد في إثراء القاموس للجميع. شكرًا!");
       return true;
     },
     async about(env, chatId) {
       await send(env, chatId, `ℹ️ <b>عن البوت</b>\n\nالقاموس القبطي البحيري — بوت تعليمي للغة القبطية.\n• ${records.length.toLocaleString("en-US")} مدخل لغوي\n• نطق صوتي للكلمات\n• ألعاب واختبارات وبطاقات تعليمية\n• مشروع مجاني مفتوح المصدر\n\nالأوامر: /start · البحث مباشر بكتابة أي كلمة.`);
-      return true;
-    },
-    async largefont(env, chatId, userId) {
-      const u = (await getUser(env, userId)) ?? {};
-      const next = !u.largeFont;
-      await saveUser(env, userId, { ...u, largeFont: next });
-      await send(env, chatId, next ? "🔠 فعّلت الخط الكبير في تفضيلاتك." : "🔤 عُدّت إلى الخط العادي.");
       return true;
     },
     async clearhistory(env, chatId, userId) {
@@ -232,14 +168,6 @@ export function createProUser2({ telegram, storeCall, getUser, saveUser, isAdmin
       await send(env, chatId, "✅ تم استلام مساهمتك وسيُراجعها الأدمن. شكرًا لإثرائك القاموس!");
       return true;
     },
-    async theme(env, chatId, userId, arg) {
-      const t = (arg ?? "").toLowerCase();
-      if (!["light", "dark", "sepia"].includes(t)) { await send(env, chatId, "✏️ الاستخدام: /theme light|dark|sepia — تفضيلك البصري (يُحفظ لحين دعم الرسائل المصممة)."); return true; }
-      const u = (await getUser(env, userId)) ?? {};
-      await saveUser(env, userId, { ...u, theme: t });
-      await send(env, chatId, `✅ تم حفظ سمتك: ${t}.`);
-      return true;
-    },
     async invite(env, chatId, userId) {
       const me = await telegram(env, "getMe", {}).catch(() => null);
       const username = me?.result?.username ?? "CopticDictBot";
@@ -248,27 +176,11 @@ export function createProUser2({ telegram, storeCall, getUser, saveUser, isAdmin
     },
     async feedback(env, chatId, userId, arg) { return handlers.report(env, chatId, userId, arg, "feedback"); },
     async bug(env, chatId, userId, arg) { return handlers.report(env, chatId, userId, arg, "bug"); },
-    async transliterateCmd(env, chatId, arg) {
-      if (!arg) { await send(env, chatId, "✏️ الاستخدام: /transliterate <نص قبطي> — يحوله إلى حروف لاتينية."); return true; }
-      await send(env, chatId, `🔤 النقل الصوتي:\n${escapeHtml(transliterate(arg))}`);
-      return true;
-    },
-    async copticnum(env, chatId, arg) {
-      const n = Number(arg);
-      if (!(n >= 0)) { await send(env, chatId, "✏️ الاستخدام: /copticnum <رقم من 0 إلى 99999>"); return true; }
-      await send(env, chatId, `🔢 الرقم ${n} بالأرقام القبطية:\n<b>${escapeHtml(copticNumeral(n))}</b>`);
-      return true;
-    },
     async quizstats(env, chatId, userId) {
       const u = (await getUser(env, userId)) ?? {};
       const qs = u.quizStats ?? { played: 0, correct: 0 };
       const pct = qs.played ? Math.round(qs.correct / qs.played * 100) : 0;
       await send(env, chatId, `🧠 <b>إحصائيات اختباراتك</b>\nأُجريت: ${qs.played}\nإجابات صحيحة: ${qs.correct} (${pct}%)`);
-      return true;
-    },
-    async settings(env, chatId, userId) {
-      const u = (await getUser(env, userId)) ?? {};
-      await send(env, chatId, `⚙️ <b>إعداداتك</b>\nاللغة: ${escapeHtml(String(u.lang ?? "ar (افتراضي)"))}\nالصوت التلقائي: ${u.voiceOff ? "مطفأ" : "مفعّل"}\nالخط الكبير: ${u.largeFont ? "مفعّل" : "عادي"}\nالسمة: ${escapeHtml(String(u.theme ?? "افتراضية"))}\nاشتراك كلمة اليوم: ${u.wodSub ? "مفعّل 🔔" : "ملغى 🔕"}\nالإشعارات: ${u.notify === false ? "مطفأة" : "مفعّلة"}`);
       return true;
     },
     async notify(env, chatId, userId, arg) {
@@ -347,37 +259,28 @@ export function createProUser2({ telegram, storeCall, getUser, saveUser, isAdmin
     switch (cmd) {
       case "/subscribe": return handlers.subscribe(env, chatId, userId, true);
       case "/unsubscribe": return handlers.subscribe(env, chatId, userId, false);
-      case "/rate": return handlers.rate(env, chatId, userId, arg);
       case "/flashcards": case "/study": return handlers.flashcards(env, chatId, userId);
-      case "/achievements": return handlers.achievements(env, chatId, userId);
       case "/streak": return handlers.streak(env, chatId, userId);
       case "/lang": return handlers.setlang(env, chatId, userId, arg);
       case "/report": return handlers.report(env, chatId, userId, arg, "report");
       case "/daily": return handlers.daily(env, chatId, userId);
       case "/compare": return handlers.compare(env, chatId, arg);
-      case "/etymology": return handlers.etymology(env, chatId, arg);
       case "/examples": return handlers.examples(env, chatId, arg);
       case "/wod": case "/wordoftheday": return handlers.wod(env, chatId);
       case "/pronounce": return handlers.pronounce(env, chatId, arg);
       case "/quiz2": return handlers.quiz2(env, chatId, userId);
       case "/hangman": if (arg === "stop") { hangmanState.delete(String(userId)); await send(env, chatId, "⏹ أوقفت لعبة الشنق."); return true; } return handlers.hangman(env, chatId, userId);
       case "/exportmydata": return handlers.exportmydata(env, chatId, userId);
-      case "/deleteme": return handlers.deleteme(env, chatId, userId, arg);
       case "/donate": return handlers.donate(env, chatId);
       case "/about": return handlers.about(env, chatId);
-      case "/largefont": return handlers.largefont(env, chatId, userId);
       case "/clearhistory": return handlers.clearhistory(env, chatId, userId);
       case "/favorites": case "/mywords": return handlers.favorites(env, chatId, userId);
       case "/removefav": return handlers.removefav(env, chatId, userId, arg);
       case "/contribute": case "/suggestword": return handlers.contribute(env, chatId, userId, arg);
-      case "/theme": return handlers.theme(env, chatId, userId, arg);
       case "/invite": return handlers.invite(env, chatId, userId);
       case "/feedback": return handlers.feedback(env, chatId, userId, arg);
       case "/bug": return handlers.bug(env, chatId, userId, arg);
-      case "/transliterate": return handlers.transliterateCmd(env, chatId, arg);
-      case "/copticnum": return handlers.copticnum(env, chatId, arg);
       case "/quizstats": return handlers.quizstats(env, chatId, userId);
-      case "/settings": return handlers.settings(env, chatId, userId);
       case "/notify": return handlers.notify(env, chatId, userId, arg);
       default: return false;
     }

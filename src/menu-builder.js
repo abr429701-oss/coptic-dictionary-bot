@@ -23,11 +23,11 @@ export const VIDEO_MENU_ID = "m_video";
 export const VIDEO_MENU_TITLE = "🎬 دروس فيديو";
 export const VIDEO_MENU_TEXT = "🎬 <b>دروس فيديو</b>\n\nاختر درسًا لمشاهدته:";
 
-export const BUTTON_KINDS = ["text", "photo", "video", "audio", "document", "url", "popup", "submenu", "command"];
+export const BUTTON_KINDS = ["text", "photo", "video", "audio", "document", "url", "popup", "submenu", "command", "lesson"];
 export const MEDIA_KINDS = ["photo", "video", "audio", "document"];
 export const KIND_LABELS = {
   text: "نص", photo: "صورة", video: "فيديو", audio: "صوت", document: "ملف",
-  url: "رابط", popup: "تنبيه منبثق", submenu: "قائمة فرعية", command: "أمر",
+  url: "رابط", popup: "تنبيه منبثق", submenu: "قائمة فرعية", command: "أمر", lesson: "درس كامل",
 };
 // Commands a command-button may run (existing bot commands only).
 export const ALLOWED_COMMANDS = ["/quiz", "/flashcards", "/help", "/dailyquiz", "/menu", "/random"];
@@ -98,6 +98,13 @@ function normalizeButton(raw, menuIds) {
   if (kind === "command") {
     button.command = cleanCommand(raw.command);
     if (!button.command) return null;
+  }
+  if (kind === "lesson") {
+    // One tap sends the whole lesson (see sendLearnLesson in index.js).
+    // The lessonId must name a real learn lesson (m_learn_l1_01 …),
+    // so a hand-made "lesson" button with no lesson never survives a save.
+    button.lessonId = String(raw.lessonId ?? "").trim();
+    if (!/^m_learn_l[12]_\d{2}$/u.test(button.lessonId)) return null;
   }
   return button;
 }

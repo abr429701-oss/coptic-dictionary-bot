@@ -449,9 +449,11 @@ async function openMenu(env, chatId, menuId, userId) {
 // The frozen manifest (src/learn-manifest.js) holds the lessons; each Drive
 // file is downloaded once, uploaded to Telegram once, and the Telegram
 // file_id is stored in the Durable Object (LEARN_IMPORT_KEY). Menus are
-// rebuilt from completed items only, so a button never exists without a
-// valid file_id. One run processes a small batch; the admin re-runs the
-// command until everything is done.
+// rebuilt from completed items only, so a lesson button never exists without
+// every item ready. ONE run imports EVERYTHING: the command answers at once
+// and the import continues in the background (ctx.waitUntil) until all
+// pending files are done; the admin gets a completion message. State is
+// saved after every item, so an interrupted run resumes where it stopped.
 async function loadImportState(env) {
   if (!env.USERS) return emptyImportState();
   try {
@@ -474,19 +476,20 @@ async function saveImportState(env, state) {
 async function rebuildLearnMenus(env, state) {
   const stored = await loadMenus(env);
   const { menus } = buildLearnMenus(LEARN_LEVELS, state);
-  return saveMenus(env, mergeMenus(stored, menus));
+  // Drop the old importer's per-lesson submenus (m_learn_l1_01 …); the new
+  // design has only the two level menus. Everything else is preserved by merge.
+  return saveMenus(env, mergeMenus({ menus: dropStaleLearnLessonMenus(stored.menus) }, menus));
 }
-async function runLearnImportBatch(env, chatId) {
+// In-memory guard: two overlapping /importlearn runs would upload the same
+// pending files twice. The webhook serializes updates, but the import itself
+// runs outside that chain (ctx.waitUntil), so guard here instead.
+const learnImportRuns = new Set();
+async function runLearnImportAll(env, chatId) {
   const state = await loadImportState(env);
   const items = learnUploadItems(LEARN_LEVELS);
-  const startedAt = Date.now();
   if (!state.startedAt) state.startedAt = new Date().toISOString();
-  const batch = nextImportBatch(state, items, LEARN_BATCH_SIZE);
   const errors = [];
-  let attempted = 0;
-  for (const item of batch) {
-    if (Date.now() - startedAt > LEARN_BATCH_TIME_BUDGET_MS) break;
-    attempted += 1;
+  for (const item of learnPendingItems(state, items)) {
     try {
       const uploaded = await uploadLearnFile(env, chatId, item);
       state.items[item.key] = { status: "done", fileId: uploaded.fileId, fileUniqueId: uploaded.fileUniqueId, error: "", at: new Date().toISOString() };
@@ -495,8 +498,8 @@ async function runLearnImportBatch(env, chatId) {
       state.items[item.key] = { status: "failed", fileId: "", fileUniqueId: "", error: reason.slice(0, 300), at: new Date().toISOString() };
       errors.push(`${item.title} (${item.kind}): ${reason.slice(0, 200)}`);
     }
-    // Save after every item: if Telegram retries the webhook mid-batch, the
-    // next invocation resumes instead of re-uploading the same files.
+    // Save after every item: if the platform interrupts the run, the next
+    // /importlearn resumes instead of re-uploading the same files.
     await saveImportState(env, state);
   }
   await rebuildLearnMenus(env, state);
@@ -504,16 +507,16 @@ async function runLearnImportBatch(env, chatId) {
   const failedErrors = items
     .filter((item) => state.items[item.key]?.status === "failed")
     .map((item) => `${item.title} (${item.kind}): ${String(state.items[item.key]?.error ?? "").slice(0, 200)}`);
-  return { progress, attempted, errors: errors.length ? errors : failedErrors };
+  await telegram(env, "sendMessage", { chat_id: chatId, text: learnProgressText(progress, errors.length ? errors : failedErrors), parse_mode: "HTML" });
 }
-async function handleImportLearn(env, chatId, userId, text) {
+async function handleImportLearn(env, chatId, userId, text, ctx) {
   if (!isAdmin(env, userId)) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: "⛔ هذا الأمر للأدمن فقط." });
     return;
   }
   const action = parseImportLearnArg(text);
   if (action === "usage") {
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "✏️ الاستخدام:\n/importlearn — استيراد الدفعة التالية من دروس القبطي\n/importlearn status — حالة الاستيراد\n/importlearn reset — مسح حالة الاستيراد وقوائم الدروس" });
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "✏️ الاستخدام:\n/importlearn — استيراد كل دروس القبطي مرة واحدة (في الخلفية، وستصلك رسالة عند الانتهاء)\n/importlearn status — حالة الاستيراد\n/importlearn reset — مسح حالة الاستيراد وقوائم الدروس" });
     return;
   }
   if (action === "reset") {
@@ -531,8 +534,23 @@ async function handleImportLearn(env, chatId, userId, text) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: learnProgressText(progress), parse_mode: "HTML" });
     return;
   }
-  const { progress, errors } = await runLearnImportBatch(env, chatId);
-  await telegram(env, "sendMessage", { chat_id: chatId, text: learnProgressText(progress, errors), parse_mode: "HTML" });
+  const progress = importProgress(state, items);
+  if (progress.complete) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: learnProgressText(progress), parse_mode: "HTML" });
+    return;
+  }
+  if (learnImportRuns.has(chatId)) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "⏳ الاستيراد جارٍ بالفعل — سأرسل لك رسالة عند الانتهاء." });
+    return;
+  }
+  await telegram(env, "sendMessage", { chat_id: chatId, text: learnImportStartText(progress), parse_mode: "HTML" });
+  learnImportRuns.add(chatId);
+  const run = runLearnImportAll(env, chatId).catch((error) => {
+    console.error("Learn import run failed", error instanceof Error ? error.message : "unknown error");
+  }).finally(() => learnImportRuns.delete(chatId));
+  // Tests call fetch without a Workers ctx: await inline to stay deterministic.
+  if (ctx?.waitUntil) ctx.waitUntil(run);
+  else await run;
 }
 
 async function runMenuCommand(env, chatId, userId, command) {
@@ -547,6 +565,45 @@ async function runMenuCommand(env, chatId, userId, command) {
     return;
   }
   await telegram(env, "sendMessage", { chat_id: chatId, text: "⚠️ هذا الأمر غير متوفر حاليًا." });
+}
+// One tap on a lesson button sends the WHOLE lesson, items in manifest
+// order (L1: video → oral photo → exam link; L2: video → summary photo →
+// exercise text → exam link). Telegram has no single message that holds a
+// video + a photo + long text + a link, so the lesson arrives as
+// consecutive messages in that order. A failed item reports the generic
+// message (plus the real reason for an admin) and the rest still sends.
+async function sendLearnLesson(env, chatId, userId, lessonId) {
+  const lesson = findLearnLesson(lessonId);
+  if (!lesson) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "الدرس غير موجود (ربما حُذف). أرسل /menu لعرض القوائم الحالية." });
+    return;
+  }
+  const state = await loadImportState(env);
+  const plan = learnLessonSendPlan(lesson, state);
+  if (!plan) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "⚠️ هذا الدرس ليس جاهزًا بعد — جرّب لاحقًا أو أبلغ الإدارة." });
+    return;
+  }
+  for (const step of plan) {
+    if (step.kind === "video" || step.kind === "photo") {
+      const method = step.kind === "video" ? "sendVideo" : "sendPhoto";
+      const res = await telegram(env, method, { chat_id: chatId, [step.kind]: step.fileId, caption: step.caption });
+      if (!res?.ok) {
+        await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تعذّر إرسال هذا المحتوى حاليًا. جرّب لاحقًا أو أبلغ الإدارة." });
+        if (isAdmin(env, userId)) {
+          await telegram(env, "sendMessage", { chat_id: chatId, text: `🛠 سبب الرفض من تيليجرام: ${res?.description ?? `خطأ ${res?.error_code ?? "غير معروف"}`}` });
+        }
+      }
+      continue;
+    }
+    if (step.kind === "text") {
+      await sendMenuMessage(env, chatId, step.text);
+      continue;
+    }
+    if (step.kind === "url") {
+      await telegram(env, "sendMessage", { chat_id: chatId, text: step.label, reply_markup: { inline_keyboard: [[{ text: step.label, url: step.url }]] } });
+    }
+  }
 }
 async function handleMenuButton(env, callback) {
   const chatId = callback.message?.chat?.id;
@@ -572,6 +629,7 @@ async function handleMenuButton(env, callback) {
     return;
   }
   if (!plain) await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
+  if (button.kind === "lesson") { await sendLearnLesson(env, chatId, userId, button.lessonId); return; }
   if (button.kind === "popup") {
     if (plain) await sendMenuMessage(env, chatId, `⚠️ ${button.text ?? ""}`);
     else await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, text: button.text ?? "", show_alert: true });
@@ -956,7 +1014,7 @@ import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VI
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 import { getHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
 import { LEARN_LEVELS } from "./learn-manifest.js";
-import { LEARN_IMPORT_KEY, LEARN_BATCH_SIZE, LEARN_BATCH_TIME_BUDGET_MS, learnUploadItems, emptyImportState, normalizeImportState, importProgress, nextImportBatch, buildLearnMenus, mergeMenus, uploadLearnFile, parseImportLearnArg, learnProgressText } from "./learn-import.js";
+import { LEARN_IMPORT_KEY, learnUploadItems, emptyImportState, normalizeImportState, importProgress, learnPendingItems, findLearnLesson, learnLessonSendPlan, buildLearnMenus, dropStaleLearnLessonMenus, mergeMenus, uploadLearnFile, parseImportLearnArg, learnImportStartText, learnProgressText } from "./learn-import.js";
 
 // ---- reply-keyboard menus (real buttons under the field, no inline) --------
 // The position of a user inside the menus is remembered so a plain-text tap can
@@ -1602,34 +1660,25 @@ const USER_COMMANDS = [
   // ---- Batch 6: ميزات مستخدم جديدة ----
   { command: "subscribe", description: "اشتراك في كلمة اليوم" },
   { command: "unsubscribe", description: "إلغاء اشتراك كلمة اليوم" },
-  { command: "rate", description: "قيّم نطق كلمة: /rate <كلمة> <1-5>" },
-  { command: "achievements", description: "إنجازاتك وشاراتك" },
   { command: "streak", description: "سلسلة أيام نشاطك" },
   { command: "report", description: "الإبلاغ عن مشكلة" },
   { command: "daily", description: "ملخصك اليومي" },
   { command: "compare", description: "قارن كلمتين: /compare <ك1> <ك2>" },
-  { command: "etymology", description: "أصل كلمة: /etymology <كلمة>" },
   { command: "examples", description: "أمثلة مشابهة: /examples <كلمة>" },
   { command: "pronounce", description: "النطق المكتوب والصوتي لكلمة" },
   { command: "quiz2", description: "اختبار ثاني (اختيار من متعدد)" },
   { command: "hangman", description: "لعبة الشنق بالكلمات القبطية" },
   { command: "exportmydata", description: "تصدير بياناتك (GDPR)" },
-  { command: "deleteme", description: "حذف حسابي وبياناتي" },
   { command: "donate", description: "ادعم المشروع" },
   { command: "about", description: "عن البوت" },
-  { command: "largefont", description: "تبديل الخط الكبير" },
   { command: "clearhistory", description: "مسح سجل بحثي" },
   { command: "favorites", description: "كلماتك المفضلة" },
   { command: "removefav", description: "إزالة من المفضلة" },
   { command: "contribute", description: "اقترح كلمة جديدة للقاموس" },
-  { command: "theme", description: "السمة البصرية: /theme light|dark" },
   { command: "invite", description: "رابط دعوتك الشخصي" },
   { command: "feedback", description: "أرسل ملاحظة للإدارة" },
   { command: "bug", description: "أبلغ عن خطأ تقني" },
-  { command: "transliterate", description: "نقل قبطي→لاتيني" },
-  { command: "copticnum", description: "رقم بالأرقام القبطية" },
   { command: "quizstats", description: "إحصائيات اختباراتك" },
-  { command: "settings", description: "إعداداتك" },
   { command: "notify", description: "تشغيل/إيقاف الإشعارات" },
 ];
 const ADMIN_COMMANDS = [
@@ -6765,7 +6814,7 @@ async function handleUpdate(update, env, ctx) {
     }
     if (text === "/menuadmin") { await studio.handleCommand(env, message.chat.id, userId); return; }
     // Bulk "learn" lessons import (admin only, resumable in batches).
-    if (text === "/importlearn" || text.startsWith("/importlearn ")) { await handleImportLearn(env, message.chat.id, userId, text); return; }
+    if (text === "/importlearn" || text.startsWith("/importlearn ")) { await handleImportLearn(env, message.chat.id, userId, text, ctx); return; }
     // The menu editor has a single entry point now: /menuadmin opens the
     // bottom-button studio. The old /addmenu, /addbutton, /delbutton, /movebtn,
     // /addvideo, /videolist and /delvideo commands no longer send inline panels.

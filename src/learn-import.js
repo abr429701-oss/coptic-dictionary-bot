@@ -1,26 +1,33 @@
 // src/learn-import.js — bulk lesson importer for the "learn" levels.
 //
 // The admin runs /importlearn in the bot (see handleImportLearn in
-// src/index.js). The importer reads NO sheet at runtime: the frozen manifest
+// src/index.js). ONE run imports EVERYTHING: the command answers
+// immediately, then the import continues in the background (ctx.waitUntil)
+// until all pending files are done, and the admin gets a completion
+// message. The importer reads NO sheet at runtime: the frozen manifest
 // (src/learn-manifest.js) holds the lessons, and each Drive file is
 // downloaded once from its public link, uploaded to Telegram once, and the
 // Telegram file_id is stored in the Durable Object (key learn-import:v1).
 // User taps afterwards only ever touch Telegram file_ids / URL buttons —
 // never the Sheet and never Drive.
 //
+// Menus: only the two level menus (m_learn_l1, m_learn_l2). Each lesson has
+// ONE button (kind "lesson", label = lesson name); tapping it sends the
+// WHOLE lesson at once, items in manifest order (L1: video → oral photo →
+// exam link; L2: video → summary photo → exercise text → exam link).
+// Telegram has no single message that holds a video + a photo + long text
+// + a link, so one tap sends the lesson as consecutive messages in that
+// order. A lesson button appears only once ALL its items are ready.
+//
 // This module holds the pure logic (no index.js imports) so it is unit
 // testable without the Worker. The orchestration (storeCall round trips,
-// the Telegram progress messages) lives in src/index.js.
+// the Telegram progress messages, the actual lesson send) lives in
+// src/index.js.
 import { normalizeMenus, cleanButtonLabel } from "./menu-builder.js";
 import { LEARN_LEVELS } from "./learn-manifest.js";
 
 export const LEARN_IMPORT_KEY = "learn-import:v1";
 export const LEARN_MENU_PREFIX = "m_learn_";
-// One webhook invocation cannot upload all 50 files (331MB total): each run
-// processes only this many pending/failed uploads, and stops early when the
-// time budget below is spent. The admin re-runs /importlearn to continue.
-export const LEARN_BATCH_SIZE = 3;
-export const LEARN_BATCH_TIME_BUDGET_MS = 20000;
 // Telegram Bot API refuses file uploads over 50MB; every manifest file is
 // under 21MB, but the guard stays so a future file fails loudly, not silently.
 export const LEARN_MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
@@ -36,13 +43,7 @@ export function learnItemKey(lessonId, itemKey) {
   return `${lessonId}:${itemKey}`;
 }
 
-// "m_learn_l1_03" + "video" -> "b_learn_l1_03_video" (menu button id).
-export function learnButtonId(lessonId, itemKey) {
-  return `b_${String(lessonId).slice(2)}_${itemKey}`;
-}
-
-// "m_learn_l1_03" -> "b_learn_l1_03" (the button on the level menu that opens
-// the lesson submenu).
+// "m_learn_l1_03" -> "b_learn_l1_03" (the single lesson button on the level menu).
 export function learnLessonButtonId(lessonId) {
   return `b_${String(lessonId).slice(2)}`;
 }
@@ -110,14 +111,51 @@ export function importProgress(state, items) {
   return { total, done, failed, pending: total - done - failed, complete: total > 0 && done === total };
 }
 
-// Next pending/failed uploads, in manifest order (failed items are retried).
-export function nextImportBatch(state, items, limit = LEARN_BATCH_SIZE) {
-  return items.filter((item) => state.items[item.key]?.status !== "done").slice(0, limit);
+// All pending/failed uploads, in manifest order (failed items are retried).
+// One /importlearn run processes ALL of them, not a small batch.
+export function learnPendingItems(state, items) {
+  return items.filter((item) => state.items[item.key]?.status !== "done");
 }
 
 // ---------------------------------------------------------------------------
-// Menu building — only from items that are actually ready.
-// A media button is never created without a captured Telegram file_id.
+// Lesson lookup + send plan (one tap sends the whole lesson, in order)
+// ---------------------------------------------------------------------------
+
+export function findLearnLesson(lessonId, levels = LEARN_LEVELS) {
+  const id = String(lessonId ?? "").trim();
+  for (const level of levels) {
+    const lesson = level.lessons.find((l) => l.id === id);
+    if (lesson) return lesson;
+  }
+  return null;
+}
+
+// Ordered send steps for one tap on a lesson button, or null when the
+// lesson is not found or not fully ready (a media item without a file_id).
+// Steps carry everything the sender needs: media steps hold the stored
+// Telegram file_id, text steps the exercise text, url steps the Forms link.
+export function learnLessonSendPlan(lesson, state) {
+  if (!lesson || !Array.isArray(lesson.items) || !lesson.items.length) return null;
+  const steps = [];
+  for (const item of lesson.items) {
+    if (item.kind === "video" || item.kind === "photo") {
+      const entry = state.items[learnItemKey(lesson.id, item.key)];
+      if (entry?.status !== "done" || !entry.fileId) return null;
+      steps.push({ kind: item.kind, fileId: entry.fileId, caption: lesson.title });
+    } else if (item.kind === "text") {
+      steps.push({ kind: "text", text: String(item.text ?? "") });
+    } else if (item.kind === "url") {
+      steps.push({ kind: "url", url: String(item.url ?? ""), label: cleanButtonLabel(item.label) });
+    } else {
+      return null;
+    }
+  }
+  return steps.length ? steps : null;
+}
+
+// ---------------------------------------------------------------------------
+// Menu building — only the two level menus, one button per ready lesson.
+// A lesson button is never created without every item ready.
 // ---------------------------------------------------------------------------
 
 function isItemReady(state, lessonId, item) {
@@ -126,67 +164,45 @@ function isItemReady(state, lessonId, item) {
   return entry?.status === "done" && Boolean(entry.fileId);
 }
 
-function buildButton(state, lesson, item) {
-  const id = learnButtonId(lesson.id, item.key);
-  const label = cleanButtonLabel(item.label);
-  if (item.kind === "video" || item.kind === "photo") {
-    const entry = state.items[learnItemKey(lesson.id, item.key)];
-    return {
-      id,
-      label,
-      kind: item.kind,
-      fileId: entry.fileId,
-      fileUniqueId: entry.fileUniqueId ?? "",
-      fileKind: item.kind,
-      text: lesson.title, // caption under the media
-    };
-  }
-  if (item.kind === "text") return { id, label, kind: "text", text: String(item.text ?? "") };
-  if (item.kind === "url") return { id, label, kind: "url", url: String(item.url ?? "") };
-  return null;
-}
-
 export function buildLearnMenus(levels = LEARN_LEVELS, state = emptyImportState()) {
   const menus = [];
   let lessonsBuilt = 0;
   let buttonsBuilt = 0;
   for (const level of levels) {
-    const lessonMenus = [];
+    const lessonButtons = [];
     for (const lesson of level.lessons) {
-      const buttons = [];
-      for (const item of lesson.items) {
-        if (!isItemReady(state, lesson.id, item)) continue;
-        const button = buildButton(state, lesson, item);
-        if (button) buttons.push(button);
-      }
-      if (buttons.length !== lesson.items.length) continue; // a lesson appears only once ALL its items are ready (no half-built lessons for users)
-      lessonMenus.push({
-        id: lesson.id,
-        title: cleanButtonLabel(lesson.title),
-        text: lesson.title,
-        parentId: level.id,
-        buttons,
+      // A lesson appears only once ALL its items are ready (no half-built
+      // lessons for users); tapping its single button then sends it all.
+      if (!lesson.items.every((item) => isItemReady(state, lesson.id, item))) continue;
+      lessonButtons.push({
+        id: learnLessonButtonId(lesson.id),
+        label: cleanButtonLabel(lesson.title),
+        kind: "lesson",
+        lessonId: lesson.id,
       });
       lessonsBuilt += 1;
-      buttonsBuilt += buttons.length;
     }
-    if (!lessonMenus.length) continue; // level appears only once it has lessons
+    if (!lessonButtons.length) continue; // level appears only once it has lessons
     menus.push({
       id: level.id,
       title: cleanButtonLabel(level.title),
       text: level.title,
       parentId: null,
-      buttons: lessonMenus.map((lessonMenu) => ({
-        id: learnLessonButtonId(lessonMenu.id),
-        label: cleanButtonLabel(lessonMenu.title),
-        kind: "submenu",
-        targetMenuId: lessonMenu.id,
-      })),
+      buttons: lessonButtons,
     });
-    menus.push(...lessonMenus);
-    buttonsBuilt += lessonMenus.length;
+    buttonsBuilt += lessonButtons.length;
   }
-  return { menus, counts: { levels: menus.filter((m) => !m.parentId).length, lessons: lessonsBuilt, buttons: buttonsBuilt } };
+  return { menus, counts: { levels: menus.length, lessons: lessonsBuilt, buttons: buttonsBuilt } };
+}
+
+// Menus the old importer built: one submenu per lesson (m_learn_l1_01 …
+// m_learn_l2_10). The new design has no lesson submenus, so a rebuild must
+// drop them; the level menus are replaced by the merge below. (The CI
+// import's learn_root/learn_l1/learn_l2 menus have no "m_" prefix and are
+// untouched by this.)
+export const LEARN_LESSON_MENU_ID = /^m_learn_l[12]_\d{2}$/u;
+export function dropStaleLearnLessonMenus(menus) {
+  return (menus ?? []).filter((m) => !LEARN_LESSON_MENU_ID.test(String(m?.id ?? "").trim()));
 }
 
 // Merge incoming menus into the stored ones: menus with an incoming id are
@@ -276,6 +292,11 @@ export function parseImportLearnArg(text) {
   return "usage";
 }
 
+export function learnImportStartText(progress) {
+  const remaining = progress.total - progress.done;
+  return `⏳ <b>جارٍ استيراد كل الدروس...</b>\n\nمتبقٍ ${remaining} ملف من ${progress.total} — سأرسل لك رسالة عند الانتهاء.`;
+}
+
 export function learnProgressText(progress, errors = []) {
   const lines = [
     `📥 <b>استيراد دروس القبطي</b>\n\nتم: <b>${progress.done}/${progress.total}</b> ملف (متبقٍ ${progress.pending}${progress.failed ? `، فشل ${progress.failed}` : ""}).`,
@@ -283,7 +304,7 @@ export function learnProgressText(progress, errors = []) {
   if (progress.complete) {
     lines.push("✅ اكتمل الاستيراد — كل الدروس متاحة الآن من /menu (المستوى الأول / المستوى الثاني).");
   } else {
-    lines.push("للمتابعة شغّل /importlearn مرة أخرى. وللحالة: /importlearn status — وللبدء من جديد: /importlearn reset.");
+    lines.push("لإعادة محاولة العناصر الفاشلة شغّل /importlearn مرة أخرى (يعيد المحاولة من حيث توقف، ولا يعيد رفع ما تم). وللحالة: /importlearn status — وللبدء من جديد: /importlearn reset.");
   }
   for (const error of errors.slice(0, 5)) lines.push(`⚠️ ${error}`);
   if (errors.length > 5) lines.push(`… و${errors.length - 5} أخطاء أخرى.`);

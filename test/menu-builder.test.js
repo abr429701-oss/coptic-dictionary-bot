@@ -113,7 +113,7 @@ test("menu-builder: deleteMenu re-parents children and drops dangling submenu bu
 
 test("menu-builder: addButton / deleteButton / moveButton / updateButton", () => {
   let state = { menus: [{ id: "m_1", title: "ق", text: "t", buttons: [] }] };
-  const kinds = ["text", "photo", "video", "audio", "document", "url", "popup", "submenu", "command"];
+  const kinds = ["text", "photo", "video", "audio", "document", "url", "popup", "submenu", "command", "lesson"];
   assert.equal(kinds.length, BUTTON_KINDS.length);
   let r1 = addButton(state, "m_1", { label: "نص", kind: "text", text: "أهلا" });
   assert.ok(r1.button);
@@ -137,6 +137,13 @@ test("menu-builder: addButton / deleteButton / moveButton / updateButton", () =>
   assert.equal(del.removed.label, "نص");
   assert.equal(del.menus.menus[0].buttons.length, 1);
   assert.equal(deleteButton(del.menus, "m_1", "5").removed, null);
+  // lesson kind: needs a real learn lesson id; the id is kept on the button.
+  assert.equal(addButton(del.menus, "m_1", { label: "درس", kind: "lesson" }).button, null);
+  assert.equal(addButton(del.menus, "m_1", { label: "درس", kind: "lesson", lessonId: "m_nope" }).button, null);
+  const r3 = addButton(del.menus, "m_1", { label: "درس", kind: "lesson", lessonId: "m_learn_l1_03" });
+  assert.ok(r3.button);
+  assert.equal(r3.button.lessonId, "m_learn_l1_03");
+  assert.equal(r3.menus.menus[0].buttons.length, 2);
 });
 
 test("menu-builder: parse targets by number or id", () => {
