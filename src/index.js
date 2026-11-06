@@ -864,6 +864,7 @@ import { copticDateNow, alphabetText, letterStatsText, longestText, originsText,
 import { deepLink, shareTextForRecord, pickQuizV2Question, dailyQuizType, pickFlashcard, updateFlashcard, suggestSimilar, helpText, retentionText, opsText, recordById } from "./new-features.js";
 import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VIDEO_MENU_ID, cleanMenuTitle, cleanMenuText, cleanButtonLabel, cleanUrl, cleanCommand, normalizeMenus, findMenu, findButton, rootMenus, descendantMenuIds, buildMenuKeyboard, buildRootKeyboard, menuOpenText, menuAdminListText, menuAdminDetailText, parseMenuTarget, parseButtonTarget, addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton, ensureVideoMenu } from "./menu-builder.js";
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
+import { getHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
 
 // ---- reply-keyboard menus (real buttons under the field, no inline) --------
 // The position of a user inside the menus is remembered so a plain-text tap can
@@ -1788,6 +1789,28 @@ async function ensureCommandMenu(env, userId) {
   if (result?.ok) commandMenuReady.add(key);
 }
 async function telegram(env, method, payload) {
+  // Central UI-visibility filter: strip admin-hidden buttons/commands from
+  // every outgoing payload before it reaches Telegram. Admin recipients always
+  // see everything; user-scope setMyCommands (no scope) are filtered too.
+  if (payload && typeof payload === "object") {
+    try {
+      const cid = payload.chat_id;
+      const recipientIsAdmin = cid != null && adminIds(env).includes(String(cid));
+      if (!recipientIsAdmin) {
+        const hidden = await getHiddenUi(env, storeCall);
+        if (method === "setMyCommands" && !payload.scope && Array.isArray(payload.commands)) {
+          payload.commands = stripHiddenCommands(payload.commands, hidden);
+        }
+        const rm = payload.reply_markup;
+        if (rm && typeof rm === "object") {
+          if (Array.isArray(rm.keyboard)) rm.keyboard = stripHiddenReplyKeyboard(rm.keyboard, hidden);
+          if (Array.isArray(rm.inline_keyboard)) rm.inline_keyboard = stripHiddenInlineKeyboard(rm.inline_keyboard, hidden);
+        }
+      }
+    } catch {
+      /* visibility filtering must never block a real send */
+    }
+  }
   const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -3083,13 +3106,22 @@ function userMainKeyboardMarkup() {
 
 async function sendWelcome(env, chatId, name) {
   const caption = await getWelcomeCaption(env, name);
+  let welcomeKb;
+  try {
+    const hiddenUi = await getHiddenUi(env, storeCall);
+    welcomeKb = adminIds(env).includes(String(chatId))
+      ? userMainKeyboardMarkup()
+      : { ...userMainKeyboardMarkup(), keyboard: stripHiddenReplyKeyboard(userMainKeyboardMarkup().keyboard, hiddenUi) };
+  } catch {
+    welcomeKb = userMainKeyboardMarkup();
+  }
   try {
     const bytes = Uint8Array.from(atob(welcomeImageBase64), (char) => char.charCodeAt(0));
     const form = new FormData();
     form.append("chat_id", String(chatId));
     form.append("caption", caption);
     form.append("parse_mode", "HTML");
-    form.append("reply_markup", JSON.stringify(userMainKeyboardMarkup()));
+    form.append("reply_markup", JSON.stringify(welcomeKb));
     form.append("photo", new Blob([bytes], { type: "image/jpeg" }), "welcome.jpg");
     const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, { method: "POST", body: form });
     const result = await response.json().catch(() => ({}));
@@ -3099,7 +3131,7 @@ async function sendWelcome(env, chatId, name) {
   } catch (error) {
     console.error("Welcome photo failed", error instanceof Error ? error.message : "unknown error");
   }
-  await telegram(env, "sendMessage", { chat_id: chatId, text: caption, parse_mode: "HTML", reply_markup: userMainKeyboardMarkup() });
+  await telegram(env, "sendMessage", { chat_id: chatId, text: caption, parse_mode: "HTML", reply_markup: welcomeKb });
 }
 
 // Organized commands menu (sent as a separate text message because photo captions are limited to 1024 chars).
@@ -5729,6 +5761,10 @@ async function handleUpdate(update, env, ctx) {
       await handleTemplateCallback(env, callback);
       return;
     }
+    if (String(callback.data ?? "").startsWith("hid|")) {
+      await handleHiddenUiCallback({ env, callback });
+      return;
+    }
     if (String(callback.data ?? "").startsWith("bc|")) {
       await handleBroadcastCallback(env, callback);
       return;
@@ -5901,6 +5937,17 @@ async function handleUpdate(update, env, ctx) {
   const message = update.message;
   if (!message?.chat?.id) return;
   let text = String(message.text ?? "").trim();
+  // Block execution of admin-hidden buttons/commands if the user types them
+  // manually (the central telegram() filter only hides them visually).
+  if (!isAdmin(env, message.from?.id ?? message.chat.id)) {
+    try {
+      const hiddenUi = await getHiddenUi(env, storeCall);
+      if (isHiddenReplyText(text, hiddenUi) || isHiddenCommandText(text, hiddenUi)) {
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "عذراً، هذا الخيار غير متاح حالياً." });
+        return;
+      }
+    } catch { /* never block normal messages because of visibility filtering */ }
+  }
   if (text === "📞 تواصل مع الإدارة") text = "/contact";
   else if (text === "🎲 كلمة عشوائية") text = "/random";
   const userId = message.from?.id ?? message.chat.id;
@@ -6220,6 +6267,10 @@ async function handleUpdate(update, env, ctx) {
       if (!desc) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /setbotdescription الوصف الكامل" }); return; }
       const r = await telegram(env, "setMyDescription", { description: desc.slice(0, 255) });
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: r.ok ? "✅ تم تغيير الوصف (Description)." : `❌ ${r.description ?? "فشل"}` });
+      return;
+    }
+    if (text === "/hiddenbuttons" || text === "/hidebutton" || text.startsWith("/hidebutton ") || text === "/showbutton" || text.startsWith("/showbutton ")) {
+      await handleHiddenUiCommand(env, message.chat.id, userId, text);
       return;
     }
     if (text === "/setcommands") { commandMenuReady.delete("admin"); await ensureCommandMenu(env, userId); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم تحديث قائمة الأوامر." }); return; }
@@ -7093,6 +7144,119 @@ const adminSuite = createAdminSuite({
 });
 // إلحاق أوامر الحزمة الجديدة بعد إنشائها (ADMIN_COMMANDS معلنة أعلى الملف قبل توفر adminSuite).
 ADMIN_COMMANDS.push(...adminSuite.commandList);
+
+// UI-visibility: admin can hide reply/inline buttons and commands from users.
+ADMIN_COMMANDS.push(
+  { command: "hidebutton", description: "إخفاء/إظهار أزرار المستخدمين (رد/inline/أوامر)" },
+  { command: "hiddenbuttons", description: "قائمة الأزرار المخفية حاليًا" },
+);
+
+const HID_PANEL_ITEMS = [
+  { id: "r_kb", kind: "text", match: "⌨️ الكيبورد القبطي", title: "زر رد: الكيبورد القبطي" },
+  { id: "r_ct", kind: "text", match: "📞 تواصل مع الإدارة", title: "زر رد: تواصل مع الإدارة" },
+  { id: "r_rnd", kind: "text", match: "🎲 كلمة عشوائية", title: "زر رد: كلمة عشوائية" },
+  { id: "c_random", kind: "command", match: "random", title: "أمر: /random" },
+  { id: "c_contact", kind: "command", match: "contact", title: "أمر: /contact" },
+  { id: "c_keyboard", kind: "command", match: "keyboard", title: "أمر: /keyboard" },
+  { id: "c_quiz", kind: "command", match: "quiz", title: "أمر: /quiz" },
+  { id: "c_menu", kind: "command", match: "menu", title: "أمر: /menu" },
+  { id: "c_dailyquiz", kind: "command", match: "dailyquiz", title: "أمر: /dailyquiz" },
+  { id: "c_wod", kind: "command", match: "wod", title: "أمر: /wod" },
+  { id: "c_learn", kind: "command", match: "learn", title: "أمر: /learn" },
+  { id: "c_donate", kind: "command", match: "donate", title: "أمر: /donate" },
+  { id: "c_about", kind: "command", match: "about", title: "أمر: /about" },
+];
+const HID_PROTECTED_COMMANDS = new Set(["start"]);
+
+function hidItemState(item, hidden) {
+  if (item.kind === "command") return (hidden?.command ?? []).includes(item.match);
+  if (item.kind === "callback") return (hidden?.callback ?? []).includes(item.match);
+  return (hidden?.text ?? []).includes(item.match);
+}
+
+function hiddenUiPanel(hidden) {
+  const lines = [
+    "👁 <b>إظهار/إخفاء الأزرار عن المستخدمين</b>",
+    "",
+    "اضغط أي زر أدناه لتبديل حالته (مخفي ↔ ظاهر). يُطبّق فورًا على كل المستخدمين العاديين؛ الأدمن دائمًا يرى كل شيء.",
+    "",
+  ];
+  const rows = HID_PANEL_ITEMS.map((item) => {
+    const isHidden = hidItemState(item, hidden);
+    return [{ text: `${isHidden ? "🚫 مخفي" : "✅ ظاهر"} — ${item.title}`, callback_data: `hid|t|${item.id}` }];
+  });
+  rows.push([{ text: "🔄 تحديث", callback_data: "hid|refresh" }]);
+  const total = (hidden?.text?.length ?? 0) + (hidden?.callback?.length ?? 0) + (hidden?.command?.length ?? 0);
+  lines.push(`<b>المخفي حاليًا:</b> ${total} عنصر.`);
+  lines.push("");
+  lines.push("لإخفاء عنصر مخصص ليس في القائمة:");
+  lines.push("• <code>/hidebutton text نص الزر</code> — زر رد أو inline بنفس النص");
+  lines.push("• <code>/hidebutton callback البيانات</code> — زر inline حسب callback_data");
+  lines.push("• <code>/hidebutton command الاسم</code> — أمر (مثال: /hidebutton command fav)");
+  lines.push("للإظهار: <code>/showbutton</code> بنفس الصيغة. القائمة الكاملة: /hiddenbuttons");
+  return { text: lines.join("\n"), reply_markup: { inline_keyboard: rows } };
+}
+
+async function handleHiddenUiCommand(env, chatId, userId, text) {
+  if (!isAdmin(env, userId)) return;
+  const m = /^\/(hidebutton|showbutton|hiddenbuttons)(?:\s+(.*))?$/us.exec(text);
+  if (!m) return;
+  const [, cmd, rawArgs] = m;
+  if (cmd === "hiddenbuttons") {
+    const h = await getHiddenUi(env, storeCall);
+    const fmt = (arr, label) => (arr?.length ? `<b>${label}:</b>\n${arr.map((x) => `• <code>${escapeHtml(x)}</code>`).join("\n")}` : "");
+    const body = [fmt(h.text, "أزرار حسب النص"), fmt(h.callback, "inline حسب callback_data"), fmt(h.command, "أوامر")].filter(Boolean).join("\n\n") || "لا توجد عناصر مخفية حاليًا.";
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `👁 <b>الأزرار المخفية</b>\n\n${body}`, parse_mode: "HTML" });
+    return;
+  }
+  const args = (rawArgs ?? "").trim();
+  if (!args) {
+    const panel = hiddenUiPanel(await getHiddenUi(env, storeCall));
+    await telegram(env, "sendMessage", { chat_id: chatId, text: panel.text, parse_mode: "HTML", reply_markup: panel.reply_markup });
+    return;
+  }
+  const parts = args.split(/\s+/u);
+  const kind = parts[0].toLowerCase();
+  const match = parts.slice(1).join(" ");
+  if (!["text", "callback", "command"].includes(kind) || !match) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "✏️ الصيغة: /hidebutton <text|callback|command> <القيمة>\nمثال: /hidebutton command fav" });
+    return;
+  }
+  if (kind === "command" && HID_PROTECTED_COMMANDS.has(match.trim().toLowerCase().replace(/^\/+/, "").split(/\s+/u)[0])) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "⛔ لا يمكن إخفاء /start (ضروري لتشغيل البوت)." });
+    return;
+  }
+  const force = cmd === "hidebutton";
+  const res = await toggleHiddenUi(env, storeCall, kind, match, force);
+  commandMenuReady.clear();
+  await telegram(env, "sendMessage", { chat_id: chatId, text: res.ok ? (res.hidden ? `🚫 تم إخفاء: [${res.kind}] ${escapeHtml(res.key)}` : `✅ تم إظهار: [${res.kind}] ${escapeHtml(res.key)}`) : "❌ فشلت العملية." });
+}
+
+async function handleHiddenUiCallback({ env, callback }) {
+  const chatId = callback.message?.chat?.id;
+  const userId = callback.from?.id;
+  if (!chatId || !isAdmin(env, userId)) {
+    await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id }).catch(() => null);
+    return;
+  }
+  const parts = String(callback.data ?? "").split("|");
+  if (parts[1] === "t") {
+    const item = HID_PANEL_ITEMS.find((x) => x.id === parts[2]);
+    if (item) {
+      await toggleHiddenUi(env, storeCall, item.kind, item.match, undefined);
+      commandMenuReady.clear();
+    }
+  }
+  const panel = hiddenUiPanel(await getHiddenUi(env, storeCall));
+  await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id }).catch(() => null);
+  await telegram(env, "editMessageText", {
+    chat_id: chatId,
+    message_id: callback.message.message_id,
+    text: panel.text,
+    parse_mode: "HTML",
+    reply_markup: panel.reply_markup,
+  }).catch(() => null);
+}
 
 // Serialized background chain: fast-ack hands each update to ctx.waitUntil, but updates
 // still execute one after another so message sequences (e.g. /record then a voice note)
