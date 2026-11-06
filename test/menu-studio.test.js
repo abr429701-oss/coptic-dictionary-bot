@@ -262,3 +262,40 @@ test("menu-studio: a normal dictionary word is not swallowed by the menu layer",
   assert.ok(calls.some((c) => c.url.endsWith("/sendMessage") || c.url.endsWith("/sendVoice")), "the search must run");
   assert.ok(!anyText(calls, 701, /^🔘 <b>القوائم<\/b>/u));
 });
+
+test("menu-studio: deleting a menu asks first, then removes it with all its submenus", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  kvEnv.USERS.store.set(`user:${ADMIN}`, { name: "أدمن", registeredAt: nowIso(), firstSeen: nowIso(), lastSeen: nowIso() });
+  kvEnv.USERS.store.set(MENUS_KEY, { menus: [
+    { id: "m_parent", title: "قائمة الأب", text: "t", buttons: [{ id: "b_to_kid", label: "إلى الابن", kind: "submenu", targetMenuId: "m_kid" }] },
+    { id: "m_kid", title: "قائمة الابن", text: "t", parentId: "m_parent", buttons: [] },
+    { id: "m_other", title: "قائمة أخرى", text: "t", buttons: [{ id: "b_to_kid2", label: "إلى الابن", kind: "submenu", targetMenuId: "m_kid" }] },
+  ] });
+  await say(kvEnv, ADMIN, "/menuadmin");
+  await say(kvEnv, ADMIN, S.MENUS);
+  const opened = await say(kvEnv, ADMIN, "قائمة الأب");
+  assert.ok(anyText(opened, ADMIN, /قائمة الأب/), "the parent menu panel must open");
+
+  // Tapping delete asks for confirmation first; nothing is removed yet.
+  const asked = await say(kvEnv, ADMIN, S.DELMENU);
+  assert.ok(anyText(asked, ADMIN, /سيتم حذف القائمة/), "a confirm message must appear");
+  assert.ok(anyText(asked, ADMIN, /قوائمها الفرعية \(1\)/), "the confirm must count the submenu");
+  const confirmKb = labelsOf(toChat(asked, ADMIN).at(-1));
+  assert.ok(confirmKb.includes(S.DELCONFIRM), "the confirm button must be offered");
+  assert.ok(confirmKb.includes(S.BACK), "going back must be offered");
+  assert.equal(storedMenus(kvEnv).length, 3, "nothing is deleted before confirming");
+
+  // Going back cancels: everything is still there.
+  const cancelled = await say(kvEnv, ADMIN, S.BACK);
+  assert.ok(anyText(cancelled, ADMIN, /قائمة الأب/), "back returns to the menu panel");
+  assert.equal(storedMenus(kvEnv).length, 3, "cancelling must keep all menus");
+
+  // Confirming deletes the parent with its child; a surviving menu keeps
+  // its other buttons but loses the one pointing at the deleted child.
+  await say(kvEnv, ADMIN, S.DELMENU);
+  await say(kvEnv, ADMIN, S.DELCONFIRM);
+  const remaining = storedMenus(kvEnv);
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0].id, "m_other");
+  assert.equal(remaining[0].buttons.length, 0, "the dangling submenu button must be dropped");
+});

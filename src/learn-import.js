@@ -185,8 +185,16 @@ export function buildLearnMenus(levels = LEARN_LEVELS, state = emptyImportState(
     if (!lessonButtons.length) continue; // level appears only once it has lessons
     // A way back: the level menus have no parent, so the keyboard builder
     // adds no Back/Home row for them and the user would be stuck inside
-    // the level (only /menu typed by hand would get them out). A /menu
-    // command button is the last row of every level menu.
+    // the level (only /menu typed by hand would get them out). Both nav
+    // buttons are the last two rows of every level menu, back first then
+    // home — the same order as the native nav row. Both go to /menu: the
+    // level menus have no parent, so back and home mean the same here.
+    lessonButtons.push({
+      id: `b_${level.id}_back`,
+      label: "🔙 رجوع",
+      kind: "command",
+      command: "/menu",
+    });
     lessonButtons.push({
       id: `b_${level.id}_home`,
       label: "🏠 الرئيسية",

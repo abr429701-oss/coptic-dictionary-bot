@@ -42,6 +42,7 @@ export const S = {
   HOMEON: "🏠 زر الرئيسية",
   PREVIEW: "👁 معاينة",
   DELMENU: "🗑 حذف القائمة",
+  DELCONFIRM: "✅ تأكيد الحذف",
   BACK: "🔙 رجوع",
   LABEL: "✏️ التسمية",
   CONTENT: "🔗 المحتوى",
@@ -498,7 +499,7 @@ export function createMenuStudio(deps) {
     if (state.step === "linkpick" && menu) {
       if (raw === S.BACK) { await showMenu(env, chatId, userId, menu.id); return true; }
       const pick = /^(\d+)\./u.exec(raw);
-      const others = normalizeMenus(menus).menus.filter((m) => m.id !== menu.id && !descendantMenuIds(menus, menu.id).includes(m.id));
+      const others = normalizeMenus(menus).menus.filter((m) => m.id !== menu.id && !descendantMenuIds(menus, menu.id).has(m.id));
       const target = pick ? others[Number(pick[1]) - 1] : others.find((m) => m.title.trim() === raw);
       if (!target) { await send(env, chatId, "🪢 اختر رقم القائمة من الأزرار، أو 🔙 رجوع.", [S.BACK]); return true; }
       const { menus: next, button: created } = addButton(menus, menu.id, { label: target.title.slice(0, 40), kind: "submenu", targetMenuId: target.id });
@@ -623,7 +624,7 @@ export function createMenuStudio(deps) {
         return true;
       }
       if (raw === S.LINK) {
-        const others = normalizeMenus(menus).menus.filter((m) => m.id !== menu.id && !descendantMenuIds(menus, menu.id).includes(m.id));
+        const others = normalizeMenus(menus).menus.filter((m) => m.id !== menu.id && !descendantMenuIds(menus, menu.id).has(m.id));
         if (!others.length) { await send(env, chatId, "🪢 لا توجد قائمة أخرى لربطها (أنشئ قائمة أولًا).", [S.BACK]); return true; }
         await writeState(env, userId, { step: "linkpick", menuId: menu.id });
         await send(env, chatId, "🪢 اختر القائمة التي سيُنشأ لها زر داخل هذه القائمة:", [...chunk(others.map((m, i) => `${i + 1}. ${m.title}`), 2), [S.BACK]]);
@@ -646,15 +647,29 @@ export function createMenuStudio(deps) {
       }
       if (raw === S.PREVIEW) { await preview(env, chatId, userId, menu.id); return true; }
       if (raw === S.DELMENU) {
+        // Ask first: deleting a menu removes it with all its submenus,
+        // and that cannot be undone from the studio.
+        const subCount = descendantMenuIds(menus, menu.id).size;
+        await writeState(env, userId, { step: "confirmdel", menuId: menu.id });
+        const subText = subCount ? ` وكل قوائمها الفرعية (${subCount})` : "";
+        await send(env, chatId, `🗑 سيتم حذف القائمة «${escapeHtml(menu.title)}»${subText} نهائيًا. هل أنت متأكد؟`, [[S.DELCONFIRM], [S.BACK]]);
+        return true;
+      }
+      const pick = /^(\d+)\./u.exec(raw);
+      const target = pick ? menu.buttons[Number(pick[1]) - 1] : menu.buttons.find((b) => b.label.trim() === raw);
+      if (target) { await showButton(env, chatId, userId, menu.id, target.id); return true; }
+      return false;
+    }
+
+    if (state.step === "confirmdel" && menu) {
+      if (raw === S.DELCONFIRM) {
         const { menus: next } = deleteMenu(menus, menu.id);
         await saveMenus(env, next);
         await logAdminAction(env, userId, "delmenu", menu.title);
         await showMenus(env, chatId, userId);
         return true;
       }
-      const pick = /^(\d+)\./u.exec(raw);
-      const target = pick ? menu.buttons[Number(pick[1]) - 1] : menu.buttons.find((b) => b.label.trim() === raw);
-      if (target) { await showButton(env, chatId, userId, menu.id, target.id); return true; }
+      if (raw === S.BACK) { await showMenu(env, chatId, userId, menu.id); return true; }
       return false;
     }
 

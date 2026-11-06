@@ -275,13 +275,14 @@ export function deleteMenu(menus, target) {
   const list = normalizeMenus(menus).menus;
   const found = parseMenuTarget(target, list);
   if (!found) return { menus: { menus: list }, removed: null };
-  const { menu, index } = found;
-  const kept = list.filter((_, i) => i !== index).map((m) => ({
+  const { menu } = found;
+  // The menu goes with all its descendants, so the admin never has to
+  // delete a lesson tree one item at a time; buttons in surviving menus
+  // pointing at any removed menu disappear with them.
+  const removedIds = new Set([menu.id, ...descendantMenuIds(list, menu.id)]);
+  const kept = list.filter((m) => !removedIds.has(m.id)).map((m) => ({
     ...m,
-    // Children of the deleted menu move up to its parent; buttons pointing
-    // at the deleted menu disappear with it.
-    parentId: m.parentId === menu.id ? menu.parentId : m.parentId,
-    buttons: m.buttons.filter((b) => !(b.kind === "submenu" && b.targetMenuId === menu.id)),
+    buttons: m.buttons.filter((b) => !(b.kind === "submenu" && removedIds.has(b.targetMenuId))),
   }));
   return { menus: { menus: kept }, removed: menu };
 }

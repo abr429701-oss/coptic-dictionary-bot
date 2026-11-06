@@ -97,7 +97,7 @@ test("menu-builder: addMenu caps at 60 and rejects bad parents/titles", () => {
   assert.equal(state.menus.length, 60);
 });
 
-test("menu-builder: deleteMenu re-parents children and drops dangling submenu buttons", () => {
+test("menu-builder: deleteMenu removes the menu with all its descendants and drops dangling submenu buttons", () => {
   let state = { menus: [
     { id: "m_root", title: "ر", text: "t", buttons: [{ id: "b_go", label: "إلى فرعية", kind: "submenu", targetMenuId: "m_sub" }] },
     { id: "m_sub", title: "ف", text: "t", parentId: "m_root", buttons: [] },
@@ -105,8 +105,8 @@ test("menu-builder: deleteMenu re-parents children and drops dangling submenu bu
   ] };
   const r = deleteMenu(state, "2");
   assert.equal(r.removed.id, "m_sub");
-  assert.equal(r.menus.menus.length, 2);
-  assert.equal(findMenu(r.menus, "m_kid").parentId, "m_root"); // re-parented up
+  assert.equal(r.menus.menus.length, 1);
+  assert.equal(findMenu(r.menus, "m_kid"), null); // grandchild goes with its parent
   assert.equal(findMenu(r.menus, "m_root").buttons.length, 0); // dangling button dropped
   assert.equal(deleteMenu(state, "99").removed, null);
 });
