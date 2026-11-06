@@ -445,6 +445,96 @@ async function openMenu(env, chatId, menuId, userId) {
   }
   await sendMenuMessage(env, chatId, text, keyboard);
 }
+// ---- bulk "learn" lessons import (/importlearn, admin only) -----------------
+// The frozen manifest (src/learn-manifest.js) holds the lessons; each Drive
+// file is downloaded once, uploaded to Telegram once, and the Telegram
+// file_id is stored in the Durable Object (LEARN_IMPORT_KEY). Menus are
+// rebuilt from completed items only, so a button never exists without a
+// valid file_id. One run processes a small batch; the admin re-runs the
+// command until everything is done.
+async function loadImportState(env) {
+  if (!env.USERS) return emptyImportState();
+  try {
+    return normalizeImportState((await storeCall(env, { op: "get", key: LEARN_IMPORT_KEY })).value);
+  } catch (error) {
+    console.error("Learn import state load failed", error instanceof Error ? error.message : "unknown error");
+    return emptyImportState();
+  }
+}
+async function saveImportState(env, state) {
+  if (!env.USERS) return false;
+  try {
+    await storeCall(env, { op: "put", key: LEARN_IMPORT_KEY, value: { ...state, updatedAt: new Date().toISOString() } });
+    return true;
+  } catch (error) {
+    console.error("Learn import state save failed", error instanceof Error ? error.message : "unknown error");
+    return false;
+  }
+}
+async function rebuildLearnMenus(env, state) {
+  const stored = await loadMenus(env);
+  const { menus } = buildLearnMenus(LEARN_LEVELS, state);
+  return saveMenus(env, mergeMenus(stored, menus));
+}
+async function runLearnImportBatch(env, chatId) {
+  const state = await loadImportState(env);
+  const items = learnUploadItems(LEARN_LEVELS);
+  const startedAt = Date.now();
+  if (!state.startedAt) state.startedAt = new Date().toISOString();
+  const batch = nextImportBatch(state, items, LEARN_BATCH_SIZE);
+  const errors = [];
+  let attempted = 0;
+  for (const item of batch) {
+    if (Date.now() - startedAt > LEARN_BATCH_TIME_BUDGET_MS) break;
+    attempted += 1;
+    try {
+      const uploaded = await uploadLearnFile(env, chatId, item);
+      state.items[item.key] = { status: "done", fileId: uploaded.fileId, fileUniqueId: uploaded.fileUniqueId, error: "", at: new Date().toISOString() };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "unknown error";
+      state.items[item.key] = { status: "failed", fileId: "", fileUniqueId: "", error: reason.slice(0, 300), at: new Date().toISOString() };
+      errors.push(`${item.title} (${item.kind}): ${reason.slice(0, 200)}`);
+    }
+    // Save after every item: if Telegram retries the webhook mid-batch, the
+    // next invocation resumes instead of re-uploading the same files.
+    await saveImportState(env, state);
+  }
+  await rebuildLearnMenus(env, state);
+  const progress = importProgress(state, items);
+  const failedErrors = items
+    .filter((item) => state.items[item.key]?.status === "failed")
+    .map((item) => `${item.title} (${item.kind}): ${String(state.items[item.key]?.error ?? "").slice(0, 200)}`);
+  return { progress, attempted, errors: errors.length ? errors : failedErrors };
+}
+async function handleImportLearn(env, chatId, userId, text) {
+  if (!isAdmin(env, userId)) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "⛔ هذا الأمر للأدمن فقط." });
+    return;
+  }
+  const action = parseImportLearnArg(text);
+  if (action === "usage") {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "✏️ الاستخدام:\n/importlearn — استيراد الدفعة التالية من دروس القبطي\n/importlearn status — حالة الاستيراد\n/importlearn reset — مسح حالة الاستيراد وقوائم الدروس" });
+    return;
+  }
+  if (action === "reset") {
+    const stored = await loadMenus(env);
+    const kept = stored.menus.filter((m) => !String(m.id ?? "").startsWith("m_learn_"));
+    await saveMenus(env, { menus: kept });
+    await saveImportState(env, emptyImportState());
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "🗑 تم مسح حالة استيراد الدروس وقوائم «المستوى الأول/الثاني». شغّل /importlearn للبدء من جديد." });
+    return;
+  }
+  const state = await loadImportState(env);
+  const items = learnUploadItems(LEARN_LEVELS);
+  if (action === "status") {
+    const progress = importProgress(state, items);
+    await telegram(env, "sendMessage", { chat_id: chatId, text: learnProgressText(progress), parse_mode: "HTML" });
+    return;
+  }
+  const { progress, errors } = await runLearnImportBatch(env, chatId);
+  await telegram(env, "sendMessage", { chat_id: chatId, text: learnProgressText(progress, errors), parse_mode: "HTML" });
+}
+
 async function runMenuCommand(env, chatId, userId, command) {
   if (command === "/quiz") { await beginQuiz(env, chatId); return; }
   if (command === "/flashcards") { await sendFlashcard(env, chatId, userId); return; }
@@ -865,6 +955,8 @@ import { deepLink, shareTextForRecord, pickQuizV2Question, dailyQuizType, pickFl
 import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VIDEO_MENU_ID, cleanMenuTitle, cleanMenuText, cleanButtonLabel, cleanUrl, cleanCommand, normalizeMenus, findMenu, findButton, rootMenus, descendantMenuIds, buildMenuKeyboard, buildRootKeyboard, menuOpenText, menuAdminListText, menuAdminDetailText, parseMenuTarget, parseButtonTarget, addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton, ensureVideoMenu } from "./menu-builder.js";
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 import { getHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
+import { LEARN_LEVELS } from "./learn-manifest.js";
+import { LEARN_IMPORT_KEY, LEARN_BATCH_SIZE, LEARN_BATCH_TIME_BUDGET_MS, learnUploadItems, emptyImportState, normalizeImportState, importProgress, nextImportBatch, buildLearnMenus, mergeMenus, uploadLearnFile, parseImportLearnArg, learnProgressText } from "./learn-import.js";
 
 // ---- reply-keyboard menus (real buttons under the field, no inline) --------
 // The position of a user inside the menus is remembered so a plain-text tap can
@@ -6672,6 +6764,8 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     if (text === "/menuadmin") { await studio.handleCommand(env, message.chat.id, userId); return; }
+    // Bulk "learn" lessons import (admin only, resumable in batches).
+    if (text === "/importlearn" || text.startsWith("/importlearn ")) { await handleImportLearn(env, message.chat.id, userId, text); return; }
     // The menu editor has a single entry point now: /menuadmin opens the
     // bottom-button studio. The old /addmenu, /addbutton, /delbutton, /movebtn,
     // /addvideo, /videolist and /delvideo commands no longer send inline panels.
@@ -6913,7 +7007,7 @@ async function handleUpdate(update, env, ctx) {
     });
     return;
   }
-  if (text === "/menuadmin" || text === "/addmenu" || text.startsWith("/addmenu ") || text === "/addbutton" || text.startsWith("/addbutton ") || text === "/delmenu" || text.startsWith("/delmenu ") || text === "/delbutton" || text.startsWith("/delbutton ") || text === "/movebtn" || text.startsWith("/movebtn ") || text === "/addvideo" || text.startsWith("/addvideo ") || text === "/videolist" || text === "/delvideo" || text.startsWith("/delvideo ")) {
+  if (text === "/menuadmin" || text === "/importlearn" || text.startsWith("/importlearn ") || text === "/addmenu" || text.startsWith("/addmenu ") || text === "/addbutton" || text.startsWith("/addbutton ") || text === "/delmenu" || text.startsWith("/delmenu ") || text === "/delbutton" || text.startsWith("/delbutton ") || text === "/movebtn" || text.startsWith("/movebtn ") || text === "/addvideo" || text.startsWith("/addvideo ") || text === "/videolist" || text === "/delvideo" || text.startsWith("/delvideo ")) {
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⛔ هذا الأمر للأدمن فقط." });
     return;
   }
@@ -7325,9 +7419,13 @@ export default {
       const body = await request.json().catch(() => null);
       const menus = normalizeMenus(body?.menus);
       if (!menus.menus.length) return new Response("No menus", { status: 400 });
-      await storeCall(env, { op: "put", key: MENUS_KEY, value: menus });
+      // Merge, do not replace: a full replace here used to wipe every other
+      // menu (m_video, the admin's custom menus, the /importlearn lessons).
+      // Incoming menus replace same-id ones; everything else is preserved.
+      const merged = mergeMenus(await loadMenus(env), menus.menus);
+      await storeCall(env, { op: "put", key: MENUS_KEY, value: merged });
       invalidateAllCaches();
-      return Response.json({ ok: true, menus: menus.menus.length, buttons: menus.menus.reduce((n, m) => n + m.buttons.length, 0) });
+      return Response.json({ ok: true, menus: merged.menus.length, buttons: merged.menus.reduce((n, m) => n + m.buttons.length, 0) });
     }
 
     if (request.method === "POST" && url.pathname === "/__setup") {

@@ -82,17 +82,19 @@ test("menu-builder: cleanUrl / cleanCommand accept only real values", () => {
   assert.equal(cleanCommand("quiz"), "");
 });
 
-test("menu-builder: addMenu caps at 20 and rejects bad parents/titles", () => {
+test("menu-builder: addMenu caps at 60 and rejects bad parents/titles", () => {
+  // Cap raised 20 -> 60 for the bulk learn import (29 learn menus alongside
+  // the existing ones); the buttons-per-menu cap is unchanged.
   let state = { menus: [] };
-  for (let i = 0; i < 21; i++) {
+  for (let i = 0; i < 61; i++) {
     const r = addMenu(state, { title: `قائمة ${i}` });
     state = r.menus;
-    if (i < 20) assert.ok(r.menu, `menu ${i} should be created`);
+    if (i < 60) assert.ok(r.menu, `menu ${i} should be created`);
     else assert.equal(r.menu, null);
   }
   assert.equal(addMenu(state, { title: "   " }).menu, null);
   assert.equal(addMenu(state, { title: "x", parentId: "m_nope" }).menu, null);
-  assert.equal(state.menus.length, 20);
+  assert.equal(state.menus.length, 60);
 });
 
 test("menu-builder: deleteMenu re-parents children and drops dangling submenu buttons", () => {
