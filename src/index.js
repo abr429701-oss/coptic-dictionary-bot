@@ -214,7 +214,7 @@ async function sendHelp(env, chatId) {
     text: helpText(lang),
     parse_mode: "HTML",
     reply_markup: { inline_keyboard: [
-      [{ text: "📚 الدروس / Lessons", callback_data: "nf|lessons" }, { text: "🃏 بطاقات / Flashcards", callback_data: "nf|flash" }],
+      [{ text: "🃏 بطاقات / Flashcards", callback_data: "nf|flash" }],
       [{ text: "🧠 اختبار / Quiz", callback_data: "nf|quiz|meaning" }, { text: "🗓 اختبار اليوم", callback_data: "nf|dailyquiz" }],
       [{ text: "🔊 صوت مرة / 3 مرات", callback_data: "nf|voicesettings" }],
       [{ text: "🔘 القوائم / Menu", callback_data: "nf|menu" }],
@@ -319,17 +319,6 @@ async function handleNewFeaturesCallback(env, callback) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: shareTextForRecord(env, record), parse_mode: "HTML" });
     return;
   }
-  if (action === "lesson") {
-    const id = Number(parts[2]);
-    await telegram(env, "sendMessage", { chat_id: chatId, text: lessonText(id), parse_mode: "HTML" });
-    return;
-  }
-  if (action === "lessons") {
-    const rows = lessonList().map((l) => [{ text: l.title, callback_data: `nf|lesson|${l.id}` }]);
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "📚 <b>الدروس المصغرة</b>\\nاختر درسًا:\\n\\n🎬 لدروس الفيديو أرسل /videolessons", parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
-    return;
-  }
-  if (action === "videolessons") return sendVideoLessons(env, chatId);
   if (action === "menu") return sendRootMenus(env, chatId, userId);
   if (action === "flash") return sendFlashcard(env, chatId, userId);
   if (action === "quiz") return beginQuizV2(env, chatId, parts[2] || "meaning");
@@ -456,22 +445,8 @@ async function openMenu(env, chatId, menuId, userId) {
   }
   await sendMenuMessage(env, chatId, text, keyboard);
 }
-async function sendVideoLessons(env, chatId) {
-  const { menu } = await ensureVideoMenuStored(env);
-  if (!menu) { await sendMenuMessage(env, chatId, "🎬 لا توجد دروس فيديو بعد."); return; }
-  // Video lessons intentionally use the normal reply keyboard. A tap is sent
-  // back as plain text and handled by followMenuHit(), so this flow never
-  // creates an inline keyboard or callback_data for video lessons.
-  await openReplyMenu(env, chatId, chatId, menu.id);
-}
 async function runMenuCommand(env, chatId, userId, command) {
   if (command === "/quiz") { await beginQuiz(env, chatId); return; }
-  if (command === "/lessons") {
-    const rows = lessonList().map((l) => [{ text: l.title, callback_data: `nf|lesson|${l.id}` }]);
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "📚 <b>الدروس المصغرة</b>\nاختر درسًا:\n\n🎬 لدروس الفيديو أرسل /videolessons", parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
-    return;
-  }
-  if (command === "/videolessons") { await sendVideoLessons(env, chatId); return; }
   if (command === "/flashcards") { await sendFlashcard(env, chatId, userId); return; }
   if (command === "/help") { await sendHelp(env, chatId); return; }
   if (command === "/dailyquiz") { await beginQuizV2(env, chatId, dailyQuizType()); return; }
@@ -886,7 +861,7 @@ function lazy(build) {
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
 import { audioUrl, audioVersion, fetchHumanSpeech, fetchPrebuiltSpeech, isSingleWordOgg, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 import { copticDateNow, alphabetText, letterStatsText, longestText, originsText, wordCountText, startsWithText, similarText, translateText, vocabText, startGuess, handleGuessReply } from "./features.js";
-import { deepLink, shareTextForRecord, pickQuizV2Question, dailyQuizType, pickFlashcard, updateFlashcard, lessonList, lessonText, suggestSimilar, helpText, retentionText, opsText, recordById } from "./new-features.js";
+import { deepLink, shareTextForRecord, pickQuizV2Question, dailyQuizType, pickFlashcard, updateFlashcard, suggestSimilar, helpText, retentionText, opsText, recordById } from "./new-features.js";
 import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VIDEO_MENU_ID, cleanMenuTitle, cleanMenuText, cleanButtonLabel, cleanUrl, cleanCommand, normalizeMenus, findMenu, findButton, rootMenus, descendantMenuIds, buildMenuKeyboard, buildRootKeyboard, menuOpenText, menuAdminListText, menuAdminDetailText, parseMenuTarget, parseButtonTarget, addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton, ensureVideoMenu } from "./menu-builder.js";
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 
@@ -1511,9 +1486,7 @@ const USER_COMMANDS = [
   { command: "voiceon", description: "تشغيل إرسال النطق تلقائيًا" },
   { command: "voiceoff", description: "إيقاف إرسال النطق تلقائيًا" },
   { command: "help", description: "مساعدة تفاعلية ولغة الواجهة" },
-  { command: "lessons", description: "دروس قبطية مصغرة داخل البوت" },
   { command: "menu", description: "القوائم المخصصة والأزرار" },
-  { command: "videolessons", description: "دروس فيديو: اختر درسًا وشاهده" },
   { command: "flashcards", description: "مراجعة المفضلة ببطاقات" },
   { command: "dailyquiz", description: "اختبار اليوم بأنواعه" },
   { command: "voiceonce", description: "النطق مرة واحدة" },
@@ -6869,15 +6842,7 @@ async function handleUpdate(update, env, ctx) {
   }
   if (text === "/dailyquiz") { await beginQuizV2(env, message.chat.id, dailyQuizType()); return; }
   if (text === "/help") { await sendHelp(env, message.chat.id); return; }
-  if (text === "/lessons" || text.startsWith("/lessons ")) {
-    const arg = text.slice("/lessons".length).trim();
-    if (arg) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: lessonText(Number(arg)), parse_mode: "HTML" }); return; }
-    const rows = lessonList().map((l) => [{ text: l.title, callback_data: `nf|lesson|${l.id}` }]);
-    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "📚 <b>الدروس المصغرة</b>\nاختر درسًا:\n\n🎬 لدروس الفيديو أرسل /videolessons", parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
-    return;
-  }
   if (text === "/menu") { await sendRootMenus(env, message.chat.id, userId); return; }
-  if (text === "/videolessons") { await sendVideoLessons(env, message.chat.id); return; }
   if (text === "/flashcards") { await sendFlashcard(env, message.chat.id, userId); return; }
   if (text === "/lang" || text.startsWith("/lang ")) {
     const arg = text.slice("/lang".length).trim().toLowerCase();

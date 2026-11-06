@@ -26,7 +26,7 @@ export const KIND_LABELS = {
   url: "رابط", popup: "تنبيه منبثق", submenu: "قائمة فرعية", command: "أمر",
 };
 // Commands a command-button may run (existing bot commands only).
-export const ALLOWED_COMMANDS = ["/quiz", "/lessons", "/videolessons", "/flashcards", "/help", "/dailyquiz", "/menu", "/random"];
+export const ALLOWED_COMMANDS = ["/quiz", "/flashcards", "/help", "/dailyquiz", "/menu", "/random"];
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
