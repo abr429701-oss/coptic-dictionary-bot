@@ -524,6 +524,12 @@ async function handleMenuButton(env, callback) {
     return;
   }
   if (button.kind === "command") { await runMenuCommand(env, chatId, String(userId ?? chatId), button.command); return; }
+  if (button.kind === "url") {
+    // Reply keyboards cannot open URLs directly. Send the form link as a
+    // normal message instead of falling through to the old inline-only path.
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `${button.label}\n${button.url}`, disable_web_page_preview: false });
+    return;
+  }
   if (button.kind === "photo" || button.kind === "video" || button.kind === "audio" || button.kind === "document") {
     const method = button.kind === "photo" ? "sendPhoto" : button.kind === "video" ? "sendVideo" : button.kind === "audio" ? "sendAudio" : "sendDocument";
     const key = button.kind === "photo" ? "photo" : button.kind === "video" ? "video" : button.kind === "audio" ? "audio" : "document";
@@ -7181,6 +7187,18 @@ export default {
         drive: { url: body.drive.url ?? null, fileId: body.drive.fileId ?? null, at: new Date().toISOString() },
       });
       return Response.json(result ?? { ok: true });
+    }
+
+    if (request.method === "POST" && url.pathname === "/__learn-import") {
+      if (!env.LEARN_IMPORT_SECRET || !sameSecret(request.headers.get("x-learn-import-secret") ?? "", env.LEARN_IMPORT_SECRET)) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      const body = await request.json().catch(() => null);
+      const menus = normalizeMenus(body?.menus);
+      if (!menus.menus.length) return new Response("No menus", { status: 400 });
+      await storeCall(env, { op: "put", key: MENUS_KEY, value: menus });
+      invalidateAllCaches();
+      return Response.json({ ok: true, menus: menus.menus.length, buttons: menus.menus.reduce((n, m) => n + m.buttons.length, 0) });
     }
 
     if (request.method === "POST" && url.pathname === "/__setup") {

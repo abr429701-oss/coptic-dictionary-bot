@@ -1,0 +1,52 @@
+name: Import Learn Lessons to Telegram
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and validate menus without uploading or storing"
+        required: false
+        default: "false"
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      WORKER_URL: https://coptic-dictionary-bot.abr429701.workers.dev
+      ADMIN_CHAT_ID: "813894692"
+      SHEET_ID: "1kZKjF2KDsGT0HslGSenN-pDTzx4FpX0QDPqX0ZOnriY"
+      SHEET_NAME: learn
+      DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Validate required secrets
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "Missing CLOUDFLARE_API_TOKEN"; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "Missing CLOUDFLARE_ACCOUNT_ID"; exit 1; }
+          test -n "$TELEGRAM_BOT_TOKEN" || { echo "Missing TELEGRAM_BOT_TOKEN"; exit 1; }
+      - name: Deploy current Worker code
+        if: ${{ inputs.dry_run != true }}
+        run: npx wrangler deploy
+      - name: Create one-time import secret
+        if: ${{ inputs.dry_run != true }}
+        run: |
+          secret="learn-import-$(openssl rand -hex 32)"
+          echo "LEARN_IMPORT_SECRET=$secret" >> "$GITHUB_ENV"
+          printf '%s' "$secret" | npx wrangler secret put LEARN_IMPORT_SECRET --name coptic-dictionary-bot
+      - name: Import sheet rows, upload media, and store Telegram file IDs
+        run: node scripts/import-learn.mjs
