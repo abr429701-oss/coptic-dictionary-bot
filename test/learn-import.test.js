@@ -548,6 +548,7 @@ test("learn-import: /importlearn on an already-complete import still rebuilds me
   ] });
   const calls = await sayMsg(kvEnv, ADMIN, "/importlearn");
   assert.ok(anyMessage(calls, /50\/50/), "complete import must still report 50/50");
+  assert.ok(anyMessage(calls, /تم حذف القوائم المخزنة القديمة/), "the reply must say the old stored menus were deleted");
   assert.equal(calls.filter((c) => c.method === "sendVideo").length, 0, "nothing left to upload");
   const menus = storedMenus(kvEnv);
   assert.equal(menus.filter((m) => String(m.id).startsWith("m_learn_")).length, 2, "exactly the two level menus");
@@ -556,6 +557,7 @@ test("learn-import: /importlearn on an already-complete import still rebuilds me
   const l1 = menus.find((m) => m.id === "m_learn_l1");
   assert.equal(l1.buttons.length, 17);
   assert.ok(l1.buttons.every((b) => b.kind === "lesson" && b.lessonId), "level buttons are single lesson buttons");
+  assert.ok(!menus.flatMap((m) => m.buttons ?? []).some((b) => b.kind === "submenu" && String(b.targetMenuId ?? "").startsWith("m_learn_l1_")), "no old submenu buttons remain");
 });
 
 test("learn-import: /importlearn reset clears state and learn menus only", async () => {

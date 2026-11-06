@@ -476,9 +476,12 @@ async function saveImportState(env, state) {
 async function rebuildLearnMenus(env, state) {
   const stored = await loadMenus(env);
   const { menus } = buildLearnMenus(LEARN_LEVELS, state);
-  // Drop the old importer's per-lesson submenus (m_learn_l1_01 …); the new
-  // design has only the two level menus. Everything else is preserved by merge.
-  return saveMenus(env, mergeMenus({ menus: dropStaleLearnLessonMenus(stored.menus) }, menus));
+  // Delete the previously stored learn menus ENTIRELY (the old layout:
+  // level menus with per-lesson submenus and one button per item) and
+  // write the new ones (two level menus, one button per lesson).
+  // Everything else is preserved by the merge.
+  const purged = (stored.menus ?? []).filter((m) => !String(m?.id ?? "").startsWith("m_learn_"));
+  return saveMenus(env, mergeMenus({ menus: purged }, menus));
 }
 // In-memory guard: two overlapping /importlearn runs would upload the same
 // pending files twice. The webhook serializes updates, but the import itself
@@ -507,7 +510,7 @@ async function runLearnImportAll(env, chatId) {
   const failedErrors = items
     .filter((item) => state.items[item.key]?.status === "failed")
     .map((item) => `${item.title} (${item.kind}): ${String(state.items[item.key]?.error ?? "").slice(0, 200)}`);
-  await telegram(env, "sendMessage", { chat_id: chatId, text: learnProgressText(progress, errors.length ? errors : failedErrors), parse_mode: "HTML" });
+  await telegram(env, "sendMessage", { chat_id: chatId, text: `${learnProgressText(progress, errors.length ? errors : failedErrors)}\n\n🔄 تم حذف القوائم المخزنة القديمة وبناء قوائم الدروس الجديدة (كل درس زر واحد).`, parse_mode: "HTML" });
 }
 async function handleImportLearn(env, chatId, userId, text, ctx) {
   if (!isAdmin(env, userId)) {
@@ -537,10 +540,10 @@ async function handleImportLearn(env, chatId, userId, text, ctx) {
   const progress = importProgress(state, items);
   if (progress.complete) {
     // The stored menus may still be the old importer's (one button per
-    // item): rebuild them into the one-button-per-lesson layout even
-    // though nothing is left to upload.
+    // item): delete them entirely and write the new one-button-per-lesson
+    // menus, even though nothing is left to upload.
     await rebuildLearnMenus(env, state);
-    await telegram(env, "sendMessage", { chat_id: chatId, text: learnProgressText(progress), parse_mode: "HTML" });
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `${learnProgressText(progress)}\n\n🔄 تم حذف القوائم المخزنة القديمة وبناء قوائم الدروس الجديدة (كل درس زر واحد).`, parse_mode: "HTML" });
     return;
   }
   if (learnImportRuns.has(chatId)) {
@@ -1018,7 +1021,7 @@ import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VI
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 import { getHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
 import { LEARN_LEVELS } from "./learn-manifest.js";
-import { LEARN_IMPORT_KEY, learnUploadItems, emptyImportState, normalizeImportState, importProgress, learnPendingItems, findLearnLesson, learnLessonSendPlan, buildLearnMenus, dropStaleLearnLessonMenus, mergeMenus, uploadLearnFile, parseImportLearnArg, learnImportStartText, learnProgressText } from "./learn-import.js";
+import { LEARN_IMPORT_KEY, learnUploadItems, emptyImportState, normalizeImportState, importProgress, learnPendingItems, findLearnLesson, learnLessonSendPlan, buildLearnMenus, mergeMenus, uploadLearnFile, parseImportLearnArg, learnImportStartText, learnProgressText } from "./learn-import.js";
 
 // ---- reply-keyboard menus (real buttons under the field, no inline) --------
 // The position of a user inside the menus is remembered so a plain-text tap can
