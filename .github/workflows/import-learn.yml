@@ -27,26 +27,38 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+
       - name: Install dependencies
         run: npm ci
+
       - name: Validate required secrets
         run: |
           test -n "$CLOUDFLARE_API_TOKEN" || { echo "Missing CLOUDFLARE_API_TOKEN"; exit 1; }
           test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "Missing CLOUDFLARE_ACCOUNT_ID"; exit 1; }
           test -n "$TELEGRAM_BOT_TOKEN" || { echo "Missing TELEGRAM_BOT_TOKEN"; exit 1; }
+
+      # FIX: build the search index first — it creates the ./public folder that
+      # wrangler's `assets` binding requires. Without this, `wrangler deploy`
+      # fails in ~2s with "assets directory does not exist".
+      - name: Build search index (creates ./public)
+        run: npm run build:search-index
+
       - name: Deploy current Worker code
         if: ${{ inputs.dry_run != true }}
         run: npx wrangler deploy
+
       - name: Create one-time import secret
         if: ${{ inputs.dry_run != true }}
         run: |
           secret="learn-import-$(openssl rand -hex 32)"
           echo "LEARN_IMPORT_SECRET=$secret" >> "$GITHUB_ENV"
           printf '%s' "$secret" | npx wrangler secret put LEARN_IMPORT_SECRET --name coptic-dictionary-bot
+
       - name: Import sheet rows, upload media, and store Telegram file IDs
         run: node scripts/import-learn.mjs
