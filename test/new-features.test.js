@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import worker, { UserStore } from "../src/index.js";
 import records from "../data/dictionary.json" with { type: "json" };
-import { shareTextForRecord, sharePlainTextForRecord, shareButtonText, shareKeyboardForRecord, meaningInLanguage } from "../src/new-features.js";
+import { deepLink, shareTextForRecord, sharePlainTextForRecord, shareButtonText, shareKeyboardForRecord, meaningInLanguage, translationInLanguage, wordStartParam, suggestSimilar } from "../src/new-features.js";
 const token = "test-token";
 const secret = "test-secret-should-be-long-enough";
 const testRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -176,6 +176,65 @@ test("v2: nf|share sends the word in the callback language, old form stays Arabi
   assert.match(sent(cb)[0].text, /Share the word:/u);
   cb = await sendCallback(kvEnv, 44, "nf|share|5");
   assert.match(sent(cb)[0].text, /فَتَحَ/u);
+});
+
+// "Did you mean" follows the closest suggestion's language, and French/German
+// typos get suggestions too (candidates used to be Coptic/English/Arabic only).
+test("v2: did-you-mean header and suggestions follow the typo language", async () => {
+  const enTop = suggestSimilar("colro", 3);
+  assert.equal(enTop[0]?.lang, "en");
+  assert.ok(enTop.some((s) => s.label === "color"), "color must be among the suggestions");
+  const frTop = suggestSimilar("ouvrire", 3);
+  assert.equal(frTop[0]?.lang, "fr");
+  assert.ok(frTop.some((s) => s.label === "ouvrir"), "ouvrir must be among the suggestions");
+  const deTop = suggestSimilar("öfnen", 3);
+  assert.equal(deTop[0]?.lang, "de");
+  assert.ok(deTop.some((s) => s.label === "öffnen"), "öffnen must be among the suggestions");
+  const cases = [
+    ["colro", /Did you mean:/u],
+    ["ouvrire", /Vouliez-vous dire :/u],
+    ["öfnen", /Meinten Sie:/u],
+  ];
+  let userId = 45;
+  for (const [query, phrase] of cases) {
+    const kvEnv = { ...env, USERS: fakeKv() };
+    kvEnv.USERS.store.set(`user:${userId}`, { name: "مينا", registeredAt: nowIso(), firstSeen: nowIso(), lastSeen: nowIso() });
+    const calls = await say(kvEnv, userId, query);
+    const msg = sent(calls)[0];
+    assert.ok(msg, `"${query}" must produce a message`);
+    assert.match(msg.text, phrase);
+    assert.doesNotMatch(msg.text, /هل تقصد/u);
+    assert.ok(msg.reply_markup?.inline_keyboard?.length > 0, "suggestion buttons present");
+    userId += 1;
+  }
+});
+
+// A shared link opens the word in the language it was shared in:
+// word_<id>_<lang> renders the card (labels, word, share button) in that
+// language; plain word_<id> still opens the Arabic card.
+test("v2: deep link carries the language; /start word_<id>_<lang> opens that card", async () => {
+  assert.equal(wordStartParam(SHARE_RECORD, "fr"), "word_5_fr");
+  assert.equal(wordStartParam(SHARE_RECORD, "ar"), "word_5");
+  assert.equal(wordStartParam({ ...SHARE_RECORD, translation_de: "" }, "de"), "word_5");
+  assert.match(deepLink(SHARE_ENV, 5, "fr"), /word_5_fr/u);
+  assert.match(deepLink(SHARE_ENV, 5, "ar"), /word_5$/u);
+  const cases = [
+    ["word_5_en", /Word:/u, "open", "🔗 Share word"],
+    ["word_5_fr", /Mot:/u, "ouvrir", "🔗 Partager le mot"],
+    ["word_5_de", /Wort:/u, "öffnen", "🔗 Wort teilen"],
+  ];
+  let userId = 48;
+  for (const [param, labelRe, word, shareLabel] of cases) {
+    const kvEnv = { ...env, USERS: fakeKv() };
+    kvEnv.USERS.store.set(`user:${userId}`, { name: "مينا", registeredAt: nowIso(), firstSeen: nowIso(), lastSeen: nowIso() });
+    const calls = await say(kvEnv, userId, `/start ${param}`);
+    const msg = sent(calls).find((p) => labelRe.test(p.text ?? ""));
+    assert.ok(msg, `"${param}" must open the card in that language`);
+    assert.match(msg.text, new RegExp(word, "u"));
+    const buttons = (msg.reply_markup?.inline_keyboard ?? []).flat();
+    assert.ok(buttons.some((b) => b.text === shareLabel), "share button in that language");
+    userId += 1;
+  }
 });
 
 test("v2: /help shows sections and language buttons", async () => {

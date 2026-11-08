@@ -717,7 +717,7 @@ const FLASH_TTL_MS = 15 * 60000;
 function withShareButton(env, record, more, language = "ar") {
   if (!record?.id) return more;
   const lang = shareLanguage(language);
-  const link = deepLink(env, record.id);
+  const link = deepLink(env, record.id, lang);
   const btn = link
     ? { text: shareButtonText(lang), url: `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(sharePlainTextForRecord(env, record, lang))}` }
     : { text: shareButtonText(lang), callback_data: `nf|share|${record.id}|${lang}` };
@@ -1047,7 +1047,7 @@ function lazy(build) {
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
 import { audioUrl, audioVersion, fetchHumanSpeech, fetchPrebuiltSpeech, isSingleWordOgg, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 import { copticDateNow, alphabetText, letterStatsText, longestText, originsText, wordCountText, startsWithText, similarText, translateText, vocabText, startGuess, handleGuessReply } from "./features.js";
-import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, pickQuizV2Question, dailyQuizType, pickFlashcard, updateFlashcard, suggestSimilar, helpText, retentionText, opsText, recordById } from "./new-features.js";
+import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, pickFlashcard, updateFlashcard, suggestSimilar, helpText, retentionText, opsText, recordById } from "./new-features.js";
 import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VIDEO_MENU_ID, cleanMenuTitle, cleanMenuText, cleanButtonLabel, cleanUrl, cleanCommand, normalizeMenus, findMenu, findButton, rootMenus, descendantMenuIds, buildMenuKeyboard, buildRootKeyboard, menuOpenText, menuAdminListText, menuAdminDetailText, parseMenuTarget, parseButtonTarget, addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton, ensureVideoMenu } from "./menu-builder.js";
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 import { getHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
@@ -1173,10 +1173,10 @@ const MORE_BUTTON_TEXT = {
   de: "Mehr Wörter anzeigen",
 };
 const UI_TEXT = {
-  ar: { word: "الكلمة", meaning: "المعنى", kind: "النوع", origin: "الأصل", more: "هناك معنى آخر للكلمة التي بحثت بها", next: "اضغط هنا لعرضه", end: "انتهت المعاني المتاحة لهذه الكلمة", choose: "اختر من الاقتراحات التالية:", previous: "السابق", pageNext: "التالي", noResult: "لا توجد نتائج حالياً لهذه الكلمة." },
-  en: { word: "Word", meaning: "Meaning", kind: "Part of speech", origin: "Origin", more: "There is another meaning for the word you searched", next: "Click here to view it", end: "No more meanings are available for this word", choose: "Choose from the following suggestions:", previous: "Previous", pageNext: "Next", noResult: "No results are currently available for this word." },
-  fr: { word: "Mot", meaning: "Sens", kind: "Nature", origin: "Origine", more: "Il existe un autre sens pour le mot recherché", next: "Cliquez ici pour l’afficher", end: "Il n’y a plus de sens disponible pour ce mot", choose: "Choisissez parmi les suggestions suivantes :", previous: "Précédent", pageNext: "Suivant", noResult: "Aucun résultat n’est actuellement disponible pour ce mot." },
-  de: { word: "Wort", meaning: "Bedeutung", kind: "Wortart", origin: "Herkunft", more: "Es gibt eine weitere Bedeutung für das gesuchte Wort", next: "Hier klicken, um sie anzuzeigen", end: "Für dieses Wort sind keine weiteren Bedeutungen verfügbar", choose: "Wählen Sie aus den folgenden Vorschlägen:", previous: "Zurück", pageNext: "Weiter", noResult: "Derzeit sind keine Ergebnisse für dieses Wort verfügbar." },
+  ar: { word: "الكلمة", meaning: "المعنى", kind: "النوع", origin: "الأصل", more: "هناك معنى آخر للكلمة التي بحثت بها", next: "اضغط هنا لعرضه", end: "انتهت المعاني المتاحة لهذه الكلمة", choose: "اختر من الاقتراحات التالية:", previous: "السابق", pageNext: "التالي", noResult: "لا توجد نتائج حالياً لهذه الكلمة.", didYouMean: "🤔 هل تقصد:" },
+  en: { word: "Word", meaning: "Meaning", kind: "Part of speech", origin: "Origin", more: "There is another meaning for the word you searched", next: "Click here to view it", end: "No more meanings are available for this word", choose: "Choose from the following suggestions:", previous: "Previous", pageNext: "Next", noResult: "No results are currently available for this word.", didYouMean: "🤔 Did you mean:" },
+  fr: { word: "Mot", meaning: "Sens", kind: "Nature", origin: "Origine", more: "Il existe un autre sens pour le mot recherché", next: "Cliquez ici pour l’afficher", end: "Il n’y a plus de sens disponible pour ce mot", choose: "Choisissez parmi les suggestions suivantes :", previous: "Précédent", pageNext: "Suivant", noResult: "Aucun résultat n’est actuellement disponible pour ce mot.", didYouMean: "🤔 Vouliez-vous dire :" },
+  de: { word: "Wort", meaning: "Bedeutung", kind: "Wortart", origin: "Herkunft", more: "Es gibt eine weitere Bedeutung für das gesuchte Wort", next: "Hier klicken, um sie anzuzeigen", end: "Für dieses Wort sind keine weiteren Bedeutungen verfügbar", choose: "Wählen Sie aus den folgenden Vorschlägen:", previous: "Zurück", pageNext: "Weiter", noResult: "Derzeit sind keine Ergebnisse für dieses Wort verfügbar.", didYouMean: "🤔 Meinten Sie:" },
 };
 
 
@@ -2563,7 +2563,14 @@ async function prepareSearch(env, chatId, query, page = 0, messageId = undefined
     // suggestions from the bundled dictionary. Buttons reuse the existing s|<row> path.
     const suggestions = suggestSimilar(cleanQuery, 3);
     if (!suggestions.length) return () => deliver({ text: uiTextFor(cleanQuery).noResult });
-    const text = `${uiTextFor(cleanQuery).noResult}\n\n🤔 هل تقصد:`;
+    // The whole message follows the closest suggestion's language: a typo
+    // matches nothing, so the query itself would classify as English by
+    // default — the suggestion knows better. Coptic suggestions keep the
+    // Arabic text (there is no Coptic UI text).
+    const suggestionLang = suggestions[0]?.lang;
+    const uiLang = ["en", "fr", "de"].includes(suggestionLang) ? suggestionLang : uiLanguage(cleanQuery);
+    const ui = UI_TEXT[uiLang] ?? UI_TEXT.ar;
+    const text = `${ui.noResult}\n\n${ui.didYouMean}`;
     const keyboard = suggestions.map((s) => [{ text: String(s.label).slice(0, 48), callback_data: `s|${s.index}` }]);
     return () => deliver({ text, parse_mode: "HTML", reply_markup: { inline_keyboard: keyboard } });
   }
@@ -7046,10 +7053,18 @@ async function handleUpdate(update, env, ctx) {
     // Referral link tracking: /start <campaign> remembers the source for new users.
     const startParam = text.startsWith("/start ") ? text.slice(7).trim() : "";
     // v2: deep link /start word_<id> opens that word directly (shared from a result).
-    const wordLink = /^word_(\d+)$/u.exec(startParam);
+    // word_<id>_<lang> opens it as if searched in that language: the first
+    // translation in that language is the synthetic search key, so the card
+    // (labels, word, share button) renders in that language; no translation
+    // means the Arabic card, as before.
+    const wordLink = /^word_(\d+)(?:_(en|fr|de))?$/u.exec(startParam);
     if (wordLink) {
       const index = recordIndexById().get(Number(wordLink[1])) ?? -1;
-      if (index >= 0) { await sendRecord(env, message.chat.id, index, -1, ""); return; }
+      if (index >= 0) {
+        const key = wordLink[2] ? translationInLanguage(records[index], wordLink[2]) : "";
+        await sendRecord(env, message.chat.id, index, -1, key);
+        return;
+      }
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⚠️ هذه الكلمة غير موجودة في القاموس." });
       return;
     }

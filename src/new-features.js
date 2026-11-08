@@ -86,16 +86,27 @@ const SHARE_SETUP_NOTE = {
 // English `english`, French `translation_fr`, German `translation_de`);
 // falls back to the Arabic meaning when that language has none.
 const MEANING_FIELDS = { en: "english", fr: "translation_fr", de: "translation_de" };
-export function meaningInLanguage(record, language) {
+// First meaning in the given language, or "" when the record has none
+// (no fallback — callers decide what to do when it is missing).
+export function translationInLanguage(record, language) {
   const lang = shareLanguage(language);
   const field = MEANING_FIELDS[lang];
-  const value = field ? splitMeaning(record?.[field] ?? "")[0] : "";
-  return value || firstMeaning(record);
+  return field ? splitMeaning(record?.[field] ?? "")[0] ?? "" : "";
 }
-export function deepLink(env, id) {
+export function meaningInLanguage(record, language) {
+  return translationInLanguage(record, language) || firstMeaning(record);
+}
+// /start payload for a shared word: word_<id>_<lang> when the record has a
+// translation in that language, plain word_<id> otherwise (Arabic opener).
+export function wordStartParam(record, language = "ar") {
+  const lang = shareLanguage(language);
+  const suffix = lang !== "ar" && translationInLanguage(record, lang) ? `_${lang}` : "";
+  return `word_${record?.id}${suffix}`;
+}
+export function deepLink(env, id, language = "ar") {
   const username = String(env?.BOT_USERNAME ?? "").replace(/^@/u, "").trim();
   if (!username || id == null) return null;
-  return `https://t.me/${username}?start=word_${id}`;
+  return `https://t.me/${username}?start=${wordStartParam(recordById(id), language)}`;
 }
 export function shareTextForRecord(env, record, language = "ar") {
   if (!record) return "";
@@ -105,7 +116,7 @@ export function shareTextForRecord(env, record, language = "ar") {
   if (link) return `${line}\n\n${SHARE_LINE[lang]} ${link}`;
   // No BOT_USERNAME configured yet: the deep link cannot be built, so share the
   // in-bot form instead and tell the admin what to set (see report).
-  return `${line}\n\n${SHARE_LINE[lang]} /start word_${record.id} (${SHARE_SETUP_NOTE[lang]})`;
+  return `${line}\n\n${SHARE_LINE[lang]} /start ${wordStartParam(record, lang)} (${SHARE_SETUP_NOTE[lang]})`;
 }
 // Plain-text version for t.me/share/url (no HTML — the share text is sent as-is).
 export function sharePlainTextForRecord(env, record, language = "ar") {
@@ -261,18 +272,22 @@ export function suggestSimilar(query, limit = 3) {
   for (let i = 0; i < records.length; i += 1) {
     const r = records[i];
     if (!r || r._deleted) continue;
+    // Candidates in every search language, each tagged with its language so
+    // the "did you mean" header can follow the closest suggestion.
     const candidates = [
-      String(r.coptic ?? "").replace(/`/gu, "").trim(),
-      String(r.english ?? "").split(/[,\/]/u)[0]?.trim() ?? "",
-      firstMeaning(r),
+      { label: String(r.coptic ?? "").replace(/`/gu, "").trim(), lang: "cop" },
+      { label: String(r.english ?? "").split(/[,/]/u)[0]?.trim() ?? "", lang: "en" },
+      { label: String(r.translation_fr ?? "").split(/[,/]/u)[0]?.trim() ?? "", lang: "fr" },
+      { label: String(r.translation_de ?? "").split(/[,/]/u)[0]?.trim() ?? "", lang: "de" },
+      { label: firstMeaning(r), lang: "ar" },
     ];
-    for (const label of candidates) {
+    for (const { label, lang } of candidates) {
       const norm = normalize(label);
       if (!norm || norm === wanted) continue;
       const dist = levenshtein(norm, wanted, max);
       if (dist === Infinity) continue;
       const prev = best.get(norm);
-      if (!prev || dist < prev.dist) best.set(norm, { label, dist, index: i });
+      if (!prev || dist < prev.dist) best.set(norm, { label, dist, index: i, lang });
     }
   }
   return [...best.values()].sort((a, b) => a.dist - b.dist || a.label.length - b.label.length).slice(0, limit);
