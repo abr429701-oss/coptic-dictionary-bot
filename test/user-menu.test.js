@@ -77,14 +77,11 @@ const nowIso = () => new Date().toISOString();
 function seedUser(kvEnv, id, name) {
   kvEnv.USERS.store.set(`user:${id}`, { name, registeredAt: nowIso(), firstSeen: nowIso(), lastSeen: nowIso() });
 }
-const NINE = ["start", "keyboard", "learn", "fav", "myfav", "mystats", "menu", "contact", "random"];
-const NINE_DESCRIPTIONS = {
+const SIX = ["start", "keyboard", "learn", "menu", "contact", "random"];
+const SIX_DESCRIPTIONS = {
   start: "بدء استخدام القاموس",
   keyboard: "لوحة مفاتيح قبطية لكتابة الكلمات",
   learn: "بوت تعلم اللغة القبطية من الصفر",
-  fav: "حفظ آخر كلمة بحثت عنها",
-  myfav: "كلماتك المفضلة",
-  mystats: "إحصاءاتك ونقاطك",
   menu: "القوائم والدروس",
   contact: "تواصل مع الإدارة",
   random: "كلمة عشوائية",
@@ -92,7 +89,7 @@ const NINE_DESCRIPTIONS = {
 
 // Runs first: it is the only test that triggers the user setMyCommands
 // (the menu is cached per Worker isolate afterwards).
-test("user-menu: hidden user commands are unhidden once, and the side menu lists exactly the nine", async () => {
+test("user-menu: hidden user commands are unhidden once, and the side menu lists exactly the six", async () => {
   invalidateHiddenUiCache();
   const kvEnv = { ...env, USERS: fakeKv() };
   seedUser(kvEnv, 61, "مينا");
@@ -102,12 +99,12 @@ test("user-menu: hidden user commands are unhidden once, and the side menu lists
   const setCommands = calls.find((c) => c.url.endsWith("/setMyCommands") && !c.payload?.scope);
   assert.ok(setCommands, "user setMyCommands must be sent on /start");
   const commands = setCommands.payload?.commands ?? [];
-  assert.deepEqual(commands.map((c) => c.command), NINE, "the user menu lists exactly the nine chosen commands, in order");
-  for (const c of commands) assert.equal(c.description, NINE_DESCRIPTIONS[c.command], `/${c.command} keeps its description`);
+  assert.deepEqual(commands.map((c) => c.command), SIX, "the user menu lists exactly the six chosen commands, in order");
+  for (const c of commands) assert.equal(c.description, SIX_DESCRIPTIONS[c.command], `/${c.command} keeps its description`);
   const hidden = kvEnv.USERS.store.get("hidden_ui:v1");
-  assert.ok(!hidden.command.includes("contact") && !hidden.command.includes("random"), "the nine are unhidden by the one-time migration");
+  assert.ok(!hidden.command.includes("contact") && !hidden.command.includes("random"), "the six are unhidden by the one-time migration");
   assert.ok(hidden.command.includes("quiz"), "other hidden commands stay hidden");
-  assert.equal(kvEnv.USERS.store.get("usermenu:v1:migrated"), true, "the migration marker is set so the cleanup runs once");
+  assert.equal(kvEnv.USERS.store.get("usermenu:v2:migrated"), true, "the migration marker is set so the cleanup runs once");
 });
 
 test("user-menu: the /start commands list shows /menu after /learn", async () => {

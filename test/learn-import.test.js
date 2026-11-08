@@ -728,14 +728,13 @@ test("learn-import: 9 removed commands no longer respond or list", async () => {
   assert.ok(setCommands, "user setMyCommands must be sent on /start");
   let names = (setCommands.payload?.commands ?? []).map((c) => c.command);
   for (const name of removed) assert.ok(!names.includes(name), `${name} must not be listed`);
-  assert.deepEqual(names, ["start", "keyboard", "learn", "fav", "myfav", "mystats", "menu", "contact", "random"], "the user menu lists exactly the nine chosen commands");
+  assert.deepEqual(names, ["start", "keyboard", "learn", "menu", "contact", "random"], "the user menu lists exactly the six chosen commands");
   calls = await sayMsg(kvEnv, ADMIN, "/start");
   setCommands = calls.find((c) => c.method === "setMyCommands" && c.payload?.scope);
   assert.ok(setCommands, "admin setMyCommands must be sent on /start");
   names = (setCommands.payload?.commands ?? []).map((c) => c.command);
   for (const name of removed) assert.ok(!names.includes(name), `${name} must not be listed for admins either`);
-  assert.ok(names.includes("ratewarn"), "/ratewarn must stay listed for admins");
-  for (const name of ["start", "keyboard", "learn", "fav", "myfav", "mystats", "menu", "contact", "random"]) assert.ok(names.includes(name), `admin menu still includes /${name}`);
+  assert.deepEqual(names, ["start", "keyboard", "learn", "menu", "contact", "random"], "the admin menu lists the same six commands");
   // The internal transliteration helper still works via /pronounce.
   calls = await sayMsg(kvEnv, 57, "/pronounce ⲁⲃⲃⲁ");
   assert.ok(anyMessage(calls, /النقل الصوتي \(باللاتيني\)/u), "/pronounce must still show the latin transliteration");

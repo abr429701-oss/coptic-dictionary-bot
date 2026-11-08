@@ -1677,16 +1677,15 @@ async function findMatches(query, env) {
   return exact.concat(partial);
 }
 
-// The side ("/") menu for regular users: exactly these commands, nothing
-// else. Every other command still works when typed — it is just not listed.
-// (Admins see these plus ADMIN_COMMANDS, which spreads this list.)
+// The side ("/") menu: exactly these six commands, nothing else — for
+// regular users AND for the admin (the admin's full list lives in
+// ADMIN_COMMANDS below and is kept for a future restore). Every other
+// command still works when typed; it is just not listed, hidden by default
+// until the admin asks for it back.
 const USER_COMMANDS = [
   { command: "start", description: "بدء استخدام القاموس" },
   { command: "keyboard", description: "لوحة مفاتيح قبطية لكتابة الكلمات" },
   { command: "learn", description: "بوت تعلم اللغة القبطية من الصفر" },
-  { command: "fav", description: "حفظ آخر كلمة بحثت عنها" },
-  { command: "myfav", description: "كلماتك المفضلة" },
-  { command: "mystats", description: "إحصاءاتك ونقاطك" },
   { command: "menu", description: "القوائم والدروس" },
   { command: "contact", description: "تواصل مع الإدارة" },
   { command: "random", description: "كلمة عشوائية" },
@@ -1939,26 +1938,29 @@ async function ensureCommandMenu(env, userId) {
   const key = admin ? "admin" : "user";
   if (commandMenuReady.has(key)) return;
   if (!admin) await migrateUserMenuHidden(env);
-  const payload = { commands: admin ? ADMIN_COMMANDS : USER_COMMANDS, ...(admin ? { scope: { type: "chat", chat_id: Number(userId) } } : {}) };
+  // Both menus list exactly USER_COMMANDS (the six). The admin's full list
+  // (ADMIN_COMMANDS) is kept in code for a future restore; admin commands
+  // still work when typed, and /admin opens the dashboard.
+  const payload = { commands: USER_COMMANDS, ...(admin ? { scope: { type: "chat", chat_id: Number(userId) } } : {}) };
   const result = await telegram(env, "setMyCommands", payload);
   if (result?.ok) commandMenuReady.add(key);
 }
-// One-time: when the 9-command menu first ships, unhide any of the nine
-// that the admin had hidden before, so the menu actually shows all nine.
+// One-time: when the 6-command menu first ships, unhide any of the six
+// that the admin had hidden before, so the menu actually shows all six.
 // Afterwards hides stick: /hidebutton command <name> hides a command from
 // the side menu and from the /start commands list, until the admin shows it
 // again with /showbutton. The marker makes this run exactly once.
 async function migrateUserMenuHidden(env) {
   try {
     if (!env.USERS) return;
-    const done = (await storeCall(env, { op: "get", key: "usermenu:v1:migrated" })).value;
+    const done = (await storeCall(env, { op: "get", key: "usermenu:v2:migrated" })).value;
     if (done) return;
     const hidden = await getHiddenUi(env, storeCall);
     const names = new Set(USER_COMMANDS.map((c) => String(c.command)));
     if (hidden?.command?.some((c) => names.has(c))) {
       await setHiddenUi(env, storeCall, { ...hidden, command: hidden.command.filter((c) => !names.has(c)) });
     }
-    await storeCall(env, { op: "put", key: "usermenu:v1:migrated", value: true });
+    await storeCall(env, { op: "put", key: "usermenu:v2:migrated", value: true });
   } catch { /* never block the menu */ }
 }
 async function telegram(env, method, payload) {
