@@ -5957,18 +5957,42 @@ function allBotCommands() {
   }
   return out;
 }
-async function sendAllAdminCommands(env, chatId) {
+// ---------------------------------------------------------------------------
+// كل الأوامر كأزرار inline في /admin (بدل قائمة نصية): شبكة مقسمة صفحات،
+// كل زر يشغّل أمره كما لو كُتب باليد. الأوامر المدمرة (تمسح بيانات فورًا
+// بلا تأكيد من الكود نفسه) تطلب تأكيدًا أولًا قبل التشغيل.
+const ALL_COMMANDS_PAGE_SIZE = 40;
+const ALL_COMMANDS_DANGEROUS = new Set(["resetstats", "purgeinactive", "resetsessions"]);
+function allCommandsGridPage(page) {
   const list = allBotCommands();
-  const lines = list.map((c) => `/${escapeHtml(c.command)} — ${escapeHtml(c.description)}`);
-  const header = `📋 <b>كل أوامر البوت (${list.length})</b>\nاضغط على أي أمر لكتبه في حقل الرسالة، ثم أرسله (ولو يحتاج إضافات اكتبها بعده). القائمة كاملة — حتى الأوامر المخفية عن المستخدمين.`;
-  const chunks = [];
-  let chunk = header;
-  for (const line of lines) {
-    if ((chunk + "\n" + line).length > 3500) { chunks.push(chunk); chunk = ""; }
-    chunk += (chunk ? "\n" : "") + line;
+  const pages = Math.max(1, Math.ceil(list.length / ALL_COMMANDS_PAGE_SIZE));
+  const current = Math.min(Math.max(1, Number(page) || 1), pages);
+  const slice = list.slice((current - 1) * ALL_COMMANDS_PAGE_SIZE, current * ALL_COMMANDS_PAGE_SIZE);
+  const rows = [];
+  for (let i = 0; i < slice.length; i += 2) {
+    rows.push(slice.slice(i, i + 2).map((c) => ({ text: `/${c.command}`, callback_data: `ad|run|${c.command}|${current}` })));
   }
-  if (chunk) chunks.push(chunk);
-  for (const text of chunks) await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true });
+  const nav = [];
+  if (current > 1) nav.push({ text: "« السابق", callback_data: `ad|allcmd|${current - 1}` });
+  nav.push({ text: "🏠 اللوحة", callback_data: "ad|page|home" });
+  if (current < pages) nav.push({ text: "التالي »", callback_data: `ad|allcmd|${current + 1}` });
+  rows.push(nav);
+  return {
+    text: `📋 <b>كل الأوامر — صفحة ${current} من ${pages}</b> (${list.length} أمر)\nاضغط أي أمر لتشغيله مباشرة.`,
+    reply_markup: { inline_keyboard: rows },
+  };
+}
+async function showAllCommandsGrid(env, chatId, messageId, page) {
+  const grid = allCommandsGridPage(page);
+  if (messageId != null) {
+    const edited = await telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text: grid.text, parse_mode: "HTML", reply_markup: grid.reply_markup });
+    if (edited?.ok || String(edited?.description ?? "").includes("not modified")) return;
+  }
+  await telegram(env, "sendMessage", { chat_id: chatId, text: grid.text, parse_mode: "HTML", reply_markup: grid.reply_markup });
+}
+async function runAdminCommand(env, chatId, userId, commandText, ctx) {
+  // شغّل الأمر كما لو كتبه الأدمن بيده: نفس مسار الرسائل العادي بكل فحوصه.
+  await handleUpdate({ message: { message_id: (Date.now() % 2147483647) || 1, chat: { id: chatId, type: "private" }, from: { id: userId }, text: commandText, date: Math.floor(Date.now() / 1000) } }, env, ctx);
 }
 async function sendAdminDashboard(env, chatId, messageId = undefined, page = "home") {
   const payload = { chat_id: chatId, text: await adminDashboardText(env, page), parse_mode: "HTML", reply_markup: adminMenuMarkup(page) };
@@ -6214,7 +6238,30 @@ async function handleAdminDashboardCallback(env, callback, ctx) {
   if (action === "broadcast") { await beginBroadcast(env, chatId, callback.from.id, await getUser(env, callback.from.id) ?? {}); return; }
   if (action === "bcstatus") { await sendBroadcastStatus(env, chatId); return; }
   if (action === "commands") { commandMenuReady.delete("admin"); await ensureCommandMenu(env, callback.from.id); await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ تم تحديث قائمة أوامر الأدمن في Telegram." }); return; }
-  if (action === "allcommands") { await sendAllAdminCommands(env, chatId); return; }
+  if (action === "allcommands") { await showAllCommandsGrid(env, chatId, callback.message?.message_id, 1); return; }
+  if (action === "allcmd") { await showAllCommandsGrid(env, chatId, callback.message?.message_id, Number(parts[2]) || 1); return; }
+  if (action === "run") {
+    const cmd = String(parts[2] ?? "");
+    const gridPage = Number(parts[3]) || 1;
+    if (!cmd || !allBotCommands().some((c) => c.command === cmd)) return;
+    if (ALL_COMMANDS_DANGEROUS.has(cmd)) {
+      const confirmText = `⚠️ <b>/${escapeHtml(cmd)}</b> يمسح بيانات نهائيًا.\nمتأكد من التشغيل؟`;
+      const confirmMarkup = { inline_keyboard: [[{ text: "✅ تأكيد التشغيل", callback_data: `ad|confirm|${cmd}|${gridPage}` }, { text: "❌ إلغاء", callback_data: `ad|allcmd|${gridPage}` }]] };
+      const edited = await telegram(env, "editMessageText", { chat_id: chatId, message_id: callback.message.message_id, text: confirmText, parse_mode: "HTML", reply_markup: confirmMarkup }).catch(() => null);
+      if (!edited?.ok) await telegram(env, "sendMessage", { chat_id: chatId, text: confirmText, parse_mode: "HTML", reply_markup: confirmMarkup });
+      return;
+    }
+    await runAdminCommand(env, chatId, callback.from.id, `/${cmd}`, ctx);
+    return;
+  }
+  if (action === "confirm") {
+    const cmd = String(parts[2] ?? "");
+    const gridPage = Number(parts[3]) || 1;
+    if (!cmd || !ALL_COMMANDS_DANGEROUS.has(cmd)) return;
+    await showAllCommandsGrid(env, chatId, callback.message?.message_id, gridPage);
+    await runAdminCommand(env, chatId, callback.from.id, `/${cmd}`, ctx);
+    return;
+  }
   if (action === "clearflow") { await clearAdminFlow(env, callback.from.id); await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ تم مسح أي جلسة إدخال معلّقة." }); return; }
   if (action === "usage") { await sendUsageReport(env, chatId); return; }
   if (action === "botinfo") { await sendBotInfo(env, chatId); return; }

@@ -96,6 +96,10 @@ async function adminCallback(kvEnv, id, data) {
 }
 const ALL_COMMANDS_COUNT = 333;
 
+const PAGE_SIZE = 40;
+const PAGES = Math.ceil(ALL_COMMANDS_COUNT / PAGE_SIZE);
+const edits = (calls) => calls.filter((c) => c.url.endsWith("/editMessageText")).map((c) => c.payload);
+
 test("admin-all-commands: the /admin dashboard carries a كل الأوامر button", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const calls = await say(kvEnv, ADMIN, "/admin");
@@ -107,23 +111,60 @@ test("admin-all-commands: the /admin dashboard carries a كل الأوامر but
   assert.equal(all.text, "📋 كل الأوامر");
 });
 
-test("admin-all-commands: tapping كل الأوامر lists every bot command exactly once", async () => {
+test("admin-all-commands: كل الأوامر opens a paginated button grid, no text list", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const calls = await adminCallback(kvEnv, ADMIN, "ad|allcommands");
-  const texts = sent(calls).map((p) => String(p.text ?? ""));
-  assert.ok(texts.length >= 2, "the full list spans several messages");
-  assert.ok(texts[0].includes(`كل أوامر البوت (${ALL_COMMANDS_COUNT})`), "the first message states the full count");
-  const names = texts.flatMap((t) => [...t.matchAll(/^\/([a-z0-9_]+) — /gmu)].map((m) => m[1]));
-  assert.equal(names.length, ALL_COMMANDS_COUNT, `the list must contain exactly ${ALL_COMMANDS_COUNT} commands`);
-  assert.equal(new Set(names).size, names.length, "no command may appear twice");
-  for (const name of ["livemon", "conversations", "menuadmin", "hidebutton", "showbutton", "broadcast", "errors", "usage", "backup", "analytics", "auditlog", "quiz", "fav", "flashcards", "importlearn", "record", "apanel", "retention", "ops", "subscribe", "hangman", "donate", "setwodtest", "card_hide", "voice_delete_all", "liveusers", "start", "menu", "admin"]) {
-    assert.ok(names.includes(name), `the list must include /${name}`);
-  }
-  for (const t of texts) assert.ok(t.length <= 4000, "every chunk fits in one Telegram message");
+  assert.equal(sent(calls).length, 0, "the grid must not send the old text list");
+  const [page1] = edits(calls);
+  assert.ok(page1, "opening كل الأوامر edits the message into the grid");
+  assert.match(String(page1.text), /صفحة 1 من 9/, "page 1 of 9");
+  assert.match(String(page1.text), /333 أمر/, "the grid states the full count");
+  const rows = page1.reply_markup?.inline_keyboard ?? [];
+  const cmdButtons = rows.flat().filter((b) => String(b.callback_data ?? "").startsWith("ad|run|"));
+  assert.equal(cmdButtons.length, PAGE_SIZE, "page 1 carries 40 command buttons");
+  assert.equal(cmdButtons[0].text, "/start", "the first button is /start");
+  assert.ok(cmdButtons.every((b) => b.text === `/${String(b.callback_data).split("|")[2]}`), "each button shows its command");
+  const nav = rows.at(-1).map((b) => b.text);
+  assert.deepEqual(nav, ["🏠 اللوحة", "التالي »"], "page 1 has home + next, no prev");
+  const page2calls = await adminCallback(kvEnv, ADMIN, "ad|allcmd|2");
+  const [page2] = edits(page2calls);
+  assert.match(String(page2.text), /صفحة 2 من 9/, "next opens page 2");
+  assert.notEqual(page2.reply_markup.inline_keyboard[0][0].text, "/start", "page 2 shows different commands");
+  assert.deepEqual(page2.reply_markup.inline_keyboard.at(-1).map((b) => b.text), ["« السابق", "🏠 اللوحة", "التالي »"], "page 2 has prev + home + next");
+  const lastCalls = await adminCallback(kvEnv, ADMIN, `ad|allcmd|${PAGES}`);
+  const [last] = edits(lastCalls);
+  assert.match(String(last.text), new RegExp(`صفحة ${PAGES} من ${PAGES}`), "the last page opens");
+  assert.equal(last.reply_markup.inline_keyboard.flat().filter((b) => String(b.callback_data ?? "").startsWith("ad|run|")).length, ALL_COMMANDS_COUNT - PAGE_SIZE * (PAGES - 1), "the last page carries the remainder");
 });
 
-test("admin-all-commands: a non-admin gets nothing from the كل الأوامر button", async () => {
+test("admin-all-commands: tapping a command button runs it like typed text", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const onCalls = await adminCallback(kvEnv, ADMIN, "ad|run|livemon|1");
+  assert.ok(toAdmin(onCalls).some((p) => /تم تشغيل المراقبة المباشرة/u.test(String(p.text ?? ""))), "tapping /livemon toggles the monitor on");
+  const offCalls = await adminCallback(kvEnv, ADMIN, "ad|run|livemon|1");
+  assert.ok(toAdmin(offCalls).some((p) => /تم إيقاف المراقبة المباشرة/u.test(String(p.text ?? ""))), "tapping /livemon again toggles it off");
+  const usageCalls = await adminCallback(kvEnv, ADMIN, "ad|run|userchat|1");
+  assert.ok(toAdmin(usageCalls).some((p) => String(p.text ?? "").includes("/userchat")), "tapping an arg-command runs its bare form, which explains the usage");
+});
+
+test("admin-all-commands: a destructive command asks for confirmation first", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const askCalls = await adminCallback(kvEnv, ADMIN, "ad|run|resetstats|1");
+  assert.equal(sent(askCalls).length, 0, "tapping /resetstats must not run it at once");
+  const [confirm] = edits(askCalls);
+  assert.ok(confirm, "tapping a destructive command shows a confirm screen");
+  assert.match(String(confirm.text), /يمسح بيانات نهائيًا/, "the confirm screen warns about data loss");
+  const confirmBtn = (confirm.reply_markup?.inline_keyboard ?? []).flat().find((b) => b.callback_data === "ad|confirm|resetstats|1");
+  assert.ok(confirmBtn, "the confirm screen has a تأكيد التشغيل button");
+  assert.ok((confirm.reply_markup?.inline_keyboard ?? []).flat().some((b) => b.callback_data === "ad|allcmd|1"), "the confirm screen has a cancel path back to the grid");
+  const runCalls = await adminCallback(kvEnv, ADMIN, "ad|confirm|resetstats|1");
+  assert.ok(toAdmin(runCalls).some((p) => /تم تصفير التحليلات/u.test(String(p.text ?? ""))), "confirming runs the command");
+  assert.ok(edits(runCalls).some((p) => /صفحة 1 من 9/u.test(String(p.text ?? ""))), "after confirming, the message returns to the grid");
+});
+
+test("admin-all-commands: a non-admin gets nothing from the grid buttons", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const calls = await adminCallback(kvEnv, 57, "ad|allcommands");
-  assert.equal(sent(calls).length, 0, "the full list is admin-only");
+  assert.equal(sent(calls).length, 0, "the grid is admin-only");
+  assert.equal(edits(calls).length, 0, "no grid edit for a non-admin");
 });
