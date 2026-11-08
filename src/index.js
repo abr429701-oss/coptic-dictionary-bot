@@ -634,7 +634,10 @@ async function sendLearnLesson(env, chatId, userId, lessonId) {
       continue;
     }
     if (step.kind === "url") {
-      await telegram(env, "sendMessage", { chat_id: chatId, text: step.label, reply_markup: { inline_keyboard: [[{ text: step.label, url: step.url }]] } });
+      // The exam link goes as plain text (phrase + link in one message) so
+      // the user taps it freely — not as an inline button. No link preview,
+      // so the message stays exactly the phrase and the link.
+      await telegram(env, "sendMessage", { chat_id: chatId, text: `${step.label}: ${step.url}`, disable_web_page_preview: true });
     }
   }
 }

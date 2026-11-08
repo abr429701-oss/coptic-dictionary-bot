@@ -631,9 +631,8 @@ test("learn-import: plain tap on a lesson sends video, photo, then the exam link
   assert.match(String(calls[0].payload?.caption ?? ""), /الدرس الاول/u);
   assert.match(String(calls[1].payload?.caption ?? ""), /الدرس الاول/u);
   const exam = calls[2].payload;
-  assert.equal(exam.text, "📝 الامتحان الإلكتروني");
-  assert.equal(exam.reply_markup.inline_keyboard[0][0].text, "📝 الامتحان الإلكتروني");
-  assert.match(exam.reply_markup.inline_keyboard[0][0].url, /^https:\/\/docs\.google\.com\/forms\//u);
+  assert.match(exam.text, /^📝 الامتحان الإلكتروني: https:\/\/docs\.google\.com\/forms\//u);
+  assert.equal(exam.reply_markup, undefined, "exam link is plain text, not an inline button");
 });
 
 test("learn-import: tapping 🏠 الرئيسية inside a level returns to the main menu", async () => {
@@ -658,8 +657,8 @@ test("learn-import: inline tap on an L2 lesson sends video, photo, exercise text
   assert.match(String(calls[1].payload?.caption ?? ""), /الدرس السادس/u);
   assert.match(messageTexts(calls).find((t) => /التدريب الثالث/u.test(t)) ?? "", /التدريب الثالث/u);
   const exam = calls[4].payload;
-  assert.equal(exam.text, "📝 الامتحان الإلكتروني");
-  assert.match(exam.reply_markup.inline_keyboard[0][0].url, /^https:\/\/docs\.google\.com\/forms\//u);
+  assert.match(exam.text, /^📝 الامتحان الإلكتروني: https:\/\/docs\.google\.com\/forms\//u);
+  assert.equal(exam.reply_markup, undefined, "exam link is plain text, not an inline button");
 });
 
 test("learn-import: one failed lesson item does not abort the rest of the lesson", async () => {
@@ -691,7 +690,8 @@ test("learn-import: one failed lesson item does not abort the rest of the lesson
   assert.ok(messageTexts(calls).some((t) => /تعذّر إرسال هذا المحتوى/u.test(t)), "generic failure message must be sent");
   assert.ok(messageTexts(calls).some((t) => /wrong file identifier/u.test(t)), "admin sees the real reason");
   const exam = calls.at(-1).payload;
-  assert.equal(exam.text, "📝 الامتحان الإلكتروني");
+  assert.match(exam.text, /^📝 الامتحان الإلكتروني: https:\/\/docs\.google\.com\/forms\//u);
+  assert.equal(exam.reply_markup, undefined, "exam link is plain text, not an inline button");
 });
 
 // ---------------------------------------------------------------------------
