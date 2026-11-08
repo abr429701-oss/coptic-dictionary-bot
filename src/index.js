@@ -5698,7 +5698,13 @@ async function saveDictionaryNew(env, callback) {
 function adminMenuMarkup(page = "home") {
   const back = [{ text: "⬅️ الرئيسية", callback_data: "ad|page|home" }];
   if (page === "home") return { inline_keyboard: [
-    [{ text: "📋 كل الأوامر", callback_data: "ad|allcommands" }],
+    [{ text: "⭐ الأوامر الأساسية", callback_data: "ad|cmdcat|main" }, { text: "📊 الإحصاءات والتقارير", callback_data: "ad|cmdcat|stats" }],
+    [{ text: "🎙 الأصوات", callback_data: "ad|cmdcat|voices" }, { text: "☁️ Drive والمزامنة", callback_data: "ad|cmdcat|drive" }],
+    [{ text: "👥 المستخدمون", callback_data: "ad|cmdcat|users" }, { text: "📖 القاموس", callback_data: "ad|cmdcat|dict" }],
+    [{ text: "📢 البث والإرسال", callback_data: "ad|cmdcat|broadcast" }, { text: "⚙️ أدوات النظام", callback_data: "ad|cmdcat|system" }],
+    [{ text: "🔧 أدوات متقدمة", callback_data: "ad|cmdcat|advanced" }, { text: "🎓 التعلم والاختبارات", callback_data: "ad|cmdcat|learn" }],
+    [{ text: "💬 الدعم والتواصل", callback_data: "ad|cmdcat|support" }, { text: "🔐 الأمان والصلاحيات", callback_data: "ad|cmdcat|security" }],
+    [{ text: "🎛 القوائم والبوت", callback_data: "ad|cmdcat|menus" }],
     [{ text: "📊 الإحصاءات", callback_data: "ad|page|stats" }, { text: "🎙 الأصوات", callback_data: "ad|page|voices" }],
     [{ text: "☁️ Drive وSheets", callback_data: "ad|page|drive" }, { text: "👥 المستخدمون", callback_data: "ad|page|users" }],
     [{ text: "📖 تعديل القاموس", callback_data: "ad|page|dictionary" }, { text: "⚙️ أدوات النظام", callback_data: "ad|page|tools" }],
@@ -5958,37 +5964,53 @@ function allBotCommands() {
   return out;
 }
 // ---------------------------------------------------------------------------
-// كل الأوامر كأزرار inline في /admin (بدل قائمة نصية): شبكة مقسمة صفحات،
-// كل زر يشغّل أمره كما لو كُتب باليد. الأوامر المدمرة (تمسح بيانات فورًا
+// كل الأوامر كأزرار inline في /admin، مرتبة في قوائم بأسماء عربية — مثل
+// أقسام اللوحة نفسها (الإحصاءات، الأصوات، ...). كل أمر في قسم واحد فقط،
+// والزر يشغّل أمره كما لو كُتب باليد. الأوامر المدمرة (تمسح بيانات فورًا
 // بلا تأكيد من الكود نفسه) تطلب تأكيدًا أولًا قبل التشغيل.
-const ALL_COMMANDS_PAGE_SIZE = 40;
 const ALL_COMMANDS_DANGEROUS = new Set(["resetstats", "purgeinactive", "resetsessions"]);
-function allCommandsGridPage(page) {
-  const list = allBotCommands();
-  const pages = Math.max(1, Math.ceil(list.length / ALL_COMMANDS_PAGE_SIZE));
-  const current = Math.min(Math.max(1, Number(page) || 1), pages);
-  const slice = list.slice((current - 1) * ALL_COMMANDS_PAGE_SIZE, current * ALL_COMMANDS_PAGE_SIZE);
+const ALL_COMMANDS_CATEGORIES = [
+  { id: "main", title: "⭐ الأوامر الأساسية", commands: ["start", "keyboard", "learn", "menu", "contact", "random", "help", "admin", "dashboard", "about", "cancel", "k", "kbd", "lang"] },
+  { id: "stats", title: "📊 الإحصاءات والتقارير", commands: ["usage", "analytics", "topusers", "growth", "usercount", "searchstats", "topwords", "misses", "livewords", "hourly", "dictstats", "wordcount", "fieldreport", "statuspage", "digest", "weekly", "reports", "reportclose", "adminscore", "usertimeline", "trace", "searchcount", "liveusers", "conversations", "userchat", "livemon", "livesearch", "retention", "ops", "funnel", "cohorts", "reflinks", "searchhistory", "report"] },
+  { id: "voices", title: "🎙 الأصوات", commands: ["record", "record_choose", "record_select", "record_stop", "record_voice", "voice_delete", "voice_delete_all", "voice_delete_many", "voicecoverage", "voiceoff", "voiceon", "voiceonce", "voicesettings", "voicethree", "noaudio", "nopronounce", "uploadaudio", "rebuildvoice", "voicegaps", "pronounce"] },
+  { id: "drive", title: "☁️ Drive والمزامنة", commands: ["drive", "syncdrive", "syncusers", "syncall", "synccancel", "syncreset", "syncstatus", "synctest", "syncwatch", "importusers", "importsheet", "importlearn", "setdrive", "setarchive", "resync"] },
+  { id: "users", title: "👥 المستخدمون", commands: ["users", "userlookup", "userinfo", "userfind", "userhistory", "userdelete", "usernote", "usernotes", "ban", "unban", "banlist", "tempban", "warn", "warns", "resetwarns", "inactive", "purge", "resetuser", "setpoints", "addpoints", "leaderboard", "points", "purgeinactive", "blockedusers"] },
+  { id: "dict", title: "📖 القاموس", commands: ["dicthealth", "wordsearch", "wordinfo", "translate", "similar", "startswith", "longest", "letterstats", "alphabet", "copticdate", "origins", "vocab", "duplicates", "findempty", "gapfill", "wordaudit", "exportcsv", "exportfull", "export", "backup", "backupauto", "dictversion", "sheetdiff", "deleteword", "bulkadd", "bulkedit", "randomword", "integrity", "dups", "emptymeaning"] },
+  { id: "broadcast", title: "📢 البث والإرسال", commands: ["broadcast", "startbroadcast", "stopbroadcast", "bcpause", "bcresume", "bccancel", "bcspeed", "testbroadcast", "broadcaststats", "targeted", "segment", "templateslib", "tplsave", "tplsend", "announce", "maintadv", "maintadvstatus", "maintadvcancel", "massdm", "msg", "schedule", "schedules", "unschedule", "autoreply", "optout", "optoutstats", "addevent", "events", "delevent"] },
+  { id: "system", title: "⚙️ أدوات النظام", commands: ["health", "healthcheck", "uptime", "botinfo", "sessionlist", "kill", "resetsessions", "clearcache", "cacheinfo", "limits", "slowmode", "maintenance", "setmaintmsg", "setbanmsg", "feature", "errors", "auditlog", "adminaudit", "securitylog", "setcommands", "setbotname", "setbotabout", "setbotdescription", "setshortdesc", "setlang", "setmenubutton", "setwod", "setwodtest", "note", "alias", "motd", "rules", "searchlimit", "usagealert", "recover", "recoverusers", "apikey", "whereami", "snapshot", "preview", "logchannel", "ping", "debug"] },
+  { id: "advanced", title: "🔧 أدوات متقدمة", commands: ["exportaudit", "exporterrors", "exportmisses", "exportbans", "exportsecurity", "exportsearch", "resetstats", "newhelp", "a2help", "proadmin", "prohelp", "apanel", "strings", "setstring", "resetstring", "cleanup", "maintplan", "teamnote", "teamnotes", "teamassign", "teamdone", "rollout", "rolloutallow", "rolloutdeny", "rollouts", "selfcheck", "configexport", "webhook", "envcheck", "dostat", "bottest"] },
+  { id: "learn", title: "🎓 التعلم والاختبارات", commands: ["quiz", "quiz2", "quizstats", "dailyquiz", "flashcards", "study", "streak", "hangman", "guess", "daily", "wod", "wordoftheday", "fav", "favorites", "myfav", "mywords", "removefav", "mystats", "recent", "gamify", "badges", "exportanki", "examples", "compare"] },
+  { id: "support", title: "💬 الدعم والتواصل", commands: ["support", "tickets", "ticket", "ticketclose", "mytickets", "reply", "feedback", "bug", "suggest", "suggestword", "suggestions", "contribute", "invite", "myref", "toptop", "refinfo", "donate", "donation", "subscribe", "unsubscribe", "notify", "exportmydata", "clearhistory", "alerts", "exitsupport"] },
+  { id: "security", title: "🔐 الأمان والصلاحيات", commands: ["2fa", "password", "unlock", "lockdown", "verifygate", "captcha", "ratewarn", "ratelimit", "blacklist", "whitelist", "antispam", "spamlist", "spamclear", "setrole", "roles", "myrole", "admins"] },
+  { id: "menus", title: "🎛 القوائم والبوت", commands: ["menuadmin", "menueditor", "addmenu", "addbutton", "delmenu", "delbutton", "movebtn", "addvideo", "videolist", "delvideo", "toptags", "card_hide", "card_show", "hiddencards", "unhideall", "welcomemedia", "welcomesticker", "leavemsg", "setjoinmsg", "editwelcome", "resetwelcome", "pin", "pinhere", "unpin", "hidebutton", "hiddenbuttons", "showbutton"] },
+];
+function allCommandsCategory(id) {
+  const cat = ALL_COMMANDS_CATEGORIES.find((c) => c.id === id);
+  if (!cat) return null;
+  const byName = new Map(allBotCommands().map((c) => [c.command, c]));
+  return { ...cat, commands: cat.commands.map((name) => byName.get(name)).filter(Boolean) };
+}
+function allCommandsCategoryPage(id) {
+  const cat = allCommandsCategory(id);
+  if (!cat) return null;
   const rows = [];
-  for (let i = 0; i < slice.length; i += 2) {
-    rows.push(slice.slice(i, i + 2).map((c) => ({ text: `/${c.command}`, callback_data: `ad|run|${c.command}|${current}` })));
+  for (let i = 0; i < cat.commands.length; i += 2) {
+    rows.push(cat.commands.slice(i, i + 2).map((c) => ({ text: `/${c.command}`, callback_data: `ad|run|${c.command}|${id}` })));
   }
-  const nav = [];
-  if (current > 1) nav.push({ text: "« السابق", callback_data: `ad|allcmd|${current - 1}` });
-  nav.push({ text: "🏠 اللوحة", callback_data: "ad|page|home" });
-  if (current < pages) nav.push({ text: "التالي »", callback_data: `ad|allcmd|${current + 1}` });
-  rows.push(nav);
+  rows.push([{ text: "🏠 اللوحة", callback_data: "ad|page|home" }]);
   return {
-    text: `📋 <b>كل الأوامر — صفحة ${current} من ${pages}</b> (${list.length} أمر)\nاضغط أي أمر لتشغيله مباشرة.`,
+    text: `📋 <b>${escapeHtml(cat.title)}</b> (${cat.commands.length} أمر)\nاضغط أي أمر لتشغيله مباشرة.`,
     reply_markup: { inline_keyboard: rows },
   };
 }
-async function showAllCommandsGrid(env, chatId, messageId, page) {
-  const grid = allCommandsGridPage(page);
+async function showAllCommandsCategory(env, chatId, messageId, id) {
+  const page = allCommandsCategoryPage(id);
+  if (!page) return;
   if (messageId != null) {
-    const edited = await telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text: grid.text, parse_mode: "HTML", reply_markup: grid.reply_markup });
+    const edited = await telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text: page.text, parse_mode: "HTML", reply_markup: page.reply_markup });
     if (edited?.ok || String(edited?.description ?? "").includes("not modified")) return;
   }
-  await telegram(env, "sendMessage", { chat_id: chatId, text: grid.text, parse_mode: "HTML", reply_markup: grid.reply_markup });
+  await telegram(env, "sendMessage", { chat_id: chatId, text: page.text, parse_mode: "HTML", reply_markup: page.reply_markup });
 }
 async function runAdminCommand(env, chatId, userId, commandText, ctx) {
   // شغّل الأمر كما لو كتبه الأدمن بيده: نفس مسار الرسائل العادي بكل فحوصه.
@@ -6238,15 +6260,14 @@ async function handleAdminDashboardCallback(env, callback, ctx) {
   if (action === "broadcast") { await beginBroadcast(env, chatId, callback.from.id, await getUser(env, callback.from.id) ?? {}); return; }
   if (action === "bcstatus") { await sendBroadcastStatus(env, chatId); return; }
   if (action === "commands") { commandMenuReady.delete("admin"); await ensureCommandMenu(env, callback.from.id); await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ تم تحديث قائمة أوامر الأدمن في Telegram." }); return; }
-  if (action === "allcommands") { await showAllCommandsGrid(env, chatId, callback.message?.message_id, 1); return; }
-  if (action === "allcmd") { await showAllCommandsGrid(env, chatId, callback.message?.message_id, Number(parts[2]) || 1); return; }
+  if (action === "cmdcat") { await showAllCommandsCategory(env, chatId, callback.message?.message_id, String(parts[2] ?? "")); return; }
   if (action === "run") {
     const cmd = String(parts[2] ?? "");
-    const gridPage = Number(parts[3]) || 1;
+    const catId = String(parts[3] ?? "");
     if (!cmd || !allBotCommands().some((c) => c.command === cmd)) return;
     if (ALL_COMMANDS_DANGEROUS.has(cmd)) {
       const confirmText = `⚠️ <b>/${escapeHtml(cmd)}</b> يمسح بيانات نهائيًا.\nمتأكد من التشغيل؟`;
-      const confirmMarkup = { inline_keyboard: [[{ text: "✅ تأكيد التشغيل", callback_data: `ad|confirm|${cmd}|${gridPage}` }, { text: "❌ إلغاء", callback_data: `ad|allcmd|${gridPage}` }]] };
+      const confirmMarkup = { inline_keyboard: [[{ text: "✅ تأكيد التشغيل", callback_data: `ad|confirm|${cmd}|${catId}` }, { text: "❌ إلغاء", callback_data: `ad|cmdcat|${catId}` }]] };
       const edited = await telegram(env, "editMessageText", { chat_id: chatId, message_id: callback.message.message_id, text: confirmText, parse_mode: "HTML", reply_markup: confirmMarkup }).catch(() => null);
       if (!edited?.ok) await telegram(env, "sendMessage", { chat_id: chatId, text: confirmText, parse_mode: "HTML", reply_markup: confirmMarkup });
       return;
@@ -6256,9 +6277,9 @@ async function handleAdminDashboardCallback(env, callback, ctx) {
   }
   if (action === "confirm") {
     const cmd = String(parts[2] ?? "");
-    const gridPage = Number(parts[3]) || 1;
+    const catId = String(parts[3] ?? "");
     if (!cmd || !ALL_COMMANDS_DANGEROUS.has(cmd)) return;
-    await showAllCommandsGrid(env, chatId, callback.message?.message_id, gridPage);
+    await showAllCommandsCategory(env, chatId, callback.message?.message_id, catId);
     await runAdminCommand(env, chatId, callback.from.id, `/${cmd}`, ctx);
     return;
   }
