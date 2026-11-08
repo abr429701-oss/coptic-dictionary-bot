@@ -63,10 +63,15 @@ const whitelistModeCache = { value: null, at: 0 };
 const banMsgCache = { value: null, at: 0 };
 const maintMsgCache = { value: null, at: 0 };
 const slowModeCache = { value: null, at: 0 };
+// These two were read with a raw storeCall on every single user message; they
+// change only when an admin runs /lockdown or /verifygate.
+const lockdownCache = { value: null, at: 0 };
+const verifyGateCache = { value: null, at: 0 };
 const FEATURE_DEFAULTS = { audio: true, cards: true, voice_transcribe: true, inline_mode: true, keyboard: true, suggestions: true, gamify: true, contact: true, wod: true, autoreply: true };
 const recentSearches = []; // ring buffer of { userId, name, query, at }
 const RECENT_SEARCHES_MAX = 200;
 const lastUserSearchAt = new Map(); // userId -> ts (slow mode)
+let lastScheduleCheckAt = 0; // in-isolate guard for the scheduled-messages poll
 function pushRecentSearch(userId, name, query) {
   recentSearches.push({ userId: String(userId), name: String(name ?? "").slice(0, 40), query: String(query ?? "").slice(0, 80), at: Date.now() });
   if (recentSearches.length > RECENT_SEARCHES_MAX) recentSearches.splice(0, recentSearches.length - RECENT_SEARCHES_MAX);
@@ -100,7 +105,7 @@ async function readAdminAudit(env) { if (!env.USERS) return []; const v = ((awai
 async function slowModeConfig(env) { const v = await cachedDoGet(env, SLOW_MODE_KEY, slowModeCache, { on: false, seconds: 5 }); return v && typeof v === "object" ? v : { on: false, seconds: 5 }; }
 async function setSlowModeConfig(env, cfg) { if (env.USERS) await storeCall(env, { op: "put", key: SLOW_MODE_KEY, value: cfg }); invalidateCache(slowModeCache); }
 function invalidateAllCaches() {
-  for (const c of [wodCache, autoReplyCache, searchLimitCache, alertsCache, templatesCache, optOutCache, notesCache, featureFlagsCache, blacklistCache, whitelistCache, whitelistModeCache, banMsgCache, maintMsgCache, slowModeCache, gamifyCache, apiKeyCache, rateLimitCache, bansCache, maintCache, aliasCache, motdCache]) { c.value = null; c.at = 0; }
+  for (const c of [wodCache, autoReplyCache, searchLimitCache, alertsCache, templatesCache, optOutCache, notesCache, featureFlagsCache, blacklistCache, whitelistCache, whitelistModeCache, banMsgCache, maintMsgCache, slowModeCache, lockdownCache, verifyGateCache, gamifyCache, apiKeyCache, rateLimitCache, bansCache, maintCache, aliasCache, motdCache]) { c.value = null; c.at = 0; }
   registeredCache.clear(); commandMenuReady.clear(); lastLookup.clear();
 }
 async function broadcastControlState(env) { if (!env.USERS) return { paused: false }; const v = ((await storeCall(env, { op: "get", key: BROADCAST_CTRL_KEY })).value ?? { paused: false }); return v && typeof v === "object" ? v : { paused: false }; }
@@ -371,10 +376,30 @@ async function setVoiceRepeats(env, userId, repeats) {
 // (opens outside), popup (alert), submenu (opens another menu), command
 // (runs an existing bot command). Video lessons are the built-in menu
 // "🎬 دروس فيديو" whose buttons are video actions.
+// Request budget (2026-11-06): every tap on a /menu button used to read the
+// menus from the Durable Object 2-3 times (nav lookup + menu resolution + the
+// button itself), and the DO has its own free daily request allowance that is
+// spent as fast as the Worker's. One short-lived in-isolate copy removes all of
+// those repeated reads; every write path clears it immediately, so a menu edit
+// is visible on the very next tap in this isolate and after MENUS_CACHE_MS at
+// worst in another one. Readers get a clone so nobody can mutate the cache.
+const MENUS_CACHE_MS = 30000;
+// Keyed by the storage binding itself (one per isolate in production, a fresh
+// object per test locally), so two storages can never read each other's menus.
+const menusCache = new WeakMap();
+function invalidateMenusCache(env) {
+  if (env?.USERS) menusCache.delete(env.USERS);
+  else menusCache.delete(globalThis);
+}
 async function loadMenus(env) {
   if (!env.USERS) return { menus: [] };
+  const now = Date.now();
+  const cached = menusCache.get(env.USERS);
+  if (cached && now - cached.at < MENUS_CACHE_MS) return structuredClone(cached.value);
   try {
-    return normalizeMenus((await storeCall(env, { op: "get", key: MENUS_KEY })).value);
+    const normalized = normalizeMenus((await storeCall(env, { op: "get", key: MENUS_KEY })).value);
+    menusCache.set(env.USERS, { value: normalized, at: now });
+    return structuredClone(normalized);
   } catch (error) {
     console.error("Menus load failed", error instanceof Error ? error.message : "unknown error");
     return { menus: [] };
@@ -382,6 +407,7 @@ async function loadMenus(env) {
 }
 async function saveMenus(env, menus) {
   if (!env.USERS) return false;
+  invalidateMenusCache(env);
   try {
     await storeCall(env, { op: "put", key: MENUS_KEY, value: normalizeMenus(menus) });
     return true;
@@ -635,7 +661,9 @@ async function handleMenuButton(env, callback) {
     else await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, text, show_alert: true });
     return;
   }
-  if (!plain) await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
+  // A popup answers with its own alert below, so the blank acknowledgement
+  // above would be a wasted request (and the alert would then be rejected).
+  if (!plain && button.kind !== "popup") await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
   if (button.kind === "lesson") { await sendLearnLesson(env, chatId, userId, button.lessonId); return; }
   if (button.kind === "popup") {
     if (plain) await sendMenuMessage(env, chatId, `⚠️ ${button.text ?? ""}`);
@@ -1027,15 +1055,27 @@ import { LEARN_IMPORT_KEY, learnUploadItems, emptyImportState, normalizeImportSt
 // The position of a user inside the menus is remembered so a plain-text tap can
 // be resolved without any callback data.
 const PLAIN_CALLBACK = "__plain__";
-async function menuNavOf(env, userId) {
+const menuNavFrom = (user) => (user?.menuNav ? String(user.menuNav) : null);
+// Request budget: callers that already hold the user record pass it in, so the
+// lookup is not repeated (and the nav write only happens when the position
+// really changes — tapping buttons inside the same menu costs no write at all).
+async function menuNavOf(env, userId, known) {
+  if (known !== undefined) return menuNavFrom(known);
   const user = await getUser(env, userId);
-  return user?.menuNav ? String(user.menuNav) : null;
+  return menuNavFrom(user);
 }
-async function setMenuNav(env, userId, menuId) {
-  const user = (await getUser(env, userId)) ?? {};
-  const next = { ...user };
-  if (menuId) next.menuNav = String(menuId); else delete next.menuNav;
-  await saveUser(env, userId, next);
+async function setMenuNav(env, userId, menuId, known) {
+  if (!env.USERS) return;
+  const target = menuId ? String(menuId) : null;
+  if (known !== undefined && menuNavFrom(known) === target) return;
+  // One round trip: the object rewrites its own record atomically, so two quick
+  // taps can never overwrite each other's nav state.
+  try {
+    await storeCall(env, { op: "setnav", userId, value: target });
+  } catch (error) {
+    console.error("Menu nav save failed", error instanceof Error ? error.message : "unknown error");
+  }
+  patchRegisteredCache(userId, target ? { menuNav: target } : { menuNav: undefined });
 }
 async function openReplyMenu(env, chatId, userId, menu) {
   if (!chatId) return;
@@ -3192,6 +3232,17 @@ export class UserStore {
       for (const k of page.keys()) await storage.delete(k);
       return Response.json({ purged: page.size });
     }
+    if (op === "setnav") {
+      // One round trip for the menu position: the object reads, patches and
+      // writes its own user record, so two quick taps cannot overwrite each
+      // other the way a separate get+put from the Worker could.
+      const key = `user:${userId}`;
+      const user = (await storage.get(key)) ?? {};
+      const next = { ...user };
+      if (value) next.menuNav = String(value); else delete next.menuNav;
+      await storage.put(key, next);
+      return Response.json({ ok: true, menuNav: next.menuNav ?? null });
+    }
     if (op === "kbstep") {
       // Read-modify-write inside the object so rapid taps never overwrite each other.
       const user = (await storage.get(userKey)) ?? {};
@@ -3896,6 +3947,13 @@ async function syncUsersBatch(env, chatId, options = {}) {
 // so their searches do not wait for a user-store round trip.
 const registeredCache = new Map();
 const REGISTERED_CACHE_MS = 60000;
+// Keeps the per-user in-memory copy in step with a write we just made ourselves,
+// so the next message in this isolate reads it from memory instead of the DO.
+function patchRegisteredCache(userId, patch) {
+  const entry = registeredCache.get(userId);
+  if (!entry?.user) return;
+  registeredCache.set(userId, { at: entry.at, user: { ...entry.user, ...patch } });
+}
 
 async function registerOnFirstContact(env, message, userId, ctx) {
   if (isAdmin(env, userId) || (message.chat.type ?? "private") !== "private" || !env.USERS) return undefined;
@@ -6137,7 +6195,7 @@ async function handleUpdate(update, env, ctx) {
   // Batch 6: hard lockdown — non-admins are blocked entirely until lifted.
   if (!adminNow) {
     try {
-      const ld = (await storeCall(env, { op: "get", key: "lockdown" })).value;
+      const ld = await cachedDoGet(env, "lockdown", lockdownCache, null);
       if (ld?.on) { await registerPromise.catch(() => null); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: String(ld.msg || "🔒 البوت متوقف حاليًا بشكل كامل (Lockdown). سيعود قريبًا.").slice(0, 500) }); return; }
     } catch { /* lockdown unavailable — fall through */ }
   }
@@ -6168,7 +6226,7 @@ async function handleUpdate(update, env, ctx) {
   // Batch 6: verification gate — unverified users must press a button before searching.
   if (!adminNow && text && !text.startsWith("/")) {
     try {
-      const vg = (await storeCall(env, { op: "get", key: "verifygate" })).value;
+      const vg = await cachedDoGet(env, "verifygate", verifyGateCache, null);
       if (vg?.on) {
         const regUser = known ?? await getUser(env, userId);
         if (!regUser?.verified) {
@@ -6186,7 +6244,13 @@ async function handleUpdate(update, env, ctx) {
   }
   inBackground(ctx, maybeAlertUsage(env));
   // Scheduled admin messages are delivered on the first activity after their due time (no cron needed).
-  inBackground(ctx, adminExtras.processSchedules(env));
+  // Request budget: this used to read the schedule list from the DO on every
+  // single update; checking once a minute keeps delivery within a minute of the
+  // due time while removing one DO request from almost every update.
+  if (Date.now() - lastScheduleCheckAt > 60000) {
+    lastScheduleCheckAt = Date.now();
+    inBackground(ctx, adminExtras.processSchedules(env));
+  }
   // Auto jobs: scheduled maintenance, daily digest, auto backup, sync watcher (one check per minute).
   inBackground(ctx, adminExtras2.tick(env));
   inBackground(ctx, adminPro.tick(env));
@@ -6249,7 +6313,7 @@ async function handleUpdate(update, env, ctx) {
   if (isPrivate && text && !text.startsWith("/")) {
     if (isAdmin(env, userId) && await studio.handleText(env, message.chat.id, userId, text)) return;
     const chatMenus = await loadMenus(env);
-    const navId = await menuNavOf(env, userId);
+    const navId = await menuNavOf(env, userId, known);
     const isRootLabel = rootMenus(chatMenus).some((m) => String(m.title).trim() === text);
     if (navId || isRootLabel || (isAdmin(env, userId) && text === STUDIO_HOME_LABEL)) {
       const hit = resolveMenuLabel(chatMenus, text, { currentMenuId: navId, isAdmin: isAdmin(env, userId) });
@@ -7398,7 +7462,8 @@ async function handleHiddenUiCallback({ env, callback }) {
     }
   }
   const panel = hiddenUiPanel(await getHiddenUi(env, storeCall));
-  await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id }).catch(() => null);
+  // One acknowledgement per tap only: answering the same callback twice is
+  // rejected by Telegram, so the blank answer is not repeated here.
   await telegram(env, "editMessageText", {
     chat_id: chatId,
     message_id: callback.message.message_id,
