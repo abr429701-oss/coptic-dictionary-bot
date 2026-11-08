@@ -5698,6 +5698,7 @@ async function saveDictionaryNew(env, callback) {
 function adminMenuMarkup(page = "home") {
   const back = [{ text: "⬅️ الرئيسية", callback_data: "ad|page|home" }];
   if (page === "home") return { inline_keyboard: [
+    [{ text: "📋 كل الأوامر", callback_data: "ad|allcommands" }],
     [{ text: "📊 الإحصاءات", callback_data: "ad|page|stats" }, { text: "🎙 الأصوات", callback_data: "ad|page|voices" }],
     [{ text: "☁️ Drive وSheets", callback_data: "ad|page|drive" }, { text: "👥 المستخدمون", callback_data: "ad|page|users" }],
     [{ text: "📖 تعديل القاموس", callback_data: "ad|page|dictionary" }, { text: "⚙️ أدوات النظام", callback_data: "ad|page|tools" }],
@@ -5783,6 +5784,191 @@ async function adminDashboardText(env, page = "home") {
     tools: ["أدوات صيانة وتشخيص وإدارة البطاقات والأرشيف."],
   };
   return [`<b>${titles[page] ?? titles.home}</b>`, "", ...common, "", ...(extras[page] ?? extras.home)].join("\n");
+}
+// ---------------------------------------------------------------------------
+// القائمة الكاملة للأوامر في /admin
+// ADMIN_COMMANDS وحدها لا تشمل كل ما يفهمه البوت عند الكتابة: أوامر أدمن
+// كثيرة (مثل /broadcast و/errors و/importlearn) وأوامر مستخدمين (مثل
+// /quiz و/fav) تُنفَّذ من الـ dispatcher لكنها ليست في القائمة. القائمة
+// الكاملة هنا هي اتحاد القائمتين، بلا تكرار، وكل سطر فيها أمر يعمل فعلًا
+// عند كتابته. لو أُضيف أمر جديد للبوت ولم يظهر هنا، أضف سطره إلى
+// EXTRA_BOT_COMMANDS أدناه (أو إلى ADMIN_COMMANDS فيُضم تلقائيًا).
+const EXTRA_BOT_COMMANDS = [
+  // أوامر أدمن إضافية: منفَّذة في الـ dispatcher وليست في ADMIN_COMMANDS.
+  { command: "analytics", description: "تحليلات البحث وأكثر الكلمات بحثًا" },
+  { command: "apikey", description: "إدارة مفتاح API" },
+  { command: "auditlog", description: "سجل تدقيق تعديلات القاموس" },
+  { command: "autoreply", description: "ردود تلقائية" },
+  { command: "backup", description: "نسخة احتياطية من القاموس" },
+  { command: "ban", description: "حظر مستخدم" },
+  { command: "bccancel", description: "إلغاء البث الجاري" },
+  { command: "bcpause", description: "إيقاف البث مؤقتًا" },
+  { command: "bcresume", description: "استئناف البث" },
+  { command: "bcspeed", description: "تأخير الإرسال الجماعي بين كل مستخدم" },
+  { command: "blockedusers", description: "قائمة المحظورين" },
+  { command: "botinfo", description: "معلومات البوت" },
+  { command: "broadcast", description: "إرسال جماعي للمستخدمين" },
+  { command: "bulkadd", description: "إضافة عدة كلمات للقاموس دفعة واحدة" },
+  { command: "bulkedit", description: "تعديل عدة كلمات دفعة واحدة" },
+  { command: "cancel", description: "إلغاء العملية الجارية" },
+  { command: "card_hide", description: "إخفاء بطاقة كلمة" },
+  { command: "card_show", description: "إظهار بطاقة كلمة" },
+  { command: "configexport", description: "نسخة احتياطية للإعدادات JSON" },
+  { command: "dashboard", description: "لوحة تحكم الأدمن" },
+  { command: "deleteword", description: "حذف كلمة من القاموس" },
+  { command: "dictstats", description: "إحصائيات القاموس" },
+  { command: "drive", description: "حالة ربط Drive" },
+  { command: "duplicates", description: "كلمات مكررة" },
+  { command: "editwelcome", description: "تعديل رسالة الترحيب" },
+  { command: "errors", description: "سجل الأخطاء" },
+  { command: "export", description: "تصدير القاموس كملف JSON" },
+  { command: "exportanki", description: "تصدير المفضلة لبطاقات Anki" },
+  { command: "exportsearch", description: "تصدير سجل البحث" },
+  { command: "findempty", description: "خلايا فاضية في القاموس" },
+  { command: "gamify", description: "إعدادات النقاط والمكافآت" },
+  { command: "healthcheck", description: "فحص شامل لصحة البوت" },
+  { command: "hiddencards", description: "البطاقات المخفية" },
+  { command: "importlearn", description: "استيراد دروس التعلم من الشيت" },
+  { command: "importsheet", description: "استيراد المعرّفات من ورقة Google" },
+  { command: "importusers", description: "استيراد قائمة معرّفات مستخدمين" },
+  { command: "liveusers", description: "المستخدمون النشطون حاليًا" },
+  { command: "maintenance", description: "وضع الصيانة" },
+  { command: "motd", description: "رسالة اليوم" },
+  { command: "nopronounce", description: "كلمات بدون نطق" },
+  { command: "optout", description: "إحصاء خيار الخروج من البث" },
+  { command: "optoutstats", description: "تفاصيل إحصاءات الخروج من البث" },
+  { command: "pin", description: "تثبيت رسالة" },
+  { command: "pinhere", description: "تثبيت الرسالة المردود عليها" },
+  { command: "purge", description: "حذف المستخدمين الخاملين" },
+  { command: "ratelimit", description: "حد معدل الطلبات" },
+  { command: "record", description: "تسجيل نطق كلمة جديدة" },
+  { command: "record_choose", description: "اختيار كلمة للتسجيل" },
+  { command: "record_select", description: "اختيار كلمة للتسجيل" },
+  { command: "record_stop", description: "إيقاف التسجيل" },
+  { command: "record_voice", description: "بدء تسجيل صوتي" },
+  { command: "recover", description: "استرجاع مستخدمي الصيانة" },
+  { command: "recoverusers", description: "استرجاع مستخدمي فترة الصيانة" },
+  { command: "reply", description: "الرد على رسالة تواصل" },
+  { command: "resetstats", description: "تصفير الإحصاءات" },
+  { command: "resetuser", description: "تصفير مستخدم" },
+  { command: "resetwarns", description: "تصفير تحذيرات مستخدم" },
+  { command: "resetwelcome", description: "إعادة نص الترحيب إلى الأصلي" },
+  { command: "resync", description: "إعادة المزامنة" },
+  { command: "rules", description: "قواعد البوت" },
+  { command: "searchcount", description: "عدد مرات البحث عن كلمة" },
+  { command: "searchlimit", description: "حد البحث اليومي" },
+  { command: "setarchive", description: "ضبط مجموعة الأرشيف" },
+  { command: "setbanmsg", description: "رسالة الحظر" },
+  { command: "setbotabout", description: "ضبط وصف البوت" },
+  { command: "setbotdescription", description: "ضبط وصف البوت الطويل" },
+  { command: "setbotname", description: "ضبط اسم البوت" },
+  { command: "setcommands", description: "تحديث قائمة الأوامر في تيليجرام" },
+  { command: "setdrive", description: "ضبط رابط Apps Script" },
+  { command: "setmaintmsg", description: "رسالة الصيانة" },
+  { command: "setmenubutton", description: "ضبط زر قائمة البوت" },
+  { command: "setwodtest", description: "تجربة إرسال كلمة اليوم" },
+  { command: "showbutton", description: "إظهار زر أو أمر مخفي" },
+  { command: "startbroadcast", description: "بدء إرسال جماعي" },
+  { command: "stopbroadcast", description: "إيقاف الإرسال الجماعي" },
+  { command: "suggest", description: "اقتراح كلمة جديدة" },
+  { command: "suggestions", description: "اقتراحات الكلمات" },
+  { command: "syncall", description: "مزامنة جميع المستخدمين للشيت" },
+  { command: "synccancel", description: "إلغاء المزامنة الجارية" },
+  { command: "syncdrive", description: "مزامنة الأصوات مع Drive" },
+  { command: "syncreset", description: "تصفير مؤشر المزامنة" },
+  { command: "syncusers", description: "مزامنة المستخدمين مع الشيت" },
+  { command: "tempban", description: "حظر مؤقت" },
+  { command: "testbroadcast", description: "إرسال تجريبي" },
+  { command: "tplsave", description: "حفظ قالب بث" },
+  { command: "tplsend", description: "إرسال قالب بث" },
+  { command: "unban", description: "فك حظر مستخدم" },
+  { command: "unhideall", description: "إظهار كل البطاقات المخفية" },
+  { command: "unpin", description: "فك كل الرسائل المثبتة" },
+  { command: "uploadaudio", description: "رفع ملف صوتي" },
+  { command: "usage", description: "تقرير استخدام البوت اليومي" },
+  { command: "usagealert", description: "تنبيه استخدام" },
+  { command: "userfind", description: "البحث عن مستخدم بالاسم" },
+  { command: "userhistory", description: "سجل بحث مستخدم" },
+  { command: "userinfo", description: "معلومات مستخدم" },
+  { command: "users", description: "قائمة المستخدمين" },
+  { command: "voice_delete", description: "حذف تسجيل صوتي" },
+  { command: "voice_delete_all", description: "حذف كل التسجيلات الصوتية" },
+  { command: "voice_delete_many", description: "حذف مجموعة تسجيلات صوتية" },
+  { command: "voiceoff", description: "إيقاف الصوت" },
+  { command: "voiceon", description: "تشغيل الصوت" },
+  { command: "voiceonce", description: "تشغيل الصوت مرة واحدة" },
+  { command: "voicesettings", description: "إعدادات الصوت" },
+  { command: "voicethree", description: "تشغيل الصوت ثلاث مرات" },
+  { command: "warn", description: "تحذير مستخدم" },
+  { command: "warns", description: "تحذيرات مستخدم" },
+  { command: "wordinfo", description: "كل حقول الكلمة" },
+  // أوامر مستخدمين إضافية: منفَّذة لكنها ليست في ADMIN_COMMANDS.
+  { command: "alias", description: "اختصار بحث فوري" },
+  { command: "dailyquiz", description: "اختبار اليوم" },
+  { command: "fav", description: "حفظ آخر كلمة بحثت عنها" },
+  { command: "flashcards", description: "بطاقات تعليمية من المفضلة" },
+  { command: "help", description: "عرض الأوامر والمساعدة" },
+  { command: "k", description: "لوحة مفاتيح قبطية (اختصار)" },
+  { command: "kbd", description: "لوحة مفاتيح قبطية (اختصار)" },
+  { command: "lang", description: "تغيير لغة الواجهة" },
+  { command: "myfav", description: "كلماتك المفضلة" },
+  { command: "mystats", description: "إحصاءاتك ونقاطك" },
+  { command: "points", description: "منح أو خصم نقاط" },
+  { command: "preview", description: "معاينة كلمة أو رسالة قبل النشر" },
+  { command: "quiz", description: "اختبار قصير" },
+  { command: "recent", description: "آخر الكلمات التي بحثت عنها" },
+  { command: "hangman", description: "لعبة الشنق" },
+  { command: "pronounce", description: "نطق الكلمة" },
+  { command: "streak", description: "سلسلة أيام التعلم" },
+  { command: "wod", description: "كلمة اليوم" },
+  // من حزمة المستخدمين الاحترافية (pro-user2).
+  { command: "subscribe", description: "الاشتراك في كلمة اليوم" },
+  { command: "unsubscribe", description: "إلغاء الاشتراك في كلمة اليوم" },
+  { command: "study", description: "مراجعة البطاقات التعليمية" },
+  { command: "daily", description: "كلمة اليوم" },
+  { command: "compare", description: "مقارنة كلمتين" },
+  { command: "examples", description: "أمثلة على استخدام كلمة" },
+  { command: "wordoftheday", description: "كلمة اليوم" },
+  { command: "quiz2", description: "اختبار متقدم" },
+  { command: "exportmydata", description: "تصدير بياناتي" },
+  { command: "donate", description: "التبرع لدعم البوت" },
+  { command: "about", description: "عن البوت" },
+  { command: "clearhistory", description: "مسح سجل بحثي" },
+  { command: "favorites", description: "كلماتي المفضلة" },
+  { command: "mywords", description: "كلماتي المحفوظة" },
+  { command: "removefav", description: "حذف كلمة من المفضلة" },
+  { command: "contribute", description: "المساهمة بكلمة جديدة" },
+  { command: "suggestword", description: "اقتراح كلمة جديدة" },
+  { command: "invite", description: "دعوة صديق" },
+  { command: "feedback", description: "إرسال ملاحظات" },
+  { command: "bug", description: "الإبلاغ عن خطأ" },
+  { command: "quizstats", description: "إحصاءات اختباراتي" },
+  { command: "notify", description: "إعدادات الإشعارات" },
+];
+// كل أوامر البوت بلا تكرار: ADMIN_COMMANDS أولًا (بترتيبها)، ثم الإضافيات.
+function allBotCommands() {
+  const seen = new Set();
+  const out = [];
+  for (const entry of [...ADMIN_COMMANDS, ...EXTRA_BOT_COMMANDS]) {
+    const name = String(entry?.command ?? "").trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push({ command: name, description: String(entry?.description ?? "") });
+  }
+  return out;
+}
+async function sendAllAdminCommands(env, chatId) {
+  const list = allBotCommands();
+  const lines = list.map((c) => `/${escapeHtml(c.command)} — ${escapeHtml(c.description)}`);
+  const header = `📋 <b>كل أوامر البوت (${list.length})</b>\nاضغط على أي أمر لكتبه في حقل الرسالة، ثم أرسله (ولو يحتاج إضافات اكتبها بعده). القائمة كاملة — حتى الأوامر المخفية عن المستخدمين.`;
+  const chunks = [];
+  let chunk = header;
+  for (const line of lines) {
+    if ((chunk + "\n" + line).length > 3500) { chunks.push(chunk); chunk = ""; }
+    chunk += (chunk ? "\n" : "") + line;
+  }
+  if (chunk) chunks.push(chunk);
+  for (const text of chunks) await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true });
 }
 async function sendAdminDashboard(env, chatId, messageId = undefined, page = "home") {
   const payload = { chat_id: chatId, text: await adminDashboardText(env, page), parse_mode: "HTML", reply_markup: adminMenuMarkup(page) };
@@ -6028,6 +6214,7 @@ async function handleAdminDashboardCallback(env, callback, ctx) {
   if (action === "broadcast") { await beginBroadcast(env, chatId, callback.from.id, await getUser(env, callback.from.id) ?? {}); return; }
   if (action === "bcstatus") { await sendBroadcastStatus(env, chatId); return; }
   if (action === "commands") { commandMenuReady.delete("admin"); await ensureCommandMenu(env, callback.from.id); await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ تم تحديث قائمة أوامر الأدمن في Telegram." }); return; }
+  if (action === "allcommands") { await sendAllAdminCommands(env, chatId); return; }
   if (action === "clearflow") { await clearAdminFlow(env, callback.from.id); await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ تم مسح أي جلسة إدخال معلّقة." }); return; }
   if (action === "usage") { await sendUsageReport(env, chatId); return; }
   if (action === "botinfo") { await sendBotInfo(env, chatId); return; }
