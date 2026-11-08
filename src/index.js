@@ -1748,6 +1748,9 @@ const ADMIN_COMMANDS = [
   { command: "integrity", description: "فحص سلامة القاموس" },
   { command: "topusers", description: "الأكثر نشاطًا" },
   { command: "livesearch", description: "عمليات البحث المباشرة" },
+  { command: "livemon", description: "المراقبة المباشرة: تشغيل/إيقاف" },
+  { command: "conversations", description: "المحادثات الأخيرة للمستخدمين" },
+  { command: "userchat", description: "محادثة مستخدم: /userchat <id>" },
   { command: "adminaudit", description: "سجل إجراءات الأدمن" },
   { command: "slowmode", description: "الوضع البطيء العام" },
   { command: "clearcache", description: "مسح كل الكاش" },
@@ -3396,6 +3399,7 @@ function buildCommandsHelpText(env, userId) {
     lines.push("/msg &lt;id&gt; &lt;نص&gt; — رسالة مباشرة لمستخدم | /topusers — الأكثر نشاطًا");
     lines.push("/integrity — فحص سلامة القاموس | /nopronounce — كلمات بدون نطق | /noaudio — كلمات بدون صوت");
     lines.push("/findempty &lt;حقل&gt; — خلايا فاضية | /livesearch — بحث مباشر | /hourly — توزيع الساعات");
+    lines.push("/livemon — المراقبة المباشرة (تشغيل/إيقاف) | /conversations — المحادثات الأخيرة | /userchat &lt;id&gt; — محادثة مستخدم");
     lines.push("/adminaudit — سجل إجراءات الأدمن | /exportsearch — تصدير سجل البحث | /resetstats — تصفير الإحصاءات");
     lines.push("/setbanmsg &lt;نص&gt; — رسالة الحظر | /setmaintmsg &lt;نص&gt; — رسالة الصيانة");
     lines.push("/slowmode on|off|&lt;ثواني&gt; — الوضع البطيء | /clearcache — مسح الكاش");
@@ -4333,6 +4337,26 @@ async function setMaintenance(env, on) {
   invalidateCache(maintCache);
 }
 
+// ---- Live monitor toggle (admin only) ----
+const liveMonCache = { value: null, at: 0 };
+async function liveMonitorOn(env) { return Boolean(await cachedDoGet(env, "livemon:enabled", liveMonCache, false)); }
+async function setLiveMonitor(env, on) {
+  if (env.USERS) await storeCall(env, { op: "put", key: "livemon:enabled", value: Boolean(on) });
+  invalidateCache(liveMonCache);
+}
+// Forward one incoming user message to every admin, live, with a
+// quick-reply button (plugs into the existing replyto flow).
+async function forwardLiveMessage(env, message, userId, name) {
+  const label = convLabelFor(message);
+  if (!label) return;
+  const when = new Date().toLocaleTimeString("en-GB");
+  const who = `🔴 <b>${escapeHtml(String(name ?? "بدون اسم"))}</b> (<code>${escapeHtml(String(userId))}</code>) • ${when}`;
+  const body = label.text ? `${who}\n${escapeHtml(label.text.slice(0, 1000))}` : `${who}\n${convKindLabel(label.kind)}`;
+  for (const adminId of adminIds(env)) {
+    await telegram(env, "sendMessage", { chat_id: Number(adminId), text: body, parse_mode: "HTML", reply_markup: { inline_keyboard: [[{ text: "↩️ رد سريع", callback_data: `replyto|${userId}` }]] } }).catch(() => null);
+  }
+}
+
 // ---- Editable welcome caption ----
 const DEFAULT_WELCOME_CAPTION = (name) => `مرحبًا بك ${escapeHtml(name)}، في القاموس القبطي الناطق، تفضل الان بكتابة أي كلمة للبحث عنها.`;
 async function getWelcomeCaption(env, name) {
@@ -4444,6 +4468,90 @@ async function getUserHistory(env, userId) {
   const key = String(userId);
   const persisted = env.USERS ? (((await storeCall(env, { op: "get", key: "history:snapshot" })).value ?? {})[key] ?? []) : [];
   return [...persisted, ...(userHistory.get(key) ?? [])].slice(-20).reverse();
+}
+
+// ---- Live monitor: full per-user conversation log (admin only) ----
+// Same batched pattern as userHistory: the log lives in memory per user
+// and is flushed to the Durable Object in the background, so logging a
+// message costs no extra Worker request and no DO write on the hot path.
+// Only incoming private messages from non-admins are logged (text,
+// commands, media + captions); the bot's own replies are not stored —
+// they are deterministic answers to the logged message. Live forwarding
+// is a separate toggle (/livemon).
+const CONV_MAX_PER_USER = 100;
+const CONV_MAX_USERS = 2000;
+const CONV_ACTIVE_MAX = 200;
+const convLog = new Map(); // userId -> [{ at, kind, text }]
+const convActive = new Map(); // userId -> { name, at, count }
+function convKindLabel(kind) {
+  return {
+    text: "",
+    photo: "📷 صورة",
+    video: "🎬 فيديو",
+    voice: "🎤 رسالة صوتية",
+    audio: "🎵 ملف صوتي",
+    file: "📎 ملف",
+    sticker: "😀 ملصق",
+    location: "📍 موقع",
+    contact: "👤 جهة اتصال",
+    media: "📎 وسائط",
+  }[kind] ?? "📎 وسائط";
+}
+function convLabelFor(message) {
+  if (message?.text) return { kind: "text", text: String(message.text) };
+  if (message?.caption) return { kind: "media", text: String(message.caption) };
+  if (message?.photo) return { kind: "photo", text: "" };
+  if (message?.video) return { kind: "video", text: "" };
+  if (message?.voice) return { kind: "voice", text: "" };
+  if (message?.audio) return { kind: "audio", text: "" };
+  if (message?.document) return { kind: "file", text: "" };
+  if (message?.sticker) return { kind: "sticker", text: String(message.sticker?.emoji ?? "") };
+  if (message?.location) return { kind: "location", text: "" };
+  if (message?.contact) return { kind: "contact", text: "" };
+  return null;
+}
+function trackConvMessage(userId, name, message) {
+  const label = convLabelFor(message);
+  if (!label) return;
+  const key = String(userId);
+  const arr = convLog.get(key) ?? [];
+  arr.push({ at: new Date().toISOString(), kind: label.kind, text: label.text.slice(0, 500) });
+  if (arr.length > CONV_MAX_PER_USER) arr.splice(0, arr.length - CONV_MAX_PER_USER);
+  convLog.set(key, arr);
+  convActive.set(key, { name: String(name ?? "").slice(0, 40), at: Date.now(), count: (convActive.get(key)?.count ?? 0) + 1 });
+  if (convLog.size > CONV_MAX_USERS) { const first = convLog.keys().next().value; if (first) { convLog.delete(first); convActive.delete(first); } }
+}
+async function flushConvLog(env) {
+  if (!env.USERS || !convLog.size) return;
+  const pending = new Map(convLog);
+  const pendingActive = new Map(convActive);
+  convLog.clear();
+  convActive.clear();
+  try {
+    for (const [userId, arr] of pending) {
+      const key = `conv:${userId}`;
+      const previous = (await storeCall(env, { op: "get", key })).value ?? [];
+      await storeCall(env, { op: "put", key, value: [...previous, ...arr].slice(-CONV_MAX_PER_USER) });
+    }
+    const activeKey = "conv:active";
+    const previousActive = (await storeCall(env, { op: "get", key: activeKey })).value ?? {};
+    for (const [userId, info] of pendingActive) {
+      previousActive[userId] = { name: info.name, at: new Date(info.at).toISOString(), count: (previousActive[userId]?.count ?? 0) + info.count };
+    }
+    const sorted = Object.entries(previousActive).sort((a, b) => new Date(b[1].at) - new Date(a[1].at)).slice(0, CONV_ACTIVE_MAX);
+    await storeCall(env, { op: "put", key: activeKey, value: Object.fromEntries(sorted) });
+  } catch {}
+}
+async function getUserConv(env, userId) {
+  const key = String(userId);
+  const persisted = env.USERS ? ((await storeCall(env, { op: "get", key: `conv:${key}` })).value ?? []) : [];
+  return [...persisted, ...(convLog.get(key) ?? [])].slice(-CONV_MAX_PER_USER);
+}
+async function getActiveConvUsers(env) {
+  const persisted = env.USERS ? ((await storeCall(env, { op: "get", key: "conv:active" })).value ?? {}) : {};
+  const merged = { ...persisted };
+  for (const [id, info] of convActive) merged[id] = { name: info.name, at: new Date(info.at).toISOString(), count: (merged[id]?.count ?? 0) + info.count };
+  return Object.entries(merged).map(([id, v]) => ({ id, name: v.name, at: v.at, count: v.count })).sort((a, b) => new Date(b.at) - new Date(a.at));
 }
 
 // ---- Word suggestion box (public /suggest, admin approve/reject) ----
@@ -4910,6 +5018,33 @@ async function sendFindEmptyReport(env, chatId, fieldArg, limit = 30) {
 async function sendLiveSearchesReport(env, chatId) {
   if (!recentSearches.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: "📭 لا توجد عمليات بحث في الجلسة الحالية." }); return; }
   const lines = ["🔴 <b>آخر عمليات البحث المباشرة</b>", "", ...recentSearches.slice(-20).reverse().map((s) => `• [${new Date(s.at).toLocaleTimeString("en-GB")}] <code>${escapeHtml(s.userId)}</code> ${escapeHtml(s.name ? `(${s.name})` : "")}: ${escapeHtml(s.query)}`)];
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
+}
+async function toggleLiveMonitor(env, chatId) {
+  const on = !(await liveMonitorOn(env));
+  await setLiveMonitor(env, on);
+  await logAdminAction(env, chatId, "livemon", on ? "on" : "off");
+  await telegram(env, "sendMessage", { chat_id: chatId, text: on ? "🔴 تم تشغيل المراقبة المباشرة — ستصلك رسائل المستخدمين فور وصولها، مع زر «↩️ رد سريع» للرد عليهم مباشرة. أوقفها بـ /livemon." : "⚪ تم إيقاف المراقبة المباشرة — لن تصلك رسائل المستخدمين لحظيًا. المحادثات تظل محفوظة وتُراجَع بـ /conversations و /userchat." });
+}
+async function sendConversationsReport(env, chatId) {
+  const users = await getActiveConvUsers(env);
+  if (!users.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: "📭 لا توجد محادثات محفوظة بعد — تظهر هنا بعد أول رسالة من أي مستخدم." }); return; }
+  const lines = ["👥 <b>المحادثات الأخيرة</b> (الأحدث أولًا)", "", ...users.slice(0, 20).map((u) => `• <b>${escapeHtml(u.name || "بدون اسم")}</b> (<code>${escapeHtml(u.id)}</code>) — ${u.count} رسالة، آخرها ${new Date(u.at).toLocaleString("en-GB")}`), "", "لعرض محادثة كاملة: /userchat <id>"];
+  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
+}
+async function sendUserChatReport(env, chatId, arg) {
+  const id = String(arg ?? "").split(/\s+/u)[0] ?? "";
+  if (!/^\d+$/u.test(id)) { await telegram(env, "sendMessage", { chat_id: chatId, text: "✏️ الاستخدام: /userchat <id>\nمثال: /userchat 123456789" }); return; }
+  const entries = await getUserConv(env, id);
+  if (!entries.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: `📭 لا توجد رسائل محفوظة للمستخدم <code>${escapeHtml(id)}</code> بعد.`, parse_mode: "HTML" }); return; }
+  const user = await getUser(env, id).catch(() => null);
+  const name = user?.name || "";
+  const lines = [`💬 <b>محادثة ${escapeHtml(name)}</b> (<code>${escapeHtml(id)}</code>) — آخر ${entries.length} رسالة`, ""];
+  for (const e of entries.slice(-30)) {
+    const time = new Date(e.at).toLocaleTimeString("en-GB");
+    const label = e.kind === "text" ? escapeHtml(e.text) : `${convKindLabel(e.kind)}${e.text ? ` ${escapeHtml(e.text)}` : ""}`;
+    lines.push(`[${time}] ${label}`);
+  }
   await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
 }
 async function sendAdminAuditReport(env, chatId) {
@@ -6187,6 +6322,14 @@ async function handleUpdate(update, env, ctx) {
   inBackground(ctx, refreshExtraAdmins(env));
   inBackground(ctx, flushErrorLog(env));
   inBackground(ctx, flushUserHistory(env));
+  // Live monitor: log every incoming private message from a non-admin
+  // (text, commands, media + captions) and, when the live toggle is on,
+  // forward it to the admins as it arrives, with a quick-reply button.
+  if (isPrivate && !isAdmin(env, userId)) {
+    trackConvMessage(userId, displayName(message.from), message);
+    inBackground(ctx, flushConvLog(env));
+    if (await liveMonitorOn(env)) inBackground(ctx, forwardLiveMessage(env, message, userId, displayName(message.from)));
+  }
   if (text && !text.startsWith("/")) trackSearchHistory(userId, text);
   if (text && !text.startsWith("/")) pushRecentSearch(userId, displayName(message.from), text);
   if (text && !text.startsWith("/") && await gamifyOn(env)) { trackGamify(userId, displayName(message.from)); inBackground(ctx, flushGamify(env)); }
@@ -6978,6 +7121,9 @@ async function handleUpdate(update, env, ctx) {
     if (text === "/noaudio" || text.startsWith("/noaudio")) { await sendMissingAudioReport(env, message.chat.id, Number(text.split(/\s+/u)[1]) || 30); return; }
     if (text === "/findempty" || text.startsWith("/findempty ")) { await sendFindEmptyReport(env, message.chat.id, text.slice("/findempty".length).trim()); return; }
     if (text === "/livesearch") { await sendLiveSearchesReport(env, message.chat.id); return; }
+    if (text === "/livemon") { await toggleLiveMonitor(env, message.chat.id); return; }
+    if (text === "/conversations" || text === "/liveusers") { await sendConversationsReport(env, message.chat.id); return; }
+    if (text === "/userchat" || text.startsWith("/userchat ")) { await sendUserChatReport(env, message.chat.id, text.slice("/userchat".length).trim()); return; }
     if (text === "/exportsearch") { await exportSearchHistoryCsv(env, message.chat.id); return; }
     if (text === "/resetstats") { await resetAnalyticsData(env, message.chat.id); await logAdminAction(env, userId, "resetstats"); return; }
     if (text === "/adminaudit") { await sendAdminAuditReport(env, message.chat.id); return; }
