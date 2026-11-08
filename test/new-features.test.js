@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import worker, { UserStore } from "../src/index.js";
 import records from "../data/dictionary.json" with { type: "json" };
+import { shareTextForRecord, sharePlainTextForRecord, shareButtonText, shareKeyboardForRecord, meaningInLanguage } from "../src/new-features.js";
 const token = "test-token";
 const secret = "test-secret-should-be-long-enough";
 const testRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -109,6 +110,72 @@ test("v2: search result carries a share button after the next-meaning row", asyn
   assert.ok(msg, "result message was sent");
   const rows = msg.reply_markup?.inline_keyboard ?? [];
   assert.ok(rows.some((r) => r.some((b) => String(b.text ?? "").includes("مشاركة"))), "share button present");
+});
+
+// Sharing follows the search language: button, text and meaning in en/fr/de,
+// Arabic otherwise; a missing translation falls back to the Arabic meaning.
+const SHARE_RECORD = { id: 5, coptic: "ⲁⲟⲩⲱⲛ", meaning: "فَتَحَ، انفتَحَ", english: "open, open up", translation_fr: "ouvrir, s’ouvrir", translation_de: "öffnen, sich öffnen" };
+const SHARE_ENV = { BOT_USERNAME: "Coptic_Dictionary_bot" };
+
+test("v2: sharing shows the meaning in the searched language, not Arabic only", () => {
+  assert.equal(meaningInLanguage(SHARE_RECORD, "en"), "open");
+  assert.equal(meaningInLanguage(SHARE_RECORD, "fr"), "ouvrir");
+  assert.equal(meaningInLanguage(SHARE_RECORD, "de"), "öffnen");
+  assert.equal(meaningInLanguage(SHARE_RECORD, "ar"), "فَتَحَ");
+  assert.equal(meaningInLanguage(SHARE_RECORD, "cop"), "فَتَحَ");
+  assert.equal(meaningInLanguage({ ...SHARE_RECORD, translation_de: "" }, "de"), "فَتَحَ");
+  assert.equal(shareButtonText("en"), "🔗 Share word");
+  assert.equal(shareButtonText("fr"), "🔗 Partager le mot");
+  assert.equal(shareButtonText("de"), "🔗 Wort teilen");
+  assert.equal(shareButtonText("ar"), "🔗 مشاركة الكلمة");
+  assert.equal(shareButtonText("cop"), "🔗 مشاركة الكلمة");
+  const en = shareTextForRecord(SHARE_ENV, SHARE_RECORD, "en");
+  assert.match(en, /open/u);
+  assert.match(en, /Share the word:/u);
+  assert.doesNotMatch(en, /فَتَحَ/u);
+  const fr = shareTextForRecord(SHARE_ENV, SHARE_RECORD, "fr");
+  assert.match(fr, /ouvrir/u);
+  assert.match(fr, /Partager le mot :/u);
+  const de = shareTextForRecord(SHARE_ENV, SHARE_RECORD, "de");
+  assert.match(de, /öffnen/u);
+  assert.match(de, /Wort teilen:/u);
+  const ar = shareTextForRecord(SHARE_ENV, SHARE_RECORD, "ar");
+  assert.match(ar, /فَتَحَ/u);
+  assert.match(ar, /شارك الكلمة:/u);
+  const plain = sharePlainTextForRecord(SHARE_ENV, SHARE_RECORD, "en");
+  assert.match(plain, /open/u);
+  assert.doesNotMatch(plain, /</u);
+  const kb = shareKeyboardForRecord(SHARE_ENV, SHARE_RECORD, "fr");
+  assert.equal(kb.inline_keyboard[0][0].text, "🔗 Partager le mot");
+  assert.match(decodeURIComponent(kb.inline_keyboard[0][0].url), /ouvrir/u);
+});
+
+test("v2: search in English/French/German shows the share button in that language", async () => {
+  const cases = [
+    ["open", "🔗 Share word"],
+    ["ouvrir", "🔗 Partager le mot"],
+    ["öffnen", "🔗 Wort teilen"],
+  ];
+  let userId = 40;
+  for (const [query, label] of cases) {
+    const kvEnv = { ...env, USERS: fakeKv() };
+    kvEnv.USERS.store.set(`user:${userId}`, { name: "مينا", registeredAt: nowIso(), firstSeen: nowIso(), lastSeen: nowIso() });
+    const calls = await say(kvEnv, userId, query);
+    const buttons = sent(calls).flatMap((p) => p.reply_markup?.inline_keyboard ?? []).flat();
+    assert.ok(buttons.some((b) => b.text === label), `"${query}" must show the ${label} button`);
+    assert.ok(!buttons.some((b) => b.text === "🔗 مشاركة الكلمة"), `"${query}" must not show the Arabic share button`);
+    userId += 1;
+  }
+});
+
+test("v2: nf|share sends the word in the callback language, old form stays Arabic", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  kvEnv.USERS.store.set("user:44", { name: "مينا", registeredAt: nowIso(), firstSeen: nowIso(), lastSeen: nowIso() });
+  let cb = await sendCallback(kvEnv, 44, "nf|share|5|en");
+  assert.match(sent(cb)[0].text, /open/u);
+  assert.match(sent(cb)[0].text, /Share the word:/u);
+  cb = await sendCallback(kvEnv, 44, "nf|share|5");
+  assert.match(sent(cb)[0].text, /فَتَحَ/u);
 });
 
 test("v2: /help shows sections and language buttons", async () => {

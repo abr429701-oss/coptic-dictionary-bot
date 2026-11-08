@@ -54,24 +54,69 @@ function distinctOptions(correctLabel, pickLabel, maxTries = 60) {
 // ---------------------------------------------------------------------------
 // 1) Word sharing: /start word_<id> deep link
 // ---------------------------------------------------------------------------
+// Sharing follows the language the user searched in (ar/en/fr/de): the
+// button label, the shared text and the meaning shown are all in that
+// language; anything else (Coptic/Greek/unknown) falls back to Arabic.
+export const SHARE_LANGUAGES = ["ar", "en", "fr", "de"];
+export function shareLanguage(language) {
+  return SHARE_LANGUAGES.includes(language) ? language : "ar";
+}
+const SHARE_BUTTON_TEXT = {
+  ar: "🔗 مشاركة الكلمة",
+  en: "🔗 Share word",
+  fr: "🔗 Partager le mot",
+  de: "🔗 Wort teilen",
+};
+export function shareButtonText(language) {
+  return SHARE_BUTTON_TEXT[shareLanguage(language)];
+}
+const SHARE_LINE = {
+  ar: "🔗 شارك الكلمة:",
+  en: "🔗 Share the word:",
+  fr: "🔗 Partager le mot :",
+  de: "🔗 Wort teilen:",
+};
+const SHARE_SETUP_NOTE = {
+  ar: "فعّل BOT_USERNAME في إعدادات البوت ليظهر رابط t.me",
+  en: "set BOT_USERNAME in the bot settings to show a t.me link",
+  fr: "définissez BOT_USERNAME dans les paramètres du bot pour afficher un lien t.me",
+  de: "legen Sie BOT_USERNAME in den Bot-Einstellungen fest, um einen t.me-Link anzuzeigen",
+};
+// First meaning of the record in the given language (Arabic field `meaning`,
+// English `english`, French `translation_fr`, German `translation_de`);
+// falls back to the Arabic meaning when that language has none.
+const MEANING_FIELDS = { en: "english", fr: "translation_fr", de: "translation_de" };
+export function meaningInLanguage(record, language) {
+  const lang = shareLanguage(language);
+  const field = MEANING_FIELDS[lang];
+  const value = field ? splitMeaning(record?.[field] ?? "")[0] : "";
+  return value || firstMeaning(record);
+}
 export function deepLink(env, id) {
   const username = String(env?.BOT_USERNAME ?? "").replace(/^@/u, "").trim();
   if (!username || id == null) return null;
   return `https://t.me/${username}?start=word_${id}`;
 }
-export function shareTextForRecord(env, record) {
+export function shareTextForRecord(env, record, language = "ar") {
   if (!record) return "";
+  const lang = shareLanguage(language);
   const link = deepLink(env, record.id);
-  const line = `📖 <b>${escapeHtml(String(record.coptic ?? "").slice(0, 60))}</b> — ${escapeHtml(firstMeaning(record).slice(0, 80))}`;
-  if (link) return `${line}\n\n🔗 شارك الكلمة: ${link}`;
+  const line = `📖 <b>${escapeHtml(String(record.coptic ?? "").slice(0, 60))}</b> — ${escapeHtml(meaningInLanguage(record, lang).slice(0, 80))}`;
+  if (link) return `${line}\n\n${SHARE_LINE[lang]} ${link}`;
   // No BOT_USERNAME configured yet: the deep link cannot be built, so share the
   // in-bot form instead and tell the admin what to set (see report).
-  return `${line}\n\n🔗 لمشاركة الكلمة: /start word_${record.id} (فعّل BOT_USERNAME في إعدادات البوت ليظهر رابط t.me)`;
+  return `${line}\n\n${SHARE_LINE[lang]} /start word_${record.id} (${SHARE_SETUP_NOTE[lang]})`;
 }
-export function shareKeyboardForRecord(env, record) {
+// Plain-text version for t.me/share/url (no HTML — the share text is sent as-is).
+export function sharePlainTextForRecord(env, record, language = "ar") {
+  if (!record) return "";
+  const lang = shareLanguage(language);
+  return `📖 ${String(record.coptic ?? "").slice(0, 60)} — ${meaningInLanguage(record, lang).slice(0, 80)}`;
+}
+export function shareKeyboardForRecord(env, record, language = "ar") {
   const link = deepLink(env, record?.id);
   if (!link) return null;
-  return { inline_keyboard: [[{ text: "🔗 مشاركة الكلمة", url: `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(String(record?.coptic ?? ""))}` }]] };
+  return { inline_keyboard: [[{ text: shareButtonText(language), url: `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(sharePlainTextForRecord(env, record, language))}` }]] };
 }
 
 // ---------------------------------------------------------------------------

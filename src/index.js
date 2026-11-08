@@ -321,7 +321,7 @@ async function handleNewFeaturesCallback(env, callback) {
   if (action === "share") {
     const record = recordById(Number(parts[2]));
     if (!record) { await answer({ text: "الكلمة غير موجودة.", show_alert: true }); return; }
-    await telegram(env, "sendMessage", { chat_id: chatId, text: shareTextForRecord(env, record), parse_mode: "HTML" });
+    await telegram(env, "sendMessage", { chat_id: chatId, text: shareTextForRecord(env, record, parts[3] || "ar"), parse_mode: "HTML" });
     return;
   }
   if (action === "menu") return sendRootMenus(env, chatId, userId);
@@ -712,12 +712,15 @@ const FLASH_TTL_MS = 15 * 60000;
 // Share button appended as an extra row to a result's existing "more" markup
 // (moreMeaning shape: {reply_markup:{inline_keyboard}}), so the existing
 // send/edit paths carry it unchanged and the "next meaning" button stays first.
-function withShareButton(env, record, more) {
+// The button and the shared text follow the language the user searched in;
+// anything but ar/en/fr/de falls back to Arabic (see shareLanguage).
+function withShareButton(env, record, more, language = "ar") {
   if (!record?.id) return more;
+  const lang = shareLanguage(language);
   const link = deepLink(env, record.id);
   const btn = link
-    ? { text: "🔗 مشاركة الكلمة", url: `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(String(record.coptic ?? ""))}` }
-    : { text: "🔗 مشاركة الكلمة", callback_data: `nf|share|${record.id}` };
+    ? { text: shareButtonText(lang), url: `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(sharePlainTextForRecord(env, record, lang))}` }
+    : { text: shareButtonText(lang), callback_data: `nf|share|${record.id}|${lang}` };
   // moreMeaning returns {reply_markup:{inline_keyboard}} — append the share row
   // AFTER the existing rows (blank terminal button / "next meaning"), never replace them.
   const rows = [...((more?.reply_markup?.inline_keyboard) ?? [])];
@@ -1044,7 +1047,7 @@ function lazy(build) {
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
 import { audioUrl, audioVersion, fetchHumanSpeech, fetchPrebuiltSpeech, isSingleWordOgg, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 import { copticDateNow, alphabetText, letterStatsText, longestText, originsText, wordCountText, startsWithText, similarText, translateText, vocabText, startGuess, handleGuessReply } from "./features.js";
-import { deepLink, shareTextForRecord, pickQuizV2Question, dailyQuizType, pickFlashcard, updateFlashcard, suggestSimilar, helpText, retentionText, opsText, recordById } from "./new-features.js";
+import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, pickQuizV2Question, dailyQuizType, pickFlashcard, updateFlashcard, suggestSimilar, helpText, retentionText, opsText, recordById } from "./new-features.js";
 import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VIDEO_MENU_ID, cleanMenuTitle, cleanMenuText, cleanButtonLabel, cleanUrl, cleanCommand, normalizeMenus, findMenu, findButton, rootMenus, descendantMenuIds, buildMenuKeyboard, buildRootKeyboard, menuOpenText, menuAdminListText, menuAdminDetailText, parseMenuTarget, parseButtonTarget, addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton, ensureVideoMenu } from "./menu-builder.js";
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 import { getHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
@@ -2591,7 +2594,7 @@ async function prepareSearch(env, chatId, query, page = 0, messageId = undefined
     const media = singleMedia;
     const voiceRecord = singleVoiceRecord;
     const voice = singleVoice;
-    const more = withShareButton(env, record, moreMeaning(options, matchIndex, 1, undefined, true, uiLanguage(normalizedQuery)));
+    const more = withShareButton(env, record, moreMeaning(options, matchIndex, 1, undefined, true, uiLanguage(normalizedQuery)), singleCardLanguage);
     const text = widenResultText(`${formatRecord(record, selected.part, normalizedQuery)}${more.notice ?? ""}`).slice(0, MAX_MESSAGE_LENGTH);
     if (await sendCardEntry(env, chatId, record, text, media, more.reply_markup, cardLanguage)) {
       await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery, text, { textFallback: text });
@@ -2665,7 +2668,7 @@ async function sendOption(env, chatId, options, baseIndex, step, fallback = unde
   const voiceRecord = voiceRecordForSearch(record, searchKey);
   const isGreekSearch = scriptKind(normalize(searchKey)) === "el";
   const voice = prepareWordVoice(env, voiceRecord, media, { skipRecorded: isGreekSearch, voiceRepeats: await voiceRepeatCount(env, chatId) });
-  const more = withShareButton(env, record, moreMeaning(options, baseIndex, step + 1, callbackFor ?? (searchKey ? chainCallback(searchKey) : undefined), true, uiLanguage(searchKey)));
+  const more = withShareButton(env, record, moreMeaning(options, baseIndex, step + 1, callbackFor ?? (searchKey ? chainCallback(searchKey) : undefined), true, uiLanguage(searchKey)), cardLanguage);
   const text = widenResultText(`${formatRecord(record, selected.part, searchKey)}${more.notice ?? ""}`).slice(0, MAX_MESSAGE_LENGTH);
   const wantVoice = sendVoice && await featureEnabled(env, "audio") && await voiceAutoOn(env, chatId);
   const captionMode = voiceCaptionMode(env); // on in production: voice+text travel as one message
