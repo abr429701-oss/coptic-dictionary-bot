@@ -1053,7 +1053,7 @@ import { copticDateNow, alphabetText, letterStatsText, longestText, originsText,
 import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, pickFlashcard, updateFlashcard, suggestSimilar, helpText, retentionText, opsText, recordById } from "./new-features.js";
 import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VIDEO_MENU_ID, cleanMenuTitle, cleanMenuText, cleanButtonLabel, cleanUrl, cleanCommand, normalizeMenus, findMenu, findButton, rootMenus, descendantMenuIds, buildMenuKeyboard, buildRootKeyboard, menuOpenText, menuAdminListText, menuAdminDetailText, parseMenuTarget, parseButtonTarget, addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton, ensureVideoMenu } from "./menu-builder.js";
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
-import { getHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
+import { getHiddenUi, setHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
 import { LEARN_LEVELS } from "./learn-manifest.js";
 import { LEARN_IMPORT_KEY, learnUploadItems, emptyImportState, normalizeImportState, importProgress, learnPendingItems, findLearnLesson, learnLessonSendPlan, buildLearnMenus, mergeMenus, uploadLearnFile, parseImportLearnArg, learnImportStartText, learnProgressText } from "./learn-import.js";
 
@@ -1677,62 +1677,19 @@ async function findMatches(query, env) {
   return exact.concat(partial);
 }
 
+// The side ("/") menu for regular users: exactly these commands, nothing
+// else. Every other command still works when typed — it is just not listed.
+// (Admins see these plus ADMIN_COMMANDS, which spreads this list.)
 const USER_COMMANDS = [
   { command: "start", description: "بدء استخدام القاموس" },
   { command: "keyboard", description: "لوحة مفاتيح قبطية لكتابة الكلمات" },
   { command: "learn", description: "بوت تعلم اللغة القبطية من الصفر" },
-  { command: "contact", description: "إرسال رسالة إلى مشرفي البوت" },
-  { command: "quiz", description: "اختبار سريع في المفردات" },
   { command: "fav", description: "حفظ آخر كلمة بحثت عنها" },
   { command: "myfav", description: "كلماتك المفضلة" },
   { command: "mystats", description: "إحصاءاتك ونقاطك" },
-  { command: "recent", description: "آخر عمليات بحثك" },
-  { command: "voiceon", description: "تشغيل إرسال النطق تلقائيًا" },
-  { command: "voiceoff", description: "إيقاف إرسال النطق تلقائيًا" },
-  { command: "help", description: "مساعدة تفاعلية ولغة الواجهة" },
-  { command: "menu", description: "القوائم المخصصة والأزرار" },
-  { command: "flashcards", description: "مراجعة المفضلة ببطاقات" },
-  { command: "dailyquiz", description: "اختبار اليوم بأنواعه" },
-  { command: "voiceonce", description: "النطق مرة واحدة" },
-  { command: "voicethree", description: "النطق 3 مرات" },
-  { command: "voicesettings", description: "إعدادات تكرار الصوت" },
-  { command: "lang", description: "لغة الواجهة: /lang ar أو en" },
-  // ---- ميزات القاموس الـ12 (متاحة للجميع) ----
-  { command: "copticdate", description: "تاريخ اليوم بالتقويم القبطي" },
-  { command: "alphabet", description: "الحروف القبطية بأسمائها" },
-  { command: "letterstats", description: "توزيع الكلمات على الحروف" },
-  { command: "longest", description: "أطول الكلمات القبطية" },
-  { command: "origins", description: "أصول الكلمات (قبطي/يوناني...)" },
-  { command: "wordcount", description: "حجم القاموس وتغطية الصوت" },
-  { command: "startswith", description: "تصفح الكلمات بـ /startswith <حرف>" },
-  { command: "similar", description: "كلمات شقيقة بـ /similar <كلمة>" },
-  { command: "translate", description: "كل التراجم بـ /translate <كلمة>" },
-  { command: "vocab", description: "حزمة مفردات للدراسة" },
-  { command: "guess", description: "لعبة خمّن الكلمة القبطية" },
-  { command: "wod", description: "كلمة اليوم" },
-  // ---- Batch 6: ميزات مستخدم جديدة ----
-  { command: "subscribe", description: "اشتراك في كلمة اليوم" },
-  { command: "unsubscribe", description: "إلغاء اشتراك كلمة اليوم" },
-  { command: "streak", description: "سلسلة أيام نشاطك" },
-  { command: "report", description: "الإبلاغ عن مشكلة" },
-  { command: "daily", description: "ملخصك اليومي" },
-  { command: "compare", description: "قارن كلمتين: /compare <ك1> <ك2>" },
-  { command: "examples", description: "أمثلة مشابهة: /examples <كلمة>" },
-  { command: "pronounce", description: "النطق المكتوب والصوتي لكلمة" },
-  { command: "quiz2", description: "اختبار ثاني (اختيار من متعدد)" },
-  { command: "hangman", description: "لعبة الشنق بالكلمات القبطية" },
-  { command: "exportmydata", description: "تصدير بياناتك (GDPR)" },
-  { command: "donate", description: "ادعم المشروع" },
-  { command: "about", description: "عن البوت" },
-  { command: "clearhistory", description: "مسح سجل بحثي" },
-  { command: "favorites", description: "كلماتك المفضلة" },
-  { command: "removefav", description: "إزالة من المفضلة" },
-  { command: "contribute", description: "اقترح كلمة جديدة للقاموس" },
-  { command: "invite", description: "رابط دعوتك الشخصي" },
-  { command: "feedback", description: "أرسل ملاحظة للإدارة" },
-  { command: "bug", description: "أبلغ عن خطأ تقني" },
-  { command: "quizstats", description: "إحصائيات اختباراتك" },
-  { command: "notify", description: "تشغيل/إيقاف الإشعارات" },
+  { command: "menu", description: "القوائم والدروس" },
+  { command: "contact", description: "تواصل مع الإدارة" },
+  { command: "random", description: "كلمة عشوائية" },
 ];
 const ADMIN_COMMANDS = [
   ...USER_COMMANDS,
@@ -1981,9 +1938,28 @@ async function ensureCommandMenu(env, userId) {
   const admin = isAdmin(env, userId);
   const key = admin ? "admin" : "user";
   if (commandMenuReady.has(key)) return;
+  if (!admin) await migrateUserMenuHidden(env);
   const payload = { commands: admin ? ADMIN_COMMANDS : USER_COMMANDS, ...(admin ? { scope: { type: "chat", chat_id: Number(userId) } } : {}) };
   const result = await telegram(env, "setMyCommands", payload);
   if (result?.ok) commandMenuReady.add(key);
+}
+// One-time: when the 9-command menu first ships, unhide any of the nine
+// that the admin had hidden before, so the menu actually shows all nine.
+// Afterwards hides stick: /hidebutton command <name> hides a command from
+// the side menu and from the /start commands list, until the admin shows it
+// again with /showbutton. The marker makes this run exactly once.
+async function migrateUserMenuHidden(env) {
+  try {
+    if (!env.USERS) return;
+    const done = (await storeCall(env, { op: "get", key: "usermenu:v1:migrated" })).value;
+    if (done) return;
+    const hidden = await getHiddenUi(env, storeCall);
+    const names = new Set(USER_COMMANDS.map((c) => String(c.command)));
+    if (hidden?.command?.some((c) => names.has(c))) {
+      await setHiddenUi(env, storeCall, { ...hidden, command: hidden.command.filter((c) => !names.has(c)) });
+    }
+    await storeCall(env, { op: "put", key: "usermenu:v1:migrated", value: true });
+  } catch { /* never block the menu */ }
 }
 async function telegram(env, method, payload) {
   // Central UI-visibility filter: strip admin-hidden buttons/commands from
@@ -3350,17 +3326,25 @@ async function sendWelcome(env, chatId, name) {
 }
 
 // Organized commands menu (sent as a separate text message because photo captions are limited to 1024 chars).
-function buildCommandsHelpText(env, userId) {
+// For regular users, commands the admin hid with /hidebutton command <name>
+// are left out of the general section (admins always see everything).
+async function buildCommandsHelpText(env, userId) {
   const admin = isAdmin(env, userId);
+  const hidden = admin ? null : await getHiddenUi(env, storeCall);
+  const isHidden = (cmd) => hidden?.command?.includes(String(cmd).replace(/^\/+/u, ""));
+  const general = [
+    ["/start", "/start — بدء الاستخدام وإظهار القائمة"],
+    ["/keyboard", "/keyboard — لوحة مفاتيح قبطية"],
+    ["/learn", "/learn — تعلم اللغة القبطية"],
+    ["/menu", "/menu — القوائم والدروس"],
+    ["/random", "/random — كلمة عشوائية من القاموس"],
+    ["/contact", "/contact — تواصل مع إدارة البوت (أو زر «📞 تواصل مع الإدارة»)"],
+  ];
   const lines = [
     "📖 <b>القاموس القبطي الناطق — الأوامر</b>",
     "",
     "🔹 <b>عامة</b>",
-    "/start — بدء الاستخدام وإظهار القائمة",
-    "/keyboard — لوحة مفاتيح قبطية",
-    "/learn — تعلم اللغة القبطية",
-    "/random — كلمة عشوائية من القاموس",
-    "/contact — تواصل مع إدارة البوت (أو زر «📞 تواصل مع الإدارة»)",
+    ...general.filter(([cmd]) => !isHidden(cmd)).map(([, text]) => text),
     "💡 اكتب أي كلمة مباشرة للبحث: قبطي / عربي / إنجليزي / يوناني / فرنسي / ألماني.",
   ];
   if (admin) {
@@ -7228,7 +7212,7 @@ async function handleUpdate(update, env, ctx) {
     }
     if (user?.name) {
       await sendWelcome(env, message.chat.id, user.name);
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: buildCommandsHelpText(env, userId), parse_mode: "HTML", disable_web_page_preview: true });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: await buildCommandsHelpText(env, userId), parse_mode: "HTML", disable_web_page_preview: true });
       return;
     }
     await saveUser(env, userId, { ...user, awaitingName: true });
@@ -7414,7 +7398,7 @@ async function handleUpdate(update, env, ctx) {
       await saveUser(env, userId, completed);
       await inBackground(ctx, pushUsers(env, [userSheetRow(userId, completed, message.from)]));
       await sendWelcome(env, message.chat.id, name);
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: buildCommandsHelpText(env, userId), parse_mode: "HTML", disable_web_page_preview: true });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: await buildCommandsHelpText(env, userId), parse_mode: "HTML", disable_web_page_preview: true });
       if (!isAdmin(env, userId)) {
         await notifyAdmins(env, `✅ أكمل التسجيل: <b>${escapeHtml(name)}</b> (🆔 <code>${escapeHtml(userId)}</code>)`);
       }
