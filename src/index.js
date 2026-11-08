@@ -448,7 +448,7 @@ async function sendRootMenus(env, chatId, userId = chatId) {
     return;
   }
   await setMenuNav(env, userId, null);
-  await sendMenuMessage(env, chatId, "🔘 <b>القوائم</b>\nاضغط زر القائمة تحت الحقل:", buildRootReplyKeyboard(stored, { isAdmin: isAdmin(env, userId) }));
+  await sendMenuMessage(env, chatId, "أختر المستوى لبدء تعلم اللغة القبطية", buildRootReplyKeyboard(stored, { isAdmin: isAdmin(env, userId) }));
 }
 async function openMenu(env, chatId, menuId, userId) {
   if (!chatId) return;

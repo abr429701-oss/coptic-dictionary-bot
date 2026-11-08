@@ -301,6 +301,7 @@ test("menu-builder: /menuadmin studio builds a menu that users open from bottom 
   assert.ok(noInline(sent(done)));
 
   const list = await say(kvEnv, 53, "/menu");
+  assert.ok(anyText(list, 53, /أختر المستوى لبدء تعلم اللغة القبطية/), "the /menu root invites the user to pick a level");
   assert.ok(labelsOf(toChat(list, 53).at(-1)).includes("قائمة التعلم"));
   const opened = await say(kvEnv, 53, "قائمة التعلم");
   assert.ok(anyText(opened, 53, /قائمة التعلم/));

@@ -644,7 +644,7 @@ test("learn-import: tapping 🏠 الرئيسية inside a level returns to the 
   // Inside the level, the only way back used to be typing /menu by hand:
   // the level menu has no parent, so no Back/Home row is added for it.
   const calls = await sayMsg(kvEnv, 57, "🏠 الرئيسية");
-  assert.ok(anyMessage(calls, /القوائم/u), "tapping home must open the main menu list");
+  assert.ok(anyMessage(calls, /أختر المستوى لبدء تعلم اللغة القبطية/u), "tapping home must open the main menu list");
   assert.ok(!calls.some((c) => c.method === "sendVideo" || c.method === "sendPhoto"), "no lesson must be sent");
 });
 
