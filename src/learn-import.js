@@ -200,15 +200,16 @@ export function buildLearnMenus(levels = LEARN_LEVELS, state = emptyImportState(
     if (!lessonButtons.length) continue; // level appears only once it has lessons
     const isLevel2 = level.id === "m_learn_l2";
     // Level 1 only, at the very top of the menu (above every lesson
-    // button): "الحصول على الرقم الكودي" sends the exact registration
-    // instructions as one text message (kind "text"). 542 chars — under
-    // the 1000-char cap for stored button text.
+    // button): "الحصول على الرقم الكودي" starts the in-bot code flow
+    // (name, then phone, then the macro returns the code — see
+    // src/getcode.js). The registration instructions text is kept as the
+    // fallback when the macro cannot be reached.
     if (!isLevel2) {
       lessonButtons.unshift({
         id: `b_${level.id}_getcode`,
         label: "الحصول على الرقم الكودي",
-        kind: "text",
-        text: LEARN_GET_CODE_TEXT,
+        kind: "command",
+        command: "/getcode",
       });
     }
     // The certificate button sits ABOVE the two nav buttons (not last):

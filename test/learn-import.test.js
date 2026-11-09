@@ -365,15 +365,14 @@ test("learn-import: full state builds exactly 2 menus, rebuild is identical (no 
   assert.ok(lessonButtons.every((b) => /^m_learn_l[12]_\d{2}$/u.test(b.lessonId)), "every lesson button names its lesson");
   assert.deepEqual(lessonButtons.map((b) => b.label), LEARN_LEVELS.flatMap((l) => l.lessons.map((x) => x.title)));
   // Level 1 only, at the very top of the menu (above every lesson
-  // button): "الحصول على الرقم الكودي" sends the registration
-  // instructions as one text message. Level 2 has no such button.
+  // button): "الحصول على الرقم الكودي" starts the in-bot code flow
+  // (name, then phone, then the macro returns the code). Level 2 has
+  // no such button.
   const getCode = l1.buttons.at(0);
-  assert.equal(getCode.kind, "text");
+  assert.equal(getCode.kind, "command");
   assert.equal(getCode.id, "b_m_learn_l1_getcode");
   assert.equal(getCode.label, "الحصول على الرقم الكودي");
-  assert.match(getCode.text, /\+201207829388/);
-  assert.match(getCode.text, /script\.google\.com\/macros\/s\/AKfycbwrOHMki2z5bp2gAtVnsGWVUVnX9-q6gi5JMQwcHhqeXSR3AzEvA2KOeKPZ-sUK5t-5Ww\/exec/);
-  assert.match(getCode.text, /201207829388\+/);
+  assert.equal(getCode.command, "/getcode");
   assert.ok(!l2.buttons.some((b) => b.label === "الحصول على الرقم الكودي"), "level 2 has no get-code button");
   // Each level menu ends with the certificate button ABOVE the way back
   // to the main menu (a /menu command button): the level menus have no

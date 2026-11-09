@@ -441,10 +441,11 @@ async function sendMenuMessage(env, chatId, text, replyMarkup) {
   return telegram(env, "sendMessage", { chat_id: chatId, text });
 }
 async function sendRootMenus(env, chatId, userId = chatId) {
-  // Going home leaves the certificate flow: a later text must search the
-  // dictionary again instead of being read as a code.
+  // Going home leaves the certificate flow and the get-code flow: a later
+  // text must search the dictionary again instead of being read as a code,
+  // a name or a phone number.
   const rootUser = await getUser(env, userId);
-  if (rootUser?.certAwaiting) await saveUser(env, userId, { ...rootUser, certAwaiting: undefined });
+  if (rootUser?.certAwaiting || rootUser?.getcodeStep) await saveUser(env, userId, { ...rootUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined });
   const stored = await loadMenus(env);
   const roots = rootMenus(stored);
   if (!roots.length) {
@@ -640,6 +641,49 @@ async function handleCertCode(env, chatId, code, level) {
   }
   await telegram(env, "sendMessage", { chat_id: chatId, text: "الرقم الكودي غير صحيح." });
 }
+// "الحصول على الرقم الكودي": the in-bot version of the Apps Script web
+// form (see src/getcode.js). Two steps — name, then phone — kept in the
+// user record (getcodeStep/getcodeName) and read by the hook below. The
+// storage happens in the macro, exactly per the file's logic; the bot
+// only shows the returned code (plus a ready WhatsApp link, which is how
+// the admin verifies the student completed the step).
+async function beginGetCodeFlow(env, chatId, userId) {
+  const user = await getUser(env, userId);
+  await saveUser(env, userId, { ...(user ?? {}), certAwaiting: undefined, getcodeStep: "name", getcodeName: undefined });
+  await telegram(env, "sendMessage", { chat_id: chatId, text: "✏️ اكتب اسمك الثلاثي:" });
+}
+async function handleGetCodeStep(env, chatId, userId, text, user) {
+  if (user?.getcodeStep === "name") {
+    const name = String(text ?? "").trim();
+    if (!name) {
+      await telegram(env, "sendMessage", { chat_id: chatId, text: "✏️ اكتب اسمك الثلاثي:" });
+      return;
+    }
+    await saveUser(env, userId, { ...(user ?? {}), getcodeStep: "phone", getcodeName: name });
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "📱 اكتب رقم موبايلك:" });
+    return;
+  }
+  // Step "phone": the macro needs at least 4 digits (the code is
+  // 123456 + the last 4). Non-digits are stripped, like the form does.
+  const phone = normalizeGetCodePhone(text);
+  if (!getCodePhoneValid(phone)) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "📱 رقم الموبايل لازم يكون ٤ أرقام على الأقل — اكتبه تاني:" });
+    return;
+  }
+  const name = String(user?.getcodeName ?? "").trim();
+  await saveUser(env, userId, { ...(user ?? {}), getcodeStep: undefined, getcodeName: undefined });
+  const result = await getCodeFromMacro(name, phone);
+  if (result.code) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: buildGetCodeReply(name, result.code), disable_web_page_preview: true });
+    return;
+  }
+  // The macro did not return a usable code (verified live 2026-11-09:
+  // its doPost returns a plain object, which a web app cannot return, so
+  // the bot gets an error page and nothing is stored). Fall back to the
+  // registration instructions — the web form link — so the student is
+  // never stuck; the macro needs its one-line ContentService fix first.
+  await telegram(env, "sendMessage", { chat_id: chatId, text: `⚠️ تعذّر إحضار الرقم الكودي مباشرة من البوت حاليًا.\n\n${LEARN_GET_CODE_TEXT}`, disable_web_page_preview: true });
+}
 async function runMenuCommand(env, chatId, userId, command) {
   if (command === "/quiz") { await beginQuiz(env, chatId); return; }
   if (command === "/flashcards") { await sendFlashcard(env, chatId, userId); return; }
@@ -648,6 +692,7 @@ async function runMenuCommand(env, chatId, userId, command) {
   if (command === "/menu") { await sendRootMenus(env, chatId, chatId); return; }
   if (command === "/cert1") { await beginCertFlow(env, chatId, userId, "0"); return; }
   if (command === "/cert2") { await beginCertFlow(env, chatId, userId, "1"); return; }
+  if (command === "/getcode") { await beginGetCodeFlow(env, chatId, userId); return; }
   if (command === "/random") {
     const index = Math.floor(Math.random() * records.length);
     await sendRecord(env, chatId, index, -1, "");
@@ -1108,11 +1153,12 @@ import { audioUrl, audioVersion, fetchHumanSpeech, fetchPrebuiltSpeech, isSingle
 import { copticDateNow, alphabetText, letterStatsText, longestText, originsText, wordCountText, startsWithText, similarText, translateText, vocabText, startGuess, handleGuessReply } from "./features.js";
 import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, pickFlashcard, updateFlashcard, suggestSimilar, helpText, retentionText, opsText, recordById } from "./new-features.js";
 import { lookupCertificate } from "./certificates.js";
+import { getCodeFromMacro, buildGetCodeReply, normalizeGetCodePhone, getCodePhoneValid } from "./getcode.js";
 import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VIDEO_MENU_ID, cleanMenuTitle, cleanMenuText, cleanButtonLabel, cleanUrl, cleanCommand, normalizeMenus, findMenu, findButton, rootMenus, descendantMenuIds, buildMenuKeyboard, buildRootKeyboard, menuOpenText, menuAdminListText, menuAdminDetailText, parseMenuTarget, parseButtonTarget, addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton, ensureVideoMenu } from "./menu-builder.js";
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 import { getHiddenUi, setHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
 import { LEARN_LEVELS } from "./learn-manifest.js";
-import { LEARN_IMPORT_KEY, learnUploadItems, emptyImportState, normalizeImportState, importProgress, learnPendingItems, findLearnLesson, learnLessonSendPlan, buildLearnMenus, mergeMenus, uploadLearnFile, parseImportLearnArg, learnImportStartText, learnProgressText } from "./learn-import.js";
+import { LEARN_IMPORT_KEY, LEARN_GET_CODE_TEXT, learnUploadItems, emptyImportState, normalizeImportState, importProgress, learnPendingItems, findLearnLesson, learnLessonSendPlan, buildLearnMenus, mergeMenus, uploadLearnFile, parseImportLearnArg, learnImportStartText, learnProgressText } from "./learn-import.js";
 
 // ---- reply-keyboard menus (real buttons under the field, no inline) --------
 // The position of a user inside the menus is remembered so a plain-text tap can
@@ -1161,10 +1207,11 @@ async function openReplyMenu(env, chatId, userId, menu) {
   await sendMenuMessage(env, chatId, text, keyboard);
 }
 async function followMenuHit(env, chatId, userId, hit) {
-  // Tapping any menu button leaves the certificate flow (the button's own
-  // action runs right after, so a cert button re-sets the flag itself).
+  // Tapping any menu button leaves the certificate flow and the get-code
+  // flow (the button's own action runs right after, so a cert/get-code
+  // button re-sets its own flag itself).
   const hitUser = await getUser(env, userId);
-  if (hitUser?.certAwaiting) await saveUser(env, userId, { ...hitUser, certAwaiting: undefined });
+  if (hitUser?.certAwaiting || hitUser?.getcodeStep) await saveUser(env, userId, { ...hitUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined });
   if (hit.kind === "admin") {
     await studio.handleCommand(env, chatId, userId);
     return true;
@@ -5976,6 +6023,7 @@ const EXTRA_BOT_COMMANDS = [
   { command: "flashcards", description: "بطاقات تعليمية من المفضلة" },
   { command: "cert1", description: "شهادة المستوى الأول (من زر القائمة)" },
   { command: "cert2", description: "شهادة المستوى الثاني (من زر القائمة)" },
+  { command: "getcode", description: "الحصول على الرقم الكودي (من زر القائمة)" },
   { command: "help", description: "عرض الأوامر والمساعدة" },
   { command: "k", description: "لوحة مفاتيح قبطية (اختصار)" },
   { command: "kbd", description: "لوحة مفاتيح قبطية (اختصار)" },
@@ -6042,7 +6090,7 @@ const ALL_COMMANDS_CATEGORIES = [
   { id: "broadcast", title: "📢 البث والإرسال", commands: ["broadcast", "startbroadcast", "stopbroadcast", "bcpause", "bcresume", "bccancel", "bcspeed", "testbroadcast", "broadcaststats", "targeted", "segment", "templateslib", "tplsave", "tplsend", "announce", "maintadv", "maintadvstatus", "maintadvcancel", "massdm", "msg", "schedule", "schedules", "unschedule", "autoreply", "optout", "optoutstats", "addevent", "events", "delevent"] },
   { id: "system", title: "⚙️ أدوات النظام", commands: ["health", "healthcheck", "uptime", "botinfo", "sessionlist", "kill", "resetsessions", "clearcache", "cacheinfo", "limits", "slowmode", "maintenance", "setmaintmsg", "setbanmsg", "feature", "errors", "auditlog", "adminaudit", "securitylog", "setcommands", "setbotname", "setbotabout", "setbotdescription", "setshortdesc", "setlang", "setmenubutton", "setwod", "setwodtest", "note", "alias", "motd", "rules", "searchlimit", "usagealert", "recover", "recoverusers", "apikey", "whereami", "snapshot", "preview", "logchannel", "ping", "debug"] },
   { id: "advanced", title: "🔧 أدوات متقدمة", commands: ["exportaudit", "exporterrors", "exportmisses", "exportbans", "exportsecurity", "exportsearch", "resetstats", "newhelp", "a2help", "proadmin", "prohelp", "apanel", "strings", "setstring", "resetstring", "cleanup", "maintplan", "teamnote", "teamnotes", "teamassign", "teamdone", "rollout", "rolloutallow", "rolloutdeny", "rollouts", "selfcheck", "configexport", "webhook", "envcheck", "dostat", "bottest"] },
-  { id: "learn", title: "🎓 التعلم والاختبارات", commands: ["quiz", "quiz2", "quizstats", "dailyquiz", "flashcards", "study", "streak", "hangman", "guess", "daily", "wod", "wordoftheday", "fav", "favorites", "myfav", "mywords", "removefav", "mystats", "recent", "gamify", "badges", "exportanki", "examples", "compare", "cert1", "cert2"] },
+  { id: "learn", title: "🎓 التعلم والاختبارات", commands: ["quiz", "quiz2", "quizstats", "dailyquiz", "flashcards", "study", "streak", "hangman", "guess", "daily", "wod", "wordoftheday", "fav", "favorites", "myfav", "mywords", "removefav", "mystats", "recent", "gamify", "badges", "exportanki", "examples", "compare", "cert1", "cert2", "getcode"] },
   { id: "support", title: "💬 الدعم والتواصل", commands: ["support", "tickets", "ticket", "ticketclose", "mytickets", "reply", "feedback", "bug", "suggest", "suggestword", "suggestions", "contribute", "invite", "myref", "toptop", "refinfo", "donate", "donation", "subscribe", "unsubscribe", "notify", "exportmydata", "clearhistory", "alerts", "exitsupport"] },
   { id: "security", title: "🔐 الأمان والصلاحيات", commands: ["2fa", "password", "unlock", "lockdown", "verifygate", "captcha", "ratewarn", "ratelimit", "blacklist", "whitelist", "antispam", "spamlist", "spamclear", "setrole", "roles", "myrole", "admins"] },
   { id: "menus", title: "🎛 القوائم والبوت", commands: ["menuadmin", "menueditor", "addmenu", "addbutton", "delmenu", "delbutton", "movebtn", "addvideo", "videolist", "delvideo", "toptags", "card_hide", "card_show", "hiddencards", "unhideall", "welcomemedia", "welcomesticker", "leavemsg", "setjoinmsg", "editwelcome", "resetwelcome", "pin", "pinhere", "unpin", "hidebutton", "hiddenbuttons", "showbutton"] },
@@ -7503,7 +7551,7 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     const user = known ?? await getUser(env, userId);
-    if (user?.certAwaiting) await saveUser(env, userId, { ...user, certAwaiting: undefined });
+    if (user?.certAwaiting || user?.getcodeStep) await saveUser(env, userId, { ...user, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined });
     // Referral link tracking: /start <campaign> remembers the source for new users.
     const startParam = text.startsWith("/start ") ? text.slice(7).trim() : "";
     // v2: deep link /start word_<id> opens that word directly (shared from a result).
@@ -7567,6 +7615,7 @@ async function handleUpdate(update, env, ctx) {
     const user = known ?? await getUser(env, userId);
     if (user?.awaitingContact) { await saveUser(env, userId, { ...user, awaitingContact: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء رسالة التواصل مع الإدارة." }); return; }
     if (user?.certAwaiting) { await saveUser(env, userId, { ...user, certAwaiting: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء إدخال الرقم الكودي." }); return; }
+    if (user?.getcodeStep) { await saveUser(env, userId, { ...user, getcodeStep: undefined, getcodeName: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء الحصول على الرقم الكودي." }); return; }
   }
   // ---- Batch 5 user features: quiz, favorites, my stats, recent, voice preference ----
   // v2 commands: /quiz keeps its old meaning-type behaviour; /quiz <type> adds the
@@ -7581,6 +7630,7 @@ async function handleUpdate(update, env, ctx) {
   if (text === "/dailyquiz") { await beginQuizV2(env, message.chat.id, dailyQuizType()); return; }
   if (text === "/help") { await sendHelp(env, message.chat.id); return; }
   if (text === "/cert1" || text === "/cert2") { await beginCertFlow(env, message.chat.id, userId, text === "/cert1" ? "0" : "1"); return; }
+  if (text === "/getcode") { await beginGetCodeFlow(env, message.chat.id, userId); return; }
   if (text === "/menu") { await sendRootMenus(env, message.chat.id, userId); return; }
   if (text === "/flashcards") { await sendFlashcard(env, message.chat.id, userId); return; }
   if (text === "/lang" || text.startsWith("/lang ")) {
@@ -7736,6 +7786,14 @@ async function handleUpdate(update, env, ctx) {
     // reported 2026-11-09.
     if (user?.certAwaiting === "0" || user?.certAwaiting === "1") {
       await handleCertCode(env, message.chat.id, text, user.certAwaiting);
+      return;
+    }
+    // Get-code flow: the user tapped "الحصول على الرقم الكودي" and this
+    // text is their name (step "name") or their phone (step "phone").
+    // Like the cert flow, it ends on /cancel, /menu, /start or another
+    // menu tap — never by falling through to the dictionary search.
+    if (user?.getcodeStep === "name" || user?.getcodeStep === "phone") {
+      await handleGetCodeStep(env, message.chat.id, userId, text, user);
       return;
     }
     // ---- ميزات القاموس الجديدة (src/features.js — كلها من بيانات القاموس المرفقة الحقيقية) ----
