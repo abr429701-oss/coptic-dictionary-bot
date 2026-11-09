@@ -20,10 +20,23 @@
 // BT for level 2) is sent as a photo. If not found, code13 gives the name,
 // USER says whether all exams are done, and FINAL lists the missing exams.
 // A code found nowhere gets "الرقم الكودي غير صحيح."
+//
+// Speed + reliability (2026-11-09, after the first live test): the level
+// sheet and the completion sheets are fetched with a gviz `where` query
+// (server-side filter, 0-1 rows back instead of the whole sheet), the
+// three completion sheets are fetched in parallel, and the certificate
+// image is downloaded ONCE in the Worker and uploaded to Telegram as
+// bytes — never passed to Telegram as a Google URL (Telegram's fetch of
+// a slow Google export hung the webhook with no timeout and nothing was
+// ever sent). Any download failure answers with the Apps Script's own
+// error wording instead of hanging.
 export const CERT_MAIN_SHEET_ID = "1V3N16W3523NQUQnLUq-a7_YPr9L-7lkHJq_AUefATcI";
 export const CERT_CODES_SHEET_ID = "1w9bJFNZjyDf6NHl5b20fEN3Gh72vA4ZoF48sdh6FYRk";
 export const CERT_SETTINGS_GID = "36067296";
 export const CERT_EXAM_ICON_URL = "https://cdn-icons-png.flaticon.com/512/4201/4201973.png";
+// Telegram sendPhoto caps a photo at 10 MB; a certificate is far smaller,
+// so anything bigger is a broken link, not a certificate.
+export const CERT_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 
 // Level 0 = المستوى الأول, level 1 = المستوى الثاني (same as the Apps Script).
 export const CERT_LEVEL_LABELS = ["الحصول على شهادة المستوى الأول", "الحصول على شهادة المستوى الثاني"];
@@ -37,6 +50,18 @@ export function certLetterToIndex(letter) {
     column = column * 26 + (upperLetter.charCodeAt(i) - 64);
   }
   return column - 1;
+}
+
+// 0-based index -> column letter(s), the inverse of certLetterToIndex.
+export function certIndexToLetter(index) {
+  let n = Number(index) + 1;
+  let letters = "";
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    letters = String.fromCharCode(65 + rem) + letters;
+    n = Math.floor((n - 1) / 26);
+  }
+  return letters;
 }
 
 // Minimal RFC-4180 CSV parser: gviz quotes every field, so commas and
@@ -67,26 +92,60 @@ export function parseCertCsv(text) {
   return rows.filter((r) => r.length > 1 || (r.length === 1 && r[0] !== ""));
 }
 
+// A gviz `tq` filter that returns only the rows whose code matches in ANY
+// of the given column letters. Codes live in the sheets as numbers AND as
+// text, and a string literal does not match a numeric cell (verified live
+// 2026-11-09), so a numeric code is matched both ways; a non-numeric code
+// is matched as a string only. Returns null when the code cannot be put
+// safely into a query (control characters) — the caller then fetches the
+// whole sheet and filters locally, exactly as before.
+export function certWhereClause(columnLetters, code) {
+  const cols = (columnLetters ?? []).map((c) => String(c ?? "").trim().toUpperCase()).filter((c) => /^[A-Z]+$/u.test(c));
+  const value = String(code ?? "");
+  if (!cols.length || !value || /[\u0000-\u001f]/u.test(value)) return null;
+  const escaped = value.replace(/'/g, "''");
+  const isNumeric = /^\d+$/u.test(value);
+  const terms = cols.map((col) => (isNumeric ? `(${col} = ${value} or ${col} = '${escaped}')` : `(${col} = '${escaped}')`));
+  return `select * where ${terms.join(" or ")}`;
+}
+
 // Fetch one sheet tab live as CSV (public gviz endpoint, same pattern as
-// /importsheet). `sheet` selects by tab name, `gid` by tab id.
-export async function fetchCertSheetCsv(sheetId, { sheet = null, gid = null } = {}) {
-  const params = new URLSearchParams({ tqx: "out:csv" });
-  if (sheet) params.set("sheet", sheet);
-  if (gid) params.set("gid", gid);
-  const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?${params}`;
-  const resp = await fetch(url, { signal: AbortSignal.timeout(30000) });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  return parseCertCsv(await resp.text());
+// /importsheet). `sheet` selects by tab name, `gid` by tab id. With `where`
+// the server filters the rows first (tiny reply); a failed filtered fetch
+// falls back to the whole sheet, so a query problem degrades to the old
+// slow path instead of an error.
+export async function fetchCertSheetCsv(sheetId, { sheet = null, gid = null, where = null } = {}) {
+  const fetchOnce = async (tq) => {
+    const params = new URLSearchParams({ tqx: "out:csv" });
+    if (sheet) params.set("sheet", sheet);
+    if (gid) params.set("gid", gid);
+    if (tq) params.set("tq", tq);
+    const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?${params}`;
+    const resp = await fetch(url, { signal: AbortSignal.timeout(30000) });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return parseCertCsv(await resp.text());
+  };
+  if (where) {
+    try {
+      return await fetchOnce(where);
+    } catch {
+      // Fall through to the unfiltered fetch.
+    }
+  }
+  return fetchOnce(null);
 }
 
 // Settings tab rows 2 and 3 (row 1 is the header): level 0 then level 1.
 // Each row: [sheet, lookup col x5, "response cols,comma,separated"].
+// `lookupLetters` is kept alongside the indices so the level sheet can
+// be fetched with a `where` query instead of downloading it whole.
 export function certSettingsFromRows(rows) {
   return [rows[1], rows[2]].map((row) => {
     if (!row) return null;
     return {
       sheet: String(row[0] ?? "").trim(),
       lookup: row.slice(1, 6).map((letter) => certLetterToIndex(letter)),
+      lookupLetters: row.slice(1, 6).map((letter) => String(letter ?? "").trim().toUpperCase()),
       response: String(row[6] ?? "").split(",").map((letter) => certLetterToIndex(letter)),
     };
   });
@@ -133,33 +192,61 @@ export function certFileUrl(fileLink) {
   return { url: `https://drive.google.com/uc?export=download&id=${fileId}`, error: null };
 }
 
-// Verify the derived image URL really serves an image (the Apps Script
-// did the same check with its OAuth token, then without). Returns { url }
-// or { url: null, error } with the Apps Script's own error wording.
-export async function resolveCertImage(fileLink) {
+// Download the certificate image ONCE (the Apps Script downloaded the
+// blob and uploaded it; the Worker now does the same) and return its
+// bytes for a multipart sendPhoto upload. Returns { bytes, contentType,
+// fileName } or { bytes: null, error } with the Apps Script's own error
+// wording. Bounded (25s, 10 MB) and content-type checked, so a slow or
+// broken Google link answers with text instead of hanging the webhook.
+export async function fetchCertImageBytes(fileLink) {
   const derived = certFileUrl(fileLink);
-  if (!derived.url) return { url: null, error: derived.error };
+  if (!derived.url) return { bytes: null, error: derived.error };
   const isPresentation = String(fileLink).includes("presentation") || String(fileLink).includes("docs.google.com");
+  const driveError = "الملف محمي في جوجل درايف والسكريبت لا يملك صلاحية للوصول إليه.";
   try {
-    const resp = await fetch(derived.url, { signal: AbortSignal.timeout(30000) });
+    const resp = await fetch(derived.url, { signal: AbortSignal.timeout(25000) });
     const contentType = resp.headers.get("content-type") || "";
-    if (resp.ok && contentType.includes("image")) return { url: derived.url, error: null };
-    if (isPresentation) {
-      return { url: null, error: `تعذر جلب الشهادة. خوادم جوجل ترفض الوصول للرابط (رمز الخطأ: ${resp.status}). تأكد أن الرابط متاح للجميع.` };
+    if (!resp.ok || !contentType.includes("image")) {
+      if (isPresentation) {
+        return { bytes: null, error: `تعذر جلب الشهادة. خوادم جوجل ترفض الوصول للرابط (رمز الخطأ: ${resp.status}). تأكد أن الرابط متاح للجميع.` };
+      }
+      return { bytes: null, error: driveError };
     }
-    return { url: null, error: "الملف محمي في جوجل درايف والسكريبت لا يملك صلاحية للوصول إليه." };
+    const declared = Number(resp.headers.get("content-length") || "0");
+    if (declared > CERT_IMAGE_MAX_BYTES) return { bytes: null, error: "الشهادة كبيرة جدًا ولا يمكن إرسالها كصورة." };
+    const buf = await resp.arrayBuffer();
+    if (buf.byteLength > CERT_IMAGE_MAX_BYTES) return { bytes: null, error: "الشهادة كبيرة جدًا ولا يمكن إرسالها كصورة." };
+    return {
+      bytes: new Uint8Array(buf),
+      contentType: contentType.split(";")[0].trim() || "image/png",
+      fileName: isPresentation ? "certificate.png" : "certificate.jpg",
+      error: null,
+    };
   } catch (e) {
-    if (isPresentation) return { url: null, error: `حدث خطأ تقني: ${e instanceof Error ? e.message : "unknown"}` };
-    return { url: null, error: "الملف محمي في جوجل درايف والسكريبت لا يملك صلاحية للوصول إليه." };
+    const msg = e instanceof Error ? e.message : "";
+    if (/timed out|timeout|aborted/iu.test(msg)) {
+      return { bytes: null, error: "تعذّر تحميل الشهادة — خوادم جوجل بطيئة الآن. جرّب مرة أخرى بعد قليل." };
+    }
+    if (isPresentation) return { bytes: null, error: `حدث خطأ تقني: ${msg || "unknown"}` };
+    return { bytes: null, error: driveError };
   }
 }
 
 // The Apps Script's checkCompletionStatus, verbatim: code13 (codes sheet)
 // gives the name; USER says whether all exams are done; FINAL lists the
-// missing exams. Returns a photo result to send, or null when the code
-// is not handled here (unknown code, or exams done but no certificate row).
+// missing exams. The three sheets are fetched in parallel, each with a
+// `where` filter on the code column(s). Returns a photo result to send,
+// or null when the code is not handled here (unknown code, or exams done
+// but no certificate row).
 export async function checkCertCompletion(code, level) {
-  const codesData = await fetchCertSheetCsv(CERT_CODES_SHEET_ID, { sheet: "code13" });
+  const examsSheetId = level === "0" ? CERT_MAIN_SHEET_ID : CERT_CODES_SHEET_ID;
+  const examCols = level === "0" ? [0, 2, 4, 6, 8, 10, 12, 14, 16, 18] : [0, 2, 4, 6];
+  const examLetters = examCols.map((i) => certIndexToLetter(i));
+  const [codesData, examsData, finalData] = await Promise.all([
+    fetchCertSheetCsv(CERT_CODES_SHEET_ID, { sheet: "code13", where: certWhereClause(["A"], code) }),
+    fetchCertSheetCsv(examsSheetId, { sheet: "USER", where: certWhereClause(["A"], code) }),
+    fetchCertSheetCsv(examsSheetId, { sheet: "FINAL", where: certWhereClause(examLetters, code) }),
+  ]);
   let studentName = null;
   for (let i = 0; i < codesData.length; i++) {
     if (String(codesData[i][0] ?? "").trim() === code) {
@@ -169,27 +256,21 @@ export async function checkCertCompletion(code, level) {
   }
   if (!studentName) return null;
 
-  const examsSheetId = level === "0" ? CERT_MAIN_SHEET_ID : CERT_CODES_SHEET_ID;
-  const examsData = await fetchCertSheetCsv(examsSheetId, { sheet: "USER" });
   let hasCompletedExams = false;
   for (let i = 0; i < examsData.length; i++) {
     if (String(examsData[i][0] ?? "").trim() === code) { hasCompletedExams = true; break; }
   }
   if (hasCompletedExams) return null;
 
-  const finalData = await fetchCertSheetCsv(examsSheetId, { sheet: "FINAL" });
   let examNames;
-  let examCols;
   if (level === "0") {
     examNames = [
       "الامتحان الأول", "الامتحان الثاني", "الامتحان الثالث",
       "الامتحان الرابع", "الامتحان الخامس", "الامتحان السادس",
       "الامتحان السابع", "الامتحان الثامن", "الامتحان التاسع", "الامتحان النهائي",
     ];
-    examCols = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18];
   } else {
     examNames = ["الامتحان الأول", "الامتحان الثاني", "الامتحان الثالث", "الامتحان النهائي"];
-    examCols = [0, 2, 4, 6];
   }
   const examsStatus = new Array(examCols.length).fill(false);
   if (finalData) {
@@ -223,7 +304,9 @@ export async function checkCertCompletion(code, level) {
 
 // The full lookup (processSearch then checkCompletionStatus). Returns one
 // result describing the single message to send:
-//   { kind: "photo", url, caption } | { kind: "text", text }
+//   { kind: "photo", bytes, contentType, fileName, caption } (upload bytes)
+//   { kind: "photo", url, caption } (small icon by URL, as before)
+//   { kind: "text", text }
 //   { kind: "not-found" } (code nowhere) | { kind: "error", text } (sheets unreachable)
 export async function lookupCertificate(code, level) {
   try {
@@ -231,7 +314,7 @@ export async function lookupCertificate(code, level) {
     const settings = certSettingsFromRows(settingsRows);
     const cfg = settings[Number(level)];
     if (!cfg || !cfg.sheet) return { kind: "error", text: "❌ تعذّر قراءة إعدادات الشهادات." };
-    const data = await fetchCertSheetCsv(CERT_MAIN_SHEET_ID, { sheet: cfg.sheet });
+    const data = await fetchCertSheetCsv(CERT_MAIN_SHEET_ID, { sheet: cfg.sheet, where: certWhereClause(cfg.lookupLetters, code) });
     const row = findCertRow(data, cfg.lookup, code);
     if (row) {
       const message = buildCertReply(row, cfg.response);
@@ -239,11 +322,11 @@ export async function lookupCertificate(code, level) {
       const linkColumnIndex = level === "0" ? certLetterToIndex("C") : certLetterToIndex("BT");
       const fileLink = row[linkColumnIndex];
       if (fileLink && String(fileLink).trim() !== "") {
-        const image = await resolveCertImage(String(fileLink).trim());
-        if (image.url) {
+        const image = await fetchCertImageBytes(String(fileLink).trim());
+        if (image.bytes) {
           let finalCaption = message;
           if (finalCaption.length > 1024) finalCaption = finalCaption.substring(0, 1020) + "...";
-          return { kind: "photo", url: image.url, caption: finalCaption };
+          return { kind: "photo", bytes: image.bytes, contentType: image.contentType, fileName: image.fileName, caption: finalCaption };
         }
         return { kind: "text", text: `${message}\n\n⚠️ ${image.error}` };
       }

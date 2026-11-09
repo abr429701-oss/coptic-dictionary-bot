@@ -12,21 +12,27 @@ import {
   CERT_CODES_SHEET_ID,
   CERT_EXAM_ICON_URL,
   certLetterToIndex,
+  certIndexToLetter,
   parseCertCsv,
   certSettingsFromRows,
+  certWhereClause,
   findCertRow,
   buildCertReply,
   certFileUrl,
-  resolveCertImage,
+  fetchCertImageBytes,
   lookupCertificate,
 } from "../src/certificates.js";
 
 // ---------------------------------------------------------------------------
 // Certificate results (2026-11-09): the Apps Script certificate bot's
-// lookup logic, ported to the dictionary bot. The level menu's last button
-// ("الحصول على شهادة المستوى الأول/الثاني") asks for the student's code;
-// the code is looked up live in the same Google Sheets (gviz CSV) and the
+// lookup logic, ported to the dictionary bot. The level menu's certificate
+// button (above "رجوع"/"الرئيسية") asks for the student's code; the code
+// is looked up live in the same Google Sheets (gviz CSV) and the
 // certificate is sent as a photo, or the student's exam state is reported.
+// The session stays open after each code (the user may ask for more than
+// one certificate); it ends only on /cancel, /menu, /start, or another
+// menu tap. The image is downloaded once and uploaded as bytes — never
+// passed to Telegram as a Google URL (that hung the webhook silently).
 // ---------------------------------------------------------------------------
 
 const token = "test-token";
@@ -103,14 +109,21 @@ const FINAL_CODES_CSV = csv([
 ]);
 
 // Fetch stub: gviz sheets return the fixtures above, image URLs return
-// fake image bytes, Telegram calls are recorded.
-function makeCertFetchStub(calls, { failSheets = false } = {}) {
+// fake image bytes, Telegram calls are recorded. The stub ignores the gviz
+// `tq` filter (it always returns the whole fixture) — the local filtering
+// still runs, so the module-level tests stay meaningful; a separate test
+// asserts the `where` query is actually sent.
+function makeCertFetchStub(calls, { failSheets = false, recordUrls = null } = {}) {
   globalThis.fetch = async (url, options = {}) => {
     const u = String(url);
     if (u.includes("api.telegram.org")) {
       const method = u.split("/").pop();
       let payload = null;
-      if (typeof options.body === "string") {
+      if (options.body instanceof FormData) {
+        // Multipart upload (certificate bytes): record the caption and
+        // that a photo file was attached.
+        payload = { caption: options.body.get("caption"), hasPhoto: options.body.has("photo") };
+      } else if (typeof options.body === "string") {
         try { payload = JSON.parse(options.body); } catch { payload = null; }
       }
       calls.push({ method, payload });
@@ -119,6 +132,7 @@ function makeCertFetchStub(calls, { failSheets = false } = {}) {
       return Response.json({ ok: true, result: {} });
     }
     if (u.includes("docs.google.com/spreadsheets")) {
+      if (recordUrls) recordUrls.push(u);
       if (failSheets) return new Response("error", { status: 500 });
       const parsed = new URL(u);
       const sheet = parsed.searchParams.get("sheet");
@@ -206,6 +220,35 @@ test("certificates: letterToIndex matches the Apps Script helper", () => {
   assert.equal(certLetterToIndex("Da"), 104);
 });
 
+test("certificates: certIndexToLetter is the inverse of certLetterToIndex", () => {
+  assert.equal(certIndexToLetter(0), "A");
+  assert.equal(certIndexToLetter(2), "C");
+  assert.equal(certIndexToLetter(25), "Z");
+  assert.equal(certIndexToLetter(26), "AA");
+  assert.equal(certIndexToLetter(71), "BT");
+  assert.equal(certIndexToLetter(101), "CX");
+  for (const letter of ["A", "G", "AA", "BT", "CX", "CZ"]) {
+    assert.equal(certIndexToLetter(certLetterToIndex(letter)), letter);
+  }
+});
+
+test("certificates: certWhereClause matches numeric codes both ways, text codes as strings", () => {
+  // Numeric code: both a numeric and a string literal per column, because
+  // codes live in the sheets as numbers AND as text (verified live).
+  assert.equal(
+    certWhereClause(["G", "Y"], "5550001"),
+    "select * where (G = 5550001 or G = '5550001') or (Y = 5550001 or Y = '5550001')",
+  );
+  // Non-numeric code: string literal only.
+  assert.equal(certWhereClause(["A"], "ABC123"), "select * where (A = 'ABC123')");
+  // A quote is doubled (gviz escaping); a control character cannot be
+  // put into a query, so the caller falls back to the whole sheet.
+  assert.equal(certWhereClause(["A"], "O'Brien"), "select * where (A = 'O''Brien')");
+  assert.equal(certWhereClause(["A"], "12\n34"), null);
+  assert.equal(certWhereClause([], "5550001"), null);
+  assert.equal(certWhereClause(["A"], ""), null);
+});
+
 test("certificates: parseCertCsv handles quoted commas, escaped quotes and CRLF", () => {
   const rows = parseCertCsv('"a","b,c","d""e"\r\n"1","","3"\n');
   assert.deepEqual(rows, [["a", "b,c", 'd"e'], ["1", "", "3"]]);
@@ -242,12 +285,14 @@ test("certificates: certFileUrl derives the Slides export and Drive download URL
 // Full lookup (module level, stubbed fetch)
 // ---------------------------------------------------------------------------
 
-test("certificates: lookupCertificate sends the L1 certificate as a photo", async () => {
+test("certificates: lookupCertificate sends the L1 certificate as a photo (bytes, not a URL)", async () => {
   const calls = [];
   makeCertFetchStub(calls);
   const result = await lookupCertificate("5550001", "0");
   assert.equal(result.kind, "photo");
-  assert.equal(result.url, "https://docs.google.com/presentation/d/SLIDESID1234567890123456789012/export/png");
+  assert.ok(result.bytes instanceof Uint8Array, "the certificate must arrive as downloaded bytes");
+  assert.equal(result.bytes.length, 3);
+  assert.equal(result.fileName, "certificate.png");
   assert.match(result.caption, /مبروك يا بطل/);
   assert.match(result.caption, /أحمد محمد علي/);
 });
@@ -257,8 +302,45 @@ test("certificates: lookupCertificate sends the L2 certificate from a Drive link
   makeCertFetchStub(calls);
   const result = await lookupCertificate("7770002", "1");
   assert.equal(result.kind, "photo");
-  assert.equal(result.url, "https://drive.google.com/uc?export=download&id=DRIVEFILEID1234567890123456789");
+  assert.ok(result.bytes instanceof Uint8Array);
+  assert.equal(result.fileName, "certificate.jpg");
   assert.match(result.caption, /سارة أحمد/);
+});
+
+test("certificates: the level sheet is fetched with a where query on the code", async () => {
+  const calls = [];
+  const urls = [];
+  makeCertFetchStub(calls, { recordUrls: urls });
+  await lookupCertificate("5550001", "0");
+  const sheet1 = urls.find((u) => u.includes("sheet=Sheet1"));
+  assert.ok(sheet1, "Sheet1 must be fetched");
+  const tq = new URL(sheet1).searchParams.get("tq");
+  assert.ok(tq, "the Sheet1 fetch must carry a tq filter");
+  assert.match(tq, /where/);
+  assert.match(tq, /5550001/);
+  assert.match(tq, /G = 5550001/);
+  assert.match(tq, /G = '5550001'/);
+  // A code that reaches the completion check: the completion sheets are
+  // fetched with a where on column A too.
+  const urls2 = [];
+  makeCertFetchStub(calls, { recordUrls: urls2 });
+  await lookupCertificate("8880004", "0");
+  const code13 = urls2.find((u) => u.includes("sheet=code13"));
+  assert.ok(code13, "code13 must be fetched for a code that misses the level sheet");
+  assert.match(new URL(code13).searchParams.get("tq") ?? "", /A = 8880004/);
+});
+
+test("certificates: fetchCertImageBytes downloads the image once", async () => {
+  const calls = [];
+  makeCertFetchStub(calls);
+  const image = await fetchCertImageBytes(SLIDES_LINK);
+  assert.ok(image.bytes instanceof Uint8Array);
+  assert.equal(image.bytes.length, 3);
+  assert.equal(image.contentType, "image/png");
+  assert.equal(image.error, null);
+  const bad = await fetchCertImageBytes("not a link");
+  assert.equal(bad.bytes, null);
+  assert.match(bad.error, /تعذر استخراج الشهادة/);
 });
 
 test("certificates: found row without a link returns the reply as text", async () => {
@@ -352,9 +434,9 @@ test("certificates: tapping the L1 certificate button asks for the code, then th
   const calls = await sayMsg(kvEnv, USER, "5550001");
   const photo = calls.find((c) => c.method === "sendPhoto");
   assert.ok(photo, "the certificate must arrive as a photo");
-  assert.equal(photo.payload.photo, "https://docs.google.com/presentation/d/SLIDESID1234567890123456789012/export/png");
-  assert.match(String(photo.payload.caption ?? ""), /مبروك يا بطل/);
-  assert.match(String(photo.payload.caption ?? ""), /أحمد محمد علي/);
+  assert.equal(photo.payload?.hasPhoto, true, "the photo must be uploaded as bytes, not a Google URL");
+  assert.match(String(photo.payload?.caption ?? ""), /مبروك يا بطل/);
+  assert.match(String(photo.payload?.caption ?? ""), /أحمد محمد علي/);
 });
 
 test("certificates: tapping the L2 certificate button fetches the L2 certificate", async () => {
@@ -365,8 +447,8 @@ test("certificates: tapping the L2 certificate button fetches the L2 certificate
   const calls = await sayMsg(kvEnv, USER, "7770002");
   const photo = calls.find((c) => c.method === "sendPhoto");
   assert.ok(photo);
-  assert.equal(photo.payload.photo, "https://drive.google.com/uc?export=download&id=DRIVEFILEID1234567890123456789");
-  assert.match(String(photo.payload.caption ?? ""), /سارة أحمد/);
+  assert.equal(photo.payload?.hasPhoto, true);
+  assert.match(String(photo.payload?.caption ?? ""), /سارة أحمد/);
 });
 
 test("certificates: an unknown code gets 'الرقم الكودي غير صحيح.'", async () => {
@@ -378,14 +460,39 @@ test("certificates: an unknown code gets 'الرقم الكودي غير صحي�
   assert.ok(!calls.some((c) => c.method === "sendPhoto"), "no photo for an unknown code");
 });
 
-test("certificates: the flow runs once — the next text searches the dictionary again", async () => {
+test("certificates: the session stays open — a second code is still read as a code, not a dictionary search", async () => {
+  // Regression test for 2026-11-09: the first build cleared the session
+  // after one code, so every later code fell through to the dictionary and
+  // answered "لا توجد نتائج لهذه الكلمة" — as if the learning part were a
+  // dictionary search. The session now stays until /cancel, /menu, /start
+  // or another menu tap.
   const kvEnv = { ...env, USERS: fakeKv() };
   seedLevelMenus(kvEnv);
   await openLevelAndTapCert(kvEnv, USER, "المستوى الأول");
-  await sayMsg(kvEnv, USER, "0000000");
-  const calls = await sayMsg(kvEnv, USER, "5550001");
-  assert.ok(!anyMessage(calls, /الرقم الكودي غير صحيح/), "the second text must not be read as a code");
-  assert.ok(!calls.some((c) => c.method === "sendPhoto" && String(c.payload?.photo ?? "").includes("export/png")), "no certificate photo on the second text");
+  const first = await sayMsg(kvEnv, USER, "0000000");
+  assert.ok(anyMessage(first, /الرقم الكودي غير صحيح\./), "first wrong code");
+  const second = await sayMsg(kvEnv, USER, "5550001");
+  const photo = second.find((c) => c.method === "sendPhoto");
+  assert.ok(photo, "the second code (correct) must still fetch the certificate");
+  assert.equal(photo.payload?.hasPhoto, true);
+  const third = await sayMsg(kvEnv, USER, "0000000");
+  assert.ok(anyMessage(third, /الرقم الكودي غير صحيح\./), "third wrong code must still be a code, not a dictionary search");
+  assert.ok(!anyMessage(third, /لا توجد نتائج/), "never the dictionary no-result message inside the cert flow");
+});
+
+test("certificates: the admin taps the certificate button and sends two codes", async () => {
+  // The admin is the one testing live, so the admin path (through the
+  // admin dispatch) must handle codes exactly like a normal user.
+  const ADMIN = 813894692;
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedLevelMenus(kvEnv);
+  const ask = await openLevelAndTapCert(kvEnv, ADMIN, "المستوى الأول");
+  assert.ok(anyMessage(ask, /أدخل الرقم الكودي/));
+  const first = await sayMsg(kvEnv, ADMIN, "5550001");
+  assert.ok(first.some((c) => c.method === "sendPhoto"), "the admin's correct code fetches the certificate");
+  const second = await sayMsg(kvEnv, ADMIN, "0000000");
+  assert.ok(anyMessage(second, /الرقم الكودي غير صحيح\./), "the admin's wrong code is still a code");
+  assert.ok(!anyMessage(second, /لا توجد نتائج/));
 });
 
 test("certificates: /cancel leaves the certificate flow", async () => {

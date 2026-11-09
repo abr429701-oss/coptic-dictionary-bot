@@ -13,9 +13,10 @@ export const MENUS_KEY = "menus:v1";
 // Raised from 20 (2026-11-06): the "learn" lessons alone need 29 menus
 // (2 levels + 27 lesson submenus), plus the built-in video menu, the other
 // import's category menus, and the admin's own menus. Buttons per menu stay
-// capped at 20 (the biggest learn menu has 17 lesson buttons).
+// capped at 25: the biggest learn menu (L1) now holds 21 buttons (1 "get
+// code" + 17 lessons + 1 certificate + Back + Home).
 export const MAX_MENUS = 60;
-export const MAX_MENU_BUTTONS = 20;
+export const MAX_MENU_BUTTONS = 25;
 export const MAX_MENU_TITLE = 80;
 export const MAX_MENU_TEXT = 3000;
 export const MAX_BUTTON_LABEL = 40;

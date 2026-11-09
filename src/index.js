@@ -599,8 +599,35 @@ async function beginCertFlow(env, chatId, userId, level) {
   await telegram(env, "sendMessage", { chat_id: chatId, text: "أدخل الرقم الكودي. " });
 }
 async function handleCertCode(env, chatId, code, level) {
+  // The Apps Script showed "typing" while it searched; same here, so the
+  // user sees the bot is working on the code instead of silence.
+  await telegram(env, "sendChatAction", { chat_id: chatId, action: "typing" }).catch(() => null);
   const result = await lookupCertificate(code, level);
   if (result.kind === "photo") {
+    if (result.bytes) {
+      // The certificate bytes were downloaded once by lookupCertificate;
+      // upload them as a file (same multipart pattern as sendWelcome).
+      // Passing a Google export URL to Telegram instead hung the webhook
+      // with no timeout when Google rendered slowly — nothing was sent.
+      try {
+        const form = new FormData();
+        form.append("chat_id", String(chatId));
+        form.append("caption", result.caption);
+        form.append("parse_mode", "HTML");
+        form.append("photo", new Blob([result.bytes], { type: result.contentType || "image/png" }), result.fileName || "certificate.png");
+        const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`, {
+          method: "POST",
+          body: form,
+          signal: AbortSignal.timeout(30000),
+        });
+        const uploaded = await response.json().catch(() => ({}));
+        if (response.ok && uploaded.ok) return;
+        await telegram(env, "sendMessage", { chat_id: chatId, text: `⚠️ عذراً، لم أتمكن من إرسال الشهادة كصورة.\nالسبب من تليجرام: ${uploaded?.description ?? `خطأ ${response.status}`}` });
+      } catch (e) {
+        await telegram(env, "sendMessage", { chat_id: chatId, text: `⚠️ عذراً، لم أتمكن من إرسال الشهادة كصورة.\nالسبب: ${e instanceof Error ? e.message : "unknown"}` });
+      }
+      return;
+    }
     const res = await telegram(env, "sendPhoto", { chat_id: chatId, photo: result.url, caption: result.caption, parse_mode: "HTML" });
     if (!res?.ok) {
       await telegram(env, "sendMessage", { chat_id: chatId, text: `⚠️ عذراً، لم أتمكن من إرسال الشهادة كصورة.\nالسبب من تليجرام: ${res?.description ?? "unknown"}` });
@@ -7701,9 +7728,13 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     // Certificate code: the user tapped "الحصول على شهادة ..." and this
-    // text is their code. The flag is cleared first so a retry starts clean.
+    // text is their code. The session STAYS open after each code (the
+    // user may ask for more than one certificate) — it ends only when
+    // they leave: /cancel, /menu, /start, or tapping another menu button.
+    // Clearing it after one code sent every later code to the dictionary
+    // search ("لا توجد نتائج لهذه الكلمة"), which is exactly the bug
+    // reported 2026-11-09.
     if (user?.certAwaiting === "0" || user?.certAwaiting === "1") {
-      await saveUser(env, userId, { ...user, certAwaiting: undefined });
       await handleCertCode(env, message.chat.id, text, user.certAwaiting);
       return;
     }

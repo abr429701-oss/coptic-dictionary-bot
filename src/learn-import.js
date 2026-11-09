@@ -28,6 +28,21 @@ import { LEARN_LEVELS } from "./learn-manifest.js";
 
 export const LEARN_IMPORT_KEY = "learn-import:v1";
 export const LEARN_MENU_PREFIX = "m_learn_";
+
+// Level 1 only: the exact registration text the "الحصول على الرقم الكودي"
+// button sends (verbatim, as dictated 2026-11-09 — phone number, Apps
+// Script link and the "201207829388+" note included). 542 chars, under
+// the 1000-char cap for stored button text.
+export const LEARN_GET_CODE_TEXT = `علشان تجيب الرقم الكودي الخاص بيك وتعرف تدخل الامتحانات على مدار الدورة... 
+
+أولاً هتسجل الرقم ده (+201207829388) في جهات اتصالك. 
+
+ثانياً هتدخل تكتب اسمك ثلاثي مضبوط ورقمك مضبوط على الرابط ده: https://script.google.com/macros/s/AKfycbwrOHMki2z5bp2gAtVnsGWVUVnX9-q6gi5JMQwcHhqeXSR3AzEvA2KOeKPZ-sUK5t-5Ww/exec
+
+وبعدين هتضغط على عبارة احصل عليه، اللي هتظهرلك بعد ما تكتب اسمك ورقمك وبعد الضغط هيوجهك مباشرة برسالة على الواتساب فيها الرقم الكودي الخاص بيك.
+
+ملاحظة هامة جداً:
+يجب تسجيل الرقم (201207829388+) في جهات اتصالك قبل الدخول على الرابط.`;
 // Telegram Bot API refuses file uploads over 50MB; every manifest file is
 // under 21MB, but the guard stays so a future file fails loudly, not silently.
 export const LEARN_MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
@@ -183,6 +198,29 @@ export function buildLearnMenus(levels = LEARN_LEVELS, state = emptyImportState(
       lessonsBuilt += 1;
     }
     if (!lessonButtons.length) continue; // level appears only once it has lessons
+    const isLevel2 = level.id === "m_learn_l2";
+    // Level 1 only, at the very top of the menu (above every lesson
+    // button): "الحصول على الرقم الكودي" sends the exact registration
+    // instructions as one text message (kind "text"). 542 chars — under
+    // the 1000-char cap for stored button text.
+    if (!isLevel2) {
+      lessonButtons.unshift({
+        id: `b_${level.id}_getcode`,
+        label: "الحصول على الرقم الكودي",
+        kind: "text",
+        text: LEARN_GET_CODE_TEXT,
+      });
+    }
+    // The certificate button sits ABOVE the two nav buttons (not last):
+    // it asks for the student's code and fetches the level certificate
+    // (see src/certificates.js). No level picker is needed — the level
+    // is the menu.
+    lessonButtons.push({
+      id: `b_${level.id}_cert`,
+      label: isLevel2 ? "الحصول على شهادة المستوى الثاني" : "الحصول على شهادة المستوى الأول",
+      kind: "command",
+      command: isLevel2 ? "/cert2" : "/cert1",
+    });
     // A way back: the level menus have no parent, so the keyboard builder
     // adds no Back/Home row for them and the user would be stuck inside
     // the level (only /menu typed by hand would get them out). Both nav
@@ -200,16 +238,6 @@ export function buildLearnMenus(levels = LEARN_LEVELS, state = emptyImportState(
       label: "🏠 الرئيسية",
       kind: "command",
       command: "/menu",
-    });
-    // The certificate button is the very last button of the level: it asks
-    // for the student's code and fetches the level certificate (see
-    // src/certificates.js). No level picker is needed — the level is the menu.
-    const isLevel2 = level.id === "m_learn_l2";
-    lessonButtons.push({
-      id: `b_${level.id}_cert`,
-      label: isLevel2 ? "الحصول على شهادة المستوى الثاني" : "الحصول على شهادة المستوى الأول",
-      kind: "command",
-      command: isLevel2 ? "/cert2" : "/cert1",
     });
     menus.push({
       id: level.id,
