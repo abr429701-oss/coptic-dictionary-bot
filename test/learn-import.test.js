@@ -327,7 +327,7 @@ test("learn-import: empty state builds no menus, partial state builds only compl
   const items = learnUploadItems();
   for (const item of items.slice(0, 10)) partial.items[item.key] = { status: "done", fileId: `FID_${item.key}` };
   ({ menus, counts } = buildLearnMenus(LEARN_LEVELS, partial));
-  assert.deepEqual(counts, { levels: 1, lessons: 6, buttons: 8 });
+  assert.deepEqual(counts, { levels: 1, lessons: 6, buttons: 9 });
   assert.equal(menus.length, 1);
   assert.equal(menus[0].id, "m_learn_l1");
   assert.equal(menus[0].parentId, null);
@@ -354,11 +354,11 @@ test("learn-import: full state builds exactly 2 menus, rebuild is identical (no 
   const second = buildLearnMenus(LEARN_LEVELS, fullState());
   assert.deepEqual(first, second);
   assert.equal(first.menus.length, 2);
-  assert.deepEqual(first.counts, { levels: 2, lessons: 27, buttons: 31 });
+  assert.deepEqual(first.counts, { levels: 2, lessons: 27, buttons: 33 });
   const l1 = first.menus.find((m) => m.id === "m_learn_l1");
   const l2 = first.menus.find((m) => m.id === "m_learn_l2");
-  assert.equal(l1.buttons.length, 19);
-  assert.equal(l2.buttons.length, 12);
+  assert.equal(l1.buttons.length, 20);
+  assert.equal(l2.buttons.length, 13);
   const buttons = first.menus.flatMap((m) => m.buttons);
   const lessonButtons = buttons.filter((b) => b.kind === "lesson");
   assert.equal(lessonButtons.length, 27);
@@ -368,16 +368,23 @@ test("learn-import: full state builds exactly 2 menus, rebuild is identical (no 
   // button): the level menus have no parent, so the keyboard builder adds
   // no Back/Home row for them.
   for (const levelMenu of [l1, l2]) {
-    const back = levelMenu.buttons.at(-2);
+    const back = levelMenu.buttons.at(-3);
     assert.equal(back.kind, "command");
     assert.equal(back.command, "/menu");
     assert.equal(back.label, "🔙 رجوع");
     assert.equal(back.id, `b_${levelMenu.id}_back`);
-    const home = levelMenu.buttons.at(-1);
+    const home = levelMenu.buttons.at(-2);
     assert.equal(home.kind, "command");
     assert.equal(home.command, "/menu");
     assert.equal(home.label, "🏠 الرئيسية");
     assert.equal(home.id, `b_${levelMenu.id}_home`);
+    // The very last button fetches the level certificate (no level picker:
+    // the level is the menu). It is a command button, like Back/Home.
+    const cert = levelMenu.buttons.at(-1);
+    assert.equal(cert.kind, "command");
+    assert.equal(cert.id, `b_${levelMenu.id}_cert`);
+    assert.equal(cert.command, levelMenu.id === "m_learn_l1" ? "/cert1" : "/cert2");
+    assert.equal(cert.label, levelMenu.id === "m_learn_l1" ? "الحصول على شهادة المستوى الأول" : "الحصول على شهادة المستوى الثاني");
   }
   // One lesson button, verbatim from the manifest.
   const lesson3 = l1.buttons.find((b) => b.lessonId === "m_learn_l1_03");
@@ -489,10 +496,11 @@ test("learn-import: /importlearn status, one run imports everything, non-admin r
   assert.equal(menus.filter((m) => String(m.id).startsWith("m_learn_")).length, 2, "exactly the two level menus");
   const l1 = menus.find((m) => m.id === "m_learn_l1");
   const l2 = menus.find((m) => m.id === "m_learn_l2");
-  assert.equal(l1.buttons.length, 19);
-  assert.equal(l2.buttons.length, 12);
+  assert.equal(l1.buttons.length, 20);
+  assert.equal(l2.buttons.length, 13);
   assert.ok(l1.buttons.filter((b) => b.kind === "lesson").every((b) => b.lessonId), "level buttons are single lesson buttons");
-  assert.equal(l1.buttons.at(-1).command, "/menu", "last row is the way back to the main menu");
+  assert.equal(l1.buttons.at(-2).command, "/menu", "second-to-last row is the way back to the main menu");
+  assert.equal(l1.buttons.at(-1).command, "/cert1", "last row fetches the level certificate");
   assert.ok(!menus.some((m) => /_\d{2}$/u.test(m.id)), "no lesson submenus");
   const state = storedState(kvEnv);
   assert.equal(Object.values(state.items).filter((i) => i.status === "done").length, 50);
@@ -517,7 +525,7 @@ test("learn-import: failed upload is reported and retried on the next run", asyn
   let state = storedState(kvEnv);
   assert.equal(state.items[items[1].key].status, "failed");
   // Only the failed lesson is missing its button; the other 26 are there.
-  assert.equal(storedMenus(kvEnv).find((m) => m.id === "m_learn_l1").buttons.length, 18);
+  assert.equal(storedMenus(kvEnv).find((m) => m.id === "m_learn_l1").buttons.length, 19);
 
   // The next run retries ONLY the failed item (done items are not re-uploaded).
   calls = await sayMsg(kvEnv, ADMIN, "/importlearn");
@@ -526,7 +534,7 @@ test("learn-import: failed upload is reported and retried on the next run", asyn
   state = storedState(kvEnv);
   assert.equal(state.items[items[1].key].status, "done");
   assert.equal(Object.values(state.items).filter((i) => i.status === "failed").length, 0);
-  assert.equal(storedMenus(kvEnv).find((m) => m.id === "m_learn_l1").buttons.length, 19);
+  assert.equal(storedMenus(kvEnv).find((m) => m.id === "m_learn_l1").buttons.length, 20);
 });
 
 test("learn-import: rebuild drops old per-lesson submenus left by the previous version", async () => {
@@ -572,7 +580,7 @@ test("learn-import: /importlearn on an already-complete import still rebuilds me
   assert.ok(!menus.some((m) => m.id === "m_learn_l1_01"), "old lesson submenu must be gone");
   assert.ok(!menus.some((m) => m.id === "m_learn_l2_06"), "old lesson submenu must be gone");
   const l1 = menus.find((m) => m.id === "m_learn_l1");
-  assert.equal(l1.buttons.length, 19);
+  assert.equal(l1.buttons.length, 20);
   assert.ok(l1.buttons.filter((b) => b.kind === "lesson").every((b) => b.lessonId), "level buttons are single lesson buttons");
   assert.ok(!menus.flatMap((m) => m.buttons ?? []).some((b) => b.kind === "submenu" && String(b.targetMenuId ?? "").startsWith("m_learn_l1_")), "no old submenu buttons remain");
 });

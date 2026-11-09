@@ -94,7 +94,7 @@ async function adminCallback(kvEnv, id, data) {
   }), kvEnv);
   return calls;
 }
-const ALL_COMMANDS_COUNT = 333;
+const ALL_COMMANDS_COUNT = 335;
 
 const CATEGORY_IDS = ["main", "stats", "voices", "drive", "users", "dict", "broadcast", "system", "advanced", "learn", "support", "security", "menus"];
 const CATEGORY_TITLES = {

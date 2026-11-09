@@ -441,6 +441,10 @@ async function sendMenuMessage(env, chatId, text, replyMarkup) {
   return telegram(env, "sendMessage", { chat_id: chatId, text });
 }
 async function sendRootMenus(env, chatId, userId = chatId) {
+  // Going home leaves the certificate flow: a later text must search the
+  // dictionary again instead of being read as a code.
+  const rootUser = await getUser(env, userId);
+  if (rootUser?.certAwaiting) await saveUser(env, userId, { ...rootUser, certAwaiting: undefined });
   const stored = await loadMenus(env);
   const roots = rootMenus(stored);
   if (!roots.length) {
@@ -586,12 +590,37 @@ async function handleImportLearn(env, chatId, userId, text, ctx) {
   else await run;
 }
 
+// Certificate flow (src/certificates.js): the level menu's last button
+// ("الحصول على شهادة ...") starts it; the next text the user sends is
+// their code, handled by the certAwaiting hook below.
+async function beginCertFlow(env, chatId, userId, level) {
+  const user = await getUser(env, userId);
+  await saveUser(env, userId, { ...(user ?? {}), certAwaiting: level });
+  await telegram(env, "sendMessage", { chat_id: chatId, text: "أدخل الرقم الكودي. " });
+}
+async function handleCertCode(env, chatId, code, level) {
+  const result = await lookupCertificate(code, level);
+  if (result.kind === "photo") {
+    const res = await telegram(env, "sendPhoto", { chat_id: chatId, photo: result.url, caption: result.caption, parse_mode: "HTML" });
+    if (!res?.ok) {
+      await telegram(env, "sendMessage", { chat_id: chatId, text: `⚠️ عذراً، لم أتمكن من إرسال الشهادة كصورة.\nالسبب من تليجرام: ${res?.description ?? "unknown"}` });
+    }
+    return;
+  }
+  if (result.kind === "text" || result.kind === "error") {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: result.text, parse_mode: "HTML", disable_web_page_preview: true });
+    return;
+  }
+  await telegram(env, "sendMessage", { chat_id: chatId, text: "الرقم الكودي غير صحيح." });
+}
 async function runMenuCommand(env, chatId, userId, command) {
   if (command === "/quiz") { await beginQuiz(env, chatId); return; }
   if (command === "/flashcards") { await sendFlashcard(env, chatId, userId); return; }
   if (command === "/help") { await sendHelp(env, chatId); return; }
   if (command === "/dailyquiz") { await beginQuizV2(env, chatId, dailyQuizType()); return; }
   if (command === "/menu") { await sendRootMenus(env, chatId, chatId); return; }
+  if (command === "/cert1") { await beginCertFlow(env, chatId, userId, "0"); return; }
+  if (command === "/cert2") { await beginCertFlow(env, chatId, userId, "1"); return; }
   if (command === "/random") {
     const index = Math.floor(Math.random() * records.length);
     await sendRecord(env, chatId, index, -1, "");
@@ -1051,6 +1080,7 @@ function lazy(build) {
 import { audioUrl, audioVersion, fetchHumanSpeech, fetchPrebuiltSpeech, isSingleWordOgg, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 import { copticDateNow, alphabetText, letterStatsText, longestText, originsText, wordCountText, startsWithText, similarText, translateText, vocabText, startGuess, handleGuessReply } from "./features.js";
 import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, pickFlashcard, updateFlashcard, suggestSimilar, helpText, retentionText, opsText, recordById } from "./new-features.js";
+import { lookupCertificate } from "./certificates.js";
 import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VIDEO_MENU_ID, cleanMenuTitle, cleanMenuText, cleanButtonLabel, cleanUrl, cleanCommand, normalizeMenus, findMenu, findButton, rootMenus, descendantMenuIds, buildMenuKeyboard, buildRootKeyboard, menuOpenText, menuAdminListText, menuAdminDetailText, parseMenuTarget, parseButtonTarget, addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton, ensureVideoMenu } from "./menu-builder.js";
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 import { getHiddenUi, setHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
@@ -1104,6 +1134,10 @@ async function openReplyMenu(env, chatId, userId, menu) {
   await sendMenuMessage(env, chatId, text, keyboard);
 }
 async function followMenuHit(env, chatId, userId, hit) {
+  // Tapping any menu button leaves the certificate flow (the button's own
+  // action runs right after, so a cert button re-sets the flag itself).
+  const hitUser = await getUser(env, userId);
+  if (hitUser?.certAwaiting) await saveUser(env, userId, { ...hitUser, certAwaiting: undefined });
   if (hit.kind === "admin") {
     await studio.handleCommand(env, chatId, userId);
     return true;
@@ -5913,6 +5947,8 @@ const EXTRA_BOT_COMMANDS = [
   { command: "dailyquiz", description: "اختبار اليوم" },
   { command: "fav", description: "حفظ آخر كلمة بحثت عنها" },
   { command: "flashcards", description: "بطاقات تعليمية من المفضلة" },
+  { command: "cert1", description: "شهادة المستوى الأول (من زر القائمة)" },
+  { command: "cert2", description: "شهادة المستوى الثاني (من زر القائمة)" },
   { command: "help", description: "عرض الأوامر والمساعدة" },
   { command: "k", description: "لوحة مفاتيح قبطية (اختصار)" },
   { command: "kbd", description: "لوحة مفاتيح قبطية (اختصار)" },
@@ -5979,7 +6015,7 @@ const ALL_COMMANDS_CATEGORIES = [
   { id: "broadcast", title: "📢 البث والإرسال", commands: ["broadcast", "startbroadcast", "stopbroadcast", "bcpause", "bcresume", "bccancel", "bcspeed", "testbroadcast", "broadcaststats", "targeted", "segment", "templateslib", "tplsave", "tplsend", "announce", "maintadv", "maintadvstatus", "maintadvcancel", "massdm", "msg", "schedule", "schedules", "unschedule", "autoreply", "optout", "optoutstats", "addevent", "events", "delevent"] },
   { id: "system", title: "⚙️ أدوات النظام", commands: ["health", "healthcheck", "uptime", "botinfo", "sessionlist", "kill", "resetsessions", "clearcache", "cacheinfo", "limits", "slowmode", "maintenance", "setmaintmsg", "setbanmsg", "feature", "errors", "auditlog", "adminaudit", "securitylog", "setcommands", "setbotname", "setbotabout", "setbotdescription", "setshortdesc", "setlang", "setmenubutton", "setwod", "setwodtest", "note", "alias", "motd", "rules", "searchlimit", "usagealert", "recover", "recoverusers", "apikey", "whereami", "snapshot", "preview", "logchannel", "ping", "debug"] },
   { id: "advanced", title: "🔧 أدوات متقدمة", commands: ["exportaudit", "exporterrors", "exportmisses", "exportbans", "exportsecurity", "exportsearch", "resetstats", "newhelp", "a2help", "proadmin", "prohelp", "apanel", "strings", "setstring", "resetstring", "cleanup", "maintplan", "teamnote", "teamnotes", "teamassign", "teamdone", "rollout", "rolloutallow", "rolloutdeny", "rollouts", "selfcheck", "configexport", "webhook", "envcheck", "dostat", "bottest"] },
-  { id: "learn", title: "🎓 التعلم والاختبارات", commands: ["quiz", "quiz2", "quizstats", "dailyquiz", "flashcards", "study", "streak", "hangman", "guess", "daily", "wod", "wordoftheday", "fav", "favorites", "myfav", "mywords", "removefav", "mystats", "recent", "gamify", "badges", "exportanki", "examples", "compare"] },
+  { id: "learn", title: "🎓 التعلم والاختبارات", commands: ["quiz", "quiz2", "quizstats", "dailyquiz", "flashcards", "study", "streak", "hangman", "guess", "daily", "wod", "wordoftheday", "fav", "favorites", "myfav", "mywords", "removefav", "mystats", "recent", "gamify", "badges", "exportanki", "examples", "compare", "cert1", "cert2"] },
   { id: "support", title: "💬 الدعم والتواصل", commands: ["support", "tickets", "ticket", "ticketclose", "mytickets", "reply", "feedback", "bug", "suggest", "suggestword", "suggestions", "contribute", "invite", "myref", "toptop", "refinfo", "donate", "donation", "subscribe", "unsubscribe", "notify", "exportmydata", "clearhistory", "alerts", "exitsupport"] },
   { id: "security", title: "🔐 الأمان والصلاحيات", commands: ["2fa", "password", "unlock", "lockdown", "verifygate", "captcha", "ratewarn", "ratelimit", "blacklist", "whitelist", "antispam", "spamlist", "spamclear", "setrole", "roles", "myrole", "admins"] },
   { id: "menus", title: "🎛 القوائم والبوت", commands: ["menuadmin", "menueditor", "addmenu", "addbutton", "delmenu", "delbutton", "movebtn", "addvideo", "videolist", "delvideo", "toptags", "card_hide", "card_show", "hiddencards", "unhideall", "welcomemedia", "welcomesticker", "leavemsg", "setjoinmsg", "editwelcome", "resetwelcome", "pin", "pinhere", "unpin", "hidebutton", "hiddenbuttons", "showbutton"] },
@@ -7440,6 +7476,7 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     const user = known ?? await getUser(env, userId);
+    if (user?.certAwaiting) await saveUser(env, userId, { ...user, certAwaiting: undefined });
     // Referral link tracking: /start <campaign> remembers the source for new users.
     const startParam = text.startsWith("/start ") ? text.slice(7).trim() : "";
     // v2: deep link /start word_<id> opens that word directly (shared from a result).
@@ -7502,6 +7539,7 @@ async function handleUpdate(update, env, ctx) {
   if (text === "/cancel") {
     const user = known ?? await getUser(env, userId);
     if (user?.awaitingContact) { await saveUser(env, userId, { ...user, awaitingContact: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء رسالة التواصل مع الإدارة." }); return; }
+    if (user?.certAwaiting) { await saveUser(env, userId, { ...user, certAwaiting: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء إدخال الرقم الكودي." }); return; }
   }
   // ---- Batch 5 user features: quiz, favorites, my stats, recent, voice preference ----
   // v2 commands: /quiz keeps its old meaning-type behaviour; /quiz <type> adds the
@@ -7515,6 +7553,7 @@ async function handleUpdate(update, env, ctx) {
   }
   if (text === "/dailyquiz") { await beginQuizV2(env, message.chat.id, dailyQuizType()); return; }
   if (text === "/help") { await sendHelp(env, message.chat.id); return; }
+  if (text === "/cert1" || text === "/cert2") { await beginCertFlow(env, message.chat.id, userId, text === "/cert1" ? "0" : "1"); return; }
   if (text === "/menu") { await sendRootMenus(env, message.chat.id, userId); return; }
   if (text === "/flashcards") { await sendFlashcard(env, message.chat.id, userId); return; }
   if (text === "/lang" || text.startsWith("/lang ")) {
@@ -7659,6 +7698,13 @@ async function handleUpdate(update, env, ctx) {
       if (!isAdmin(env, userId)) {
         await notifyAdmins(env, `✅ أكمل التسجيل: <b>${escapeHtml(name)}</b> (🆔 <code>${escapeHtml(userId)}</code>)`);
       }
+      return;
+    }
+    // Certificate code: the user tapped "الحصول على شهادة ..." and this
+    // text is their code. The flag is cleared first so a retry starts clean.
+    if (user?.certAwaiting === "0" || user?.certAwaiting === "1") {
+      await saveUser(env, userId, { ...user, certAwaiting: undefined });
+      await handleCertCode(env, message.chat.id, text, user.certAwaiting);
       return;
     }
     // ---- ميزات القاموس الجديدة (src/features.js — كلها من بيانات القاموس المرفقة الحقيقية) ----

@@ -201,6 +201,16 @@ export function buildLearnMenus(levels = LEARN_LEVELS, state = emptyImportState(
       kind: "command",
       command: "/menu",
     });
+    // The certificate button is the very last button of the level: it asks
+    // for the student's code and fetches the level certificate (see
+    // src/certificates.js). No level picker is needed — the level is the menu.
+    const isLevel2 = level.id === "m_learn_l2";
+    lessonButtons.push({
+      id: `b_${level.id}_cert`,
+      label: isLevel2 ? "الحصول على شهادة المستوى الثاني" : "الحصول على شهادة المستوى الأول",
+      kind: "command",
+      command: isLevel2 ? "/cert2" : "/cert1",
+    });
     menus.push({
       id: level.id,
       title: cleanButtonLabel(level.title),
