@@ -87,6 +87,13 @@ test("health endpoint is public and returns ready", async () => {
   assert.match(await response.text(), /ready/u);
 });
 
+test("scheduled keep-warm tick runs without storage or Telegram work", async () => {
+  const calls = [];
+  fakeTelegramApi(calls);
+  await worker.scheduled({ cron: "*/5 * * * *", scheduledTime: Date.now() }, env);
+  assert.equal(calls.length, 0, "the keep-warm tick must not send anything");
+});
+
 test("rejects webhook calls with an invalid secret", async () => {
   const response = await worker.fetch(updateRequest({ message: { text: "/start", chat: { id: 7 } } }, {
     "x-telegram-bot-api-secret-token": "wrong",

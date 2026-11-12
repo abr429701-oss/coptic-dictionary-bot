@@ -8257,4 +8257,16 @@ export default {
       return new Response("ok", { status: 200 });
     }
   },
+
+  // Keep-warm cron (2026-11-12): the first message after idle pays a cold
+  // start (fresh isolate + module evaluation incl. the dictionary JSON), so
+  // text and voice arrive together late. A scheduled tick every 5 minutes
+  // keeps an isolate warm. It deliberately does NO storage or Telegram work:
+  // 1 Worker request per tick, 0 DO calls (288 requests/day, 0.3% of the
+  // free 100k/day limit). It does not make cold starts literally impossible
+  // (Cloudflare may still start a fresh isolate in another region), it makes
+  // them rare.
+  async scheduled(event, env, ctx) {
+    return;
+  },
 };

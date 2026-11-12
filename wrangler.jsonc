@@ -8,6 +8,9 @@
   },
   "compatibility_date": "2026-10-02",
   "workers_dev": true,
+  // Keep-warm: a no-op scheduled tick every 5 minutes (see scheduled() in
+  // src/index.js) so the first message after idle does not pay a cold start.
+  "triggers": { "crons": ["*/5 * * * *"] },
   // v2: set BOT_USERNAME to the bot username (no @) so word deep links work; empty = share falls back to a callback button
   "vars": { "HUMAN_AUDIO": "on", "VOICE_CAPTION": "on", "BOT_USERNAME": "Coptic_Dictionary_bot" },
   "durable_objects": {
