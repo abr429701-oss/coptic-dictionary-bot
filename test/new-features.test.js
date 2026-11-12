@@ -297,19 +297,6 @@ test("v2: unknown word suggests closest words", async () => {
   assert.ok(msg.reply_markup?.inline_keyboard?.length > 0);
 });
 
-test("v2: /flashcards shows a favorite, reveals meaning, and records known", async () => {
-  const kvEnv = { ...env, USERS: fakeKv() };
-  kvEnv.USERS.store.set("user:38", { name: "مينا", firstSeen: nowIso(), lastSeen: nowIso(), favs: [{ word: "ⲟⲩⲱ̀", meaning: "حال" }] });
-  const calls = await say(kvEnv, 38, "/flashcards");
-  const msg = sent(calls)[0];
-  assert.match(msg.text, /ⲟⲩⲱ̀/u);
-  assert.ok(JSON.stringify(msg.reply_markup).includes("nf|fc|show"));
-  const show = await sendCallback(kvEnv, 38, "nf|fc|show");
-  const edit = show.find((c) => c.url.endsWith("/editMessageText"))?.payload;
-  assert.match(edit.text, /حال/u);
-  await sendCallback(kvEnv, 38, "nf|fc|known");
-  assert.equal(kvEnv.USERS.store.get("user:38")?.flash?.box?.["ⲟⲩⲱ̀"] ?? kvEnv.USERS.store.get("user:38")?.flash?.box?.["ⲟⲩⲱ"], 1);
-});
 
 test("v2: /retention and /ops are admin-only and return data", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };

@@ -2,7 +2,7 @@
 // No invented words, meanings or IPA: every example is computed from the bundled
 // dictionary (data/dictionary.json) or from alphabetLetters() in features.js.
 // This module is self-contained and must not import index.js (no circular import).
-// Storage (per-user settings, flashcards, quiz state) lives in index.js via
+// Storage (per-user settings, quiz state) lives in index.js via
 // getUser/saveUser; this module only builds questions, texts and keyboards.
 
 import records from "../data/dictionary.json" with { type: "json" };
@@ -175,24 +175,6 @@ export function dailyQuizType(date = new Date()) {
   return QUIZ_V2_TYPES[((day % 3) + 3) % 3];
 }
 
-// ---------------------------------------------------------------------------
-// 3) Flashcards: simple spaced repetition over the user's favorites
-// ---------------------------------------------------------------------------
-// flashState: { box: { "<normalized word>": level 0..3 } } stored on user.flash.
-// Level 0 = new/due, 3 = known. "Again" resets to 0, "Known" raises by 1.
-export function pickFlashcard(favs, flashState) {
-  const box = (flashState && typeof flashState.box === "object" && flashState.box) || {};
-  if (!Array.isArray(favs) || !favs.length) return null;
-  const sorted = [...favs].sort((a, b) => (box[normalize(a.word)] ?? 0) - (box[normalize(b.word)] ?? 0));
-  const fav = sorted[0];
-  return { fav, level: box[normalize(fav.word)] ?? 0, remaining: sorted.filter((f) => (box[normalize(f.word)] ?? 0) < 3).length };
-}
-export function updateFlashcard(flashState, word, known) {
-  const box = { ...((flashState && typeof flashState.box === "object" && flashState.box) || {}) };
-  const key = normalize(word);
-  box[key] = known ? Math.min(3, (box[key] ?? 0) + 1) : 0;
-  return { box, updatedAt: new Date().toISOString() };
-}
 
 // ---------------------------------------------------------------------------
 // 4) Mini-lessons: alphabet + 5 short lessons, all examples from real records
@@ -241,7 +223,7 @@ export function lessonText(id) {
   for (const r of examplesForLetters(lesson.letters)) {
     lines.push(`• <b>${escapeHtml(String(r.coptic ?? "").slice(0, 40))}</b> — ${escapeHtml(firstMeaning(r).slice(0, 60))}${r.english ? ` (${escapeHtml(String(r.english).split(/[,\/]/u)[0].trim().slice(0, 40))})` : ""}`);
   }
-  lines.push("", "درّب نفسك: ابحث عن كل كلمة واسمع نطقها، ثم جرّبها في /flashcards لو حفظتها في مفضلتك.");
+  lines.push("", "درّب نفسك: ابحث عن كل كلمة واسمع نطقها.");
   return lines.join("\n");
 }
 
@@ -302,7 +284,7 @@ export function helpText(lang = "ar") {
       "📖 <b>Coptic Dictionary — Help</b>",
       "",
       "<b>Search:</b> just type a word in Coptic, Arabic, English, French, German or Greek.",
-      "<b>New:</b> /flashcards — review favorites • /quiz — quick quiz • /dailyquiz — today's quiz • /voicesettings — voice repeats • /help — this help",
+      "<b>New:</b> /quiz — quick quiz • /dailyquiz — today's quiz • /voicesettings — voice repeats • /help — this help",
       "<b>Saved:</b> /fav — save last word • /myfav — favorites • /mystats — stats • /recent — recent searches",
       "<b>Voice:</b> /voiceon / /voiceoff — auto voice • /voiceonce — play once • /voicethree — play 3 times",
       "<b>Language:</b> /lang ar — العربية • /lang en — English (new-features messages)",
@@ -313,7 +295,7 @@ export function helpText(lang = "ar") {
     "📖 <b>القاموس القبطي — المساعدة</b>",
     "",
     "<b>البحث:</b> اكتب أي كلمة مباشرة: قبطي / عربي / إنجليزي / فرنسي / ألماني / يوناني.",
-    "<b>الجديد:</b> /flashcards — مراجعة المفضلة • /quiz — اختبار سريع • /dailyquiz — اختبار اليوم • /voicesettings — إعدادات الصوت • /help — هذه المساعدة",
+    "<b>الجديد:</b> /quiz — اختبار سريع • /dailyquiz — اختبار اليوم • /voicesettings — إعدادات الصوت • /help — هذه المساعدة",
     "<b>المحفوظ:</b> /fav — حفظ آخر كلمة • /myfav — المفضلة • /mystats — إحصاءاتك • /recent — آخر عمليات البحث",
     "<b>الصوت:</b> /voiceon و /voiceoff — النطق التلقائي • /voiceonce — مرة واحدة • /voicethree — 3 مرات",
     "<b>اللغة:</b> /lang ar — العربية • /lang en — English (لرسائل المميزات الجديدة)",

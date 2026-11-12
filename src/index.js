@@ -200,7 +200,7 @@ async function handleQuizAnswer(env, callback) {
   });
 }
 
-// ---- v2 new features: quiz v2, flashcards, lessons, help/language, share, voice prefs ----
+// ---- v2 new features: quiz v2, lessons, help/language, share, voice prefs ----
 // UI language stored per user in user.lang ("ar" default, "en").
 async function getUserLang(env, chatId) {
   if (!env.USERS) return "ar";
@@ -218,7 +218,6 @@ async function sendHelp(env, chatId) {
     text: helpText(lang),
     parse_mode: "HTML",
     reply_markup: { inline_keyboard: [
-      [{ text: "🃏 بطاقات / Flashcards", callback_data: "nf|flash" }],
       [{ text: "🧠 اختبار / Quiz", callback_data: "nf|quiz|meaning" }, { text: "🗓 اختبار اليوم", callback_data: "nf|dailyquiz" }],
       [{ text: "🔊 صوت مرة / 3 مرات", callback_data: "nf|voicesettings" }],
       [{ text: "🔘 القوائم / Menu", callback_data: "nf|menu" }],
@@ -262,53 +261,6 @@ async function handleQuizV2Answer(env, callback) {
     parse_mode: "HTML",
   });
 }
-async function sendFlashcard(env, chatId, userId) {
-  const user = (await getUser(env, String(userId))) ?? {};
-  const favs = Array.isArray(user.favs) ? user.favs : [];
-  if (!favs.length) {
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "🃏 لا توجد كلمات مفضلة بعد. أضف كلمة للمفضلة بزر ⭐ أو بأمر /fav ثم أرسل /flashcards." });
-    return;
-  }
-  const picked = pickFlashcard(favs, user.flash ?? {});
-  if (!picked) { await telegram(env, "sendMessage", { chat_id: chatId, text: "🎉 راجعت كل بطاقاتك اليوم! أضف كلمات جديدة للمفضلة للمراجعة." }); return; }
-  flashState.set(String(chatId), { fav: picked.fav, level: picked.level, at: Date.now() });
-  await telegram(env, "sendMessage", {
-    chat_id: chatId,
-    text: `🃏 <b>بطاقة (${picked.remaining} متبقية)</b>\\n\\n<b>${escapeHtml(String(picked.fav.word ?? ""))}</b>\\n\\nحاول تتذكّر معناها، ثم اضغط لإظهارها.`,
-    parse_mode: "HTML",
-    reply_markup: { inline_keyboard: [[{ text: "👁 إظهار المعنى", callback_data: "nf|fc|show" }]] },
-  });
-}
-async function handleFlashcard(env, callback) {
-  const answer = (extra = {}) => telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, ...extra });
-  const chatId = String(callback.message?.chat?.id ?? "");
-  const action = String(callback.data ?? "").split("|")[2];
-  const state = flashState.get(chatId);
-  if (!state || Date.now() - state.at > FLASH_TTL_MS) {
-    await answer({ text: "⌛ انتهت البطاقة. أرسل /flashcards لبطاقة جديدة.", show_alert: true });
-    return;
-  }
-  const userId = String(callback.from?.id ?? chatId);
-  if (action === "show") {
-    await telegram(env, "editMessageText", {
-      chat_id: callback.message.chat.id,
-      message_id: callback.message.message_id,
-      text: `🃏 <b>${escapeHtml(String(state.fav.word ?? ""))}</b>\\n\\n📖 ${escapeHtml(String(state.fav.meaning ?? ""))}\\n\\nهل كنت تعرفها؟`,
-      parse_mode: "HTML",
-      reply_markup: { inline_keyboard: [[{ text: "🔁 مرة أخرى", callback_data: "nf|fc|again" }, { text: "✅ أعرفها", callback_data: "nf|fc|known" }]] },
-    });
-    return;
-  }
-  if (action === "again" || action === "known") {
-    const user = (await getUser(env, userId)) ?? {};
-    const flash = updateFlashcard(user.flash ?? {}, state.fav.word, action === "known");
-    await saveUser(env, userId, { ...user, flash });
-    flashState.delete(chatId);
-    await answer({ text: action === "known" ? "✅ تم، مستوى البطاقة ارتفع." : "🔁 تم، ستعود البطاقة قريبًا." });
-    await sendFlashcard(env, chatId, userId);
-    return;
-  }
-}
 async function handleNewFeaturesCallback(env, callback) {
   const parts = String(callback.data ?? "").split("|");
   const action = parts[1];
@@ -316,7 +268,6 @@ async function handleNewFeaturesCallback(env, callback) {
   const userId = String(callback.from?.id ?? chatId ?? "");
   const answer = (extra = {}) => telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, ...extra });
   if (action === "q2") return handleQuizV2Answer(env, callback);
-  if (action === "fc") return handleFlashcard(env, callback);
   if (action === "share") {
     const record = recordById(Number(parts[2]));
     if (!record) { await answer({ text: "الكلمة غير موجودة.", show_alert: true }); return; }
@@ -324,7 +275,6 @@ async function handleNewFeaturesCallback(env, callback) {
     return;
   }
   if (action === "menu") return sendRootMenus(env, chatId, userId);
-  if (action === "flash") return sendFlashcard(env, chatId, userId);
   if (action === "quiz") return beginQuizV2(env, chatId, parts[2] || "meaning");
   if (action === "dailyquiz") return beginQuizV2(env, chatId, dailyQuizType());
   if (action === "lang") {
@@ -691,7 +641,6 @@ async function handleGetCodeStep(env, chatId, userId, text, user) {
 }
 async function runMenuCommand(env, chatId, userId, command) {
   if (command === "/quiz") { await beginQuiz(env, chatId); return; }
-  if (command === "/flashcards") { await sendFlashcard(env, chatId, userId); return; }
   if (command === "/help") { await sendHelp(env, chatId); return; }
   if (command === "/dailyquiz") { await beginQuizV2(env, chatId, dailyQuizType()); return; }
   if (command === "/menu") { await sendRootMenus(env, chatId, chatId); return; }
@@ -816,8 +765,6 @@ async function handleMenuButton(env, callback) {
   }
 }
 // v2 quiz state reuses the existing quizState map shape: {correct, options, at, type}
-const flashState = new Map(); // chatId -> {fav, level, at}
-const FLASH_TTL_MS = 15 * 60000;
 // Share button appended as an extra row to a result's existing "more" markup
 // (moreMeaning shape: {reply_markup:{inline_keyboard}}), so the existing
 // send/edit paths carry it unchanged and the "next meaning" button stays first.
@@ -1146,7 +1093,7 @@ function lazy(build) {
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
 import { audioUrl, audioVersion, fetchHumanSpeech, fetchPrebuiltSpeech, isSingleWordOgg, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 import { copticDateNow, alphabetText, letterStatsText, longestText, originsText, wordCountText, startsWithText, similarText, translateText, vocabText, startGuess, handleGuessReply } from "./features.js";
-import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, pickFlashcard, updateFlashcard, suggestSimilar, helpText, retentionText, opsText, recordById } from "./new-features.js";
+import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, suggestSimilar, helpText, retentionText, opsText, recordById } from "./new-features.js";
 import { lookupCertificate } from "./certificates.js";
 import { getCodeFromMacro, buildGetCodeReply, normalizeGetCodePhone, getCodePhoneValid } from "./getcode.js";
 import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VIDEO_MENU_ID, cleanMenuTitle, cleanMenuText, cleanButtonLabel, cleanUrl, cleanCommand, normalizeMenus, findMenu, findButton, rootMenus, descendantMenuIds, buildMenuKeyboard, buildRootKeyboard, menuOpenText, menuAdminListText, menuAdminDetailText, parseMenuTarget, parseButtonTarget, addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton, ensureVideoMenu } from "./menu-builder.js";
@@ -5945,7 +5892,6 @@ const EXTRA_BOT_COMMANDS = [
   { command: "alias", description: "اختصار بحث فوري" },
   { command: "dailyquiz", description: "اختبار اليوم" },
   { command: "fav", description: "حفظ آخر كلمة بحثت عنها" },
-  { command: "flashcards", description: "بطاقات تعليمية من المفضلة" },
   { command: "cert1", description: "شهادة المستوى الأول (من زر القائمة)" },
   { command: "cert2", description: "شهادة المستوى الثاني (من زر القائمة)" },
   { command: "getcode", description: "الحصول على الرقم الكودي (من زر القائمة)" },
@@ -5966,7 +5912,6 @@ const EXTRA_BOT_COMMANDS = [
   // من حزمة المستخدمين الاحترافية (pro-user2).
   { command: "subscribe", description: "الاشتراك في كلمة اليوم" },
   { command: "unsubscribe", description: "إلغاء الاشتراك في كلمة اليوم" },
-  { command: "study", description: "مراجعة البطاقات التعليمية" },
   { command: "daily", description: "كلمة اليوم" },
   { command: "compare", description: "مقارنة كلمتين" },
   { command: "examples", description: "أمثلة على استخدام كلمة" },
@@ -6015,7 +5960,7 @@ const ALL_COMMANDS_CATEGORIES = [
   { id: "broadcast", title: "📢 البث والإرسال", commands: ["broadcast", "startbroadcast", "stopbroadcast", "bcpause", "bcresume", "bccancel", "bcspeed", "testbroadcast", "broadcaststats", "targeted", "segment", "templateslib", "tplsave", "tplsend", "announce", "maintadv", "maintadvstatus", "maintadvcancel", "massdm", "msg", "schedule", "schedules", "unschedule", "autoreply", "optout", "optoutstats", "addevent", "events", "delevent"] },
   { id: "system", title: "⚙️ أدوات النظام", commands: ["health", "healthcheck", "uptime", "botinfo", "sessionlist", "kill", "resetsessions", "clearcache", "cacheinfo", "limits", "slowmode", "maintenance", "setmaintmsg", "setbanmsg", "feature", "errors", "auditlog", "adminaudit", "securitylog", "setcommands", "setbotname", "setbotabout", "setbotdescription", "setshortdesc", "setlang", "setmenubutton", "setwod", "setwodtest", "note", "alias", "motd", "rules", "searchlimit", "usagealert", "recover", "recoverusers", "apikey", "whereami", "snapshot", "preview", "logchannel", "ping", "debug"] },
   { id: "advanced", title: "🔧 أدوات متقدمة", commands: ["exportaudit", "exporterrors", "exportmisses", "exportbans", "exportsecurity", "exportsearch", "resetstats", "newhelp", "a2help", "proadmin", "prohelp", "apanel", "strings", "setstring", "resetstring", "cleanup", "maintplan", "teamnote", "teamnotes", "teamassign", "teamdone", "rollout", "rolloutallow", "rolloutdeny", "rollouts", "selfcheck", "configexport", "webhook", "envcheck", "dostat", "bottest"] },
-  { id: "learn", title: "🎓 التعلم والاختبارات", commands: ["quiz", "quiz2", "quizstats", "dailyquiz", "flashcards", "study", "streak", "hangman", "guess", "daily", "wod", "wordoftheday", "fav", "favorites", "myfav", "mywords", "removefav", "mystats", "recent", "gamify", "badges", "exportanki", "examples", "compare", "cert1", "cert2", "getcode"] },
+  { id: "learn", title: "🎓 التعلم والاختبارات", commands: ["quiz", "quiz2", "quizstats", "dailyquiz", "streak", "hangman", "guess", "daily", "wod", "wordoftheday", "fav", "favorites", "myfav", "mywords", "removefav", "mystats", "recent", "gamify", "badges", "exportanki", "examples", "compare", "cert1", "cert2", "getcode"] },
   { id: "support", title: "💬 الدعم والتواصل", commands: ["support", "tickets", "ticket", "ticketclose", "mytickets", "reply", "feedback", "bug", "suggest", "suggestword", "suggestions", "contribute", "invite", "myref", "toptop", "refinfo", "donate", "donation", "subscribe", "unsubscribe", "notify", "exportmydata", "clearhistory", "alerts", "exitsupport"] },
   { id: "security", title: "🔐 الأمان والصلاحيات", commands: ["2fa", "password", "unlock", "lockdown", "verifygate", "captcha", "ratewarn", "ratelimit", "blacklist", "whitelist", "antispam", "spamlist", "spamclear", "setrole", "roles", "myrole", "admins"] },
   { id: "menus", title: "🎛 القوائم والبوت", commands: ["menuadmin", "menueditor", "addmenu", "addbutton", "delmenu", "delbutton", "movebtn", "addvideo", "videolist", "delvideo", "toptags", "welcomemedia", "welcomesticker", "leavemsg", "setjoinmsg", "editwelcome", "resetwelcome", "pin", "pinhere", "unpin", "hidebutton", "hiddenbuttons", "showbutton"] },
@@ -6465,7 +6410,7 @@ async function handleUpdate(update, env, ctx) {
       }
       return;
     }
-    // v2: all new-feature callbacks start with nf| (quiz v2, flashcards, lessons,
+    // v2: all new-feature callbacks start with nf| (quiz v2, lessons,
     // help/language, voice settings, share fallback).
     if (typeof callback.data === "string" && callback.data.startsWith("nf|")) {
       await handleNewFeaturesCallback(env, callback);
@@ -7528,7 +7473,7 @@ async function handleUpdate(update, env, ctx) {
   }
   // ---- Batch 5 user features: quiz, favorites, my stats, recent, voice preference ----
   // v2 commands: /quiz keeps its old meaning-type behaviour; /quiz <type> adds the
-  // two new types. /help, /lessons, /flashcards, /dailyquiz, /lang, /voiceonce,
+  // two new types. /help, /lessons, /dailyquiz, /lang, /voiceonce,
   // /voicethree, /voicesettings are new.
   if (text === "/quiz" || text.startsWith("/quiz ")) {
     const arg = text.slice("/quiz".length).trim().toLowerCase();
@@ -7541,7 +7486,6 @@ async function handleUpdate(update, env, ctx) {
   if (text === "/cert1" || text === "/cert2") { await beginCertFlow(env, message.chat.id, userId, text === "/cert1" ? "0" : "1"); return; }
   if (text === "/getcode") { await beginGetCodeFlow(env, message.chat.id, userId); return; }
   if (text === "/menu") { await sendRootMenus(env, message.chat.id, userId); return; }
-  if (text === "/flashcards") { await sendFlashcard(env, message.chat.id, userId); return; }
   if (text === "/lang" || text.startsWith("/lang ")) {
     const arg = text.slice("/lang".length).trim().toLowerCase();
     if (arg === "ar" || arg === "en") { await setUserLang(env, userId, arg); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: arg === "en" ? "✅ Language set to English. /help" : "✅ تم ضبط اللغة على العربية. /help" }); return; }

@@ -10,7 +10,6 @@ function escapeHtml(value) { return String(value ?? "").replace(/&/g,"&amp;").re
 function stripMarks(value) { return String(value ?? "").replace(/[\u0300-\u036f\u064b-\u065f\u0670\u06d6-\u06ed]/gu,"").replace(/`/gu,"").replace(/\s*\([^)]*\)/gu,"").replace(/\s+/gu," ").trim(); }
 
 const GAME_TTL = 15 * 60 * 1000;
-const flashState = new Map(); // userId -> { cards, index, revealed }
 const quiz2State = new Map(); // userId -> { answer, options, word }
 const hangmanState = new Map(); // userId -> { word, masked, wrong, hint }
 
@@ -32,16 +31,6 @@ export function createProUser2({ telegram, storeCall, getUser, saveUser, isAdmin
       const u = (await getUser(env, userId)) ?? {};
       await saveUser(env, userId, { ...u, wodSub: on });
       await send(env, chatId, on ? "🔔 تم اشتراكك في كلمة اليوم. ستستلمها تلقائيًا." : "🔕 تم إلغاء اشتراكك في كلمة اليوم.");
-      return true;
-    },
-    async flashcards(env, chatId, userId) {
-      const pool = records.filter((r) => String(r.pronunciation ?? "").trim() && String(r.meaning ?? "").trim());
-      const cards = [];
-      const used = new Set();
-      while (cards.length < 10 && used.size < pool.length) { const i = Math.floor(Math.random() * pool.length); if (used.has(i)) continue; used.add(i); cards.push(pool[i]); }
-      flashState.set(String(userId), { cards, index: 0, revealed: false, at: Date.now() });
-      const c = cards[0];
-      await telegram(env, "sendMessage", { chat_id: chatId, text: `🃏 <b>بطاقة 1/${cards.length}</b>\n\n🔤 <b>${escapeHtml(stripMarks(c.coptic))}</b> [${escapeHtml(String(c.pronunciation ?? "").trim())}]\n\nاضغط «إظهار المعنى» لرؤية الترجمة.`, parse_mode: "HTML", reply_markup: { inline_keyboard: [[{ text: "👁 إظهار المعنى", callback_data: "pu2|fc|show" }, { text: "⏭ التالية", callback_data: "pu2|fc|next" }], [{ text: "⏹ إنهاء", callback_data: "pu2|fc|stop" }]] } }).catch(() => null);
       return true;
     },
     async streak(env, chatId, userId) {
@@ -196,26 +185,6 @@ export function createProUser2({ telegram, storeCall, getUser, saveUser, isAdmin
     const data = String(callback.data ?? "");
     const userId = callback.from?.id;
     const chatId = callback.message?.chat?.id;
-    if (data.startsWith("pu2|fc|")) {
-      await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id }).catch(() => null);
-      const st = flashState.get(String(userId));
-      if (!st || !chatId) return true;
-      const action = data.split("|")[2];
-      if (action === "stop") { flashState.delete(String(userId)); await send(env, chatId, "⏹ تم إنهاء البطاقات."); return true; }
-      if (action === "show") {
-        const c = st.cards[st.index];
-        await telegram(env, "editMessageText", { chat_id: chatId, message_id: callback.message?.message_id, text: `🃏 <b>بطاقة ${st.index + 1}/${st.cards.length}</b>\n\n🔤 <b>${escapeHtml(stripMarks(c.coptic))}</b> [${escapeHtml(String(c.pronunciation ?? "").trim())}]\n🇪🇬 ${escapeHtml(String(c.meaning ?? "").slice(0, 120))}`, parse_mode: "HTML", reply_markup: { inline_keyboard: [[{ text: "⏭ التالية", callback_data: "pu2|fc|next" }, { text: "⏹ إنهاء", callback_data: "pu2|fc|stop" }]] } }).catch(() => null);
-        return true;
-      }
-      if (action === "next") {
-        st.index += 1;
-        if (st.index >= st.cards.length) { flashState.delete(String(userId)); await telegram(env, "editMessageText", { chat_id: chatId, message_id: callback.message?.message_id, text: "🎉 انتهت البطاقات! أعد /flashcards لحزمة جديدة." }).catch(() => null); return true; }
-        const c = st.cards[st.index];
-        await telegram(env, "editMessageText", { chat_id: chatId, message_id: callback.message?.message_id, text: `🃏 <b>بطاقة ${st.index + 1}/${st.cards.length}</b>\n\n🔤 <b>${escapeHtml(stripMarks(c.coptic))}</b> [${escapeHtml(String(c.pronunciation ?? "").trim())}]`, parse_mode: "HTML", reply_markup: { inline_keyboard: [[{ text: "👁 إظهار المعنى", callback_data: "pu2|fc|show" }, { text: "⏭ التالية", callback_data: "pu2|fc|next" }], [{ text: "⏹ إنهاء", callback_data: "pu2|fc|stop" }]] } }).catch(() => null);
-        return true;
-      }
-      return true;
-    }
     if (data.startsWith("pu2|q2|")) {
       await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id }).catch(() => null);
       const picked = data.split("|")[2];
@@ -259,7 +228,6 @@ export function createProUser2({ telegram, storeCall, getUser, saveUser, isAdmin
     switch (cmd) {
       case "/subscribe": return handlers.subscribe(env, chatId, userId, true);
       case "/unsubscribe": return handlers.subscribe(env, chatId, userId, false);
-      case "/flashcards": case "/study": return handlers.flashcards(env, chatId, userId);
       case "/streak": return handlers.streak(env, chatId, userId);
       case "/lang": return handlers.setlang(env, chatId, userId, arg);
       case "/report": return handlers.report(env, chatId, userId, arg, "report");
