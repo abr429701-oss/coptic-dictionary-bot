@@ -2075,9 +2075,12 @@ async function repeatedRecording(env, fileId) {
   const times = Number(env?.VOICE_REPEATS ?? 3);
   if (!(times > 1)) return { fileId };
   try {
+    // In-memory repeated file_id first (populated after the first upload).
+    const memRepeated = voiceFileIdCache.get(repeatedRecordingKey(fileId));
+    if (memRepeated) return { fileId: memRepeated };
     if (env.USERS) {
       const cached = (await storeCall(env, { op: "get", key: repeatedRecordingKey(fileId) })).value;
-      if (cached?.fileId) return { fileId: cached.fileId };
+      if (cached?.fileId) { rememberVoiceFileId(repeatedRecordingKey(fileId), cached.fileId); return { fileId: cached.fileId }; }
     }
     const info = await telegram(env, "getFile", { file_id: fileId });
     const filePath = info?.ok ? info.result?.file_path : null;
@@ -2099,11 +2102,25 @@ async function repeatedRecording(env, fileId) {
 function prepareWordVoice(env, record, media = null, { skipRecorded = false, ignoreCachedFileIds = false, voiceRepeats = null } = {}) {
   return (async () => {
     if (!skipRecorded && !ignoreCachedFileIds && env.USERS && record?.id != null) {
-      try {
-        const saved = media ? { value: (await media).voice } : await storeCall(env, { op: "get", key: voiceKey(record.id) });
-        if (saved?.value?.fileId) return await repeatedRecording(env, saved.value.fileId);
-      } catch (error) {
-        console.error("Recorded voice lookup failed", error instanceof Error ? error.message : "unknown error");
+      const vKey = voiceKey(record.id);
+      // In-memory recorded file_id first (no DO round-trip). A negative
+      // answer is remembered briefly: a fresh recording appears within
+      // the TTL, and saving/deleting a recording clears it outright.
+      const memRecorded = voiceFileIdCache.get(vKey);
+      if (memRecorded) return await repeatedRecording(env, memRecorded);
+      const noRecAt = voiceNoRecording.get(vKey);
+      if (noRecAt === undefined || Date.now() - noRecAt >= VOICE_NO_RECORDING_TTL_MS) {
+        try {
+          const saved = media ? { value: (await media).voice } : await storeCall(env, { op: "get", key: vKey });
+          if (saved?.value?.fileId) {
+            rememberVoiceFileId(vKey, saved.value.fileId);
+            voiceNoRecording.delete(vKey);
+            return await repeatedRecording(env, saved.value.fileId);
+          }
+          voiceNoRecording.set(vKey, Date.now());
+        } catch (error) {
+          console.error("Recorded voice lookup failed", error instanceof Error ? error.message : "unknown error");
+        }
       }
     }
     if (record?.id != null) {
@@ -2125,23 +2142,17 @@ function prepareWordVoice(env, record, media = null, { skipRecorded = false, ign
       ]) : [null, null];
       if (cachedNeural?.fileId) return { fileId: cachedNeural.fileId, neural: true };
       if (cachedHuman?.fileId) return { fileId: cachedHuman.fileId, neural: true };
-      // Per-user repeat count applies only to the generated voice: pass a cloned
-      // env so fetchPrebuiltSpeech reads VOICE_REPEATS from it; the recorded path
-      // above keeps the global behaviour, and fetchHumanSpeech is untouched.
+      // Generated audio: fetch the neural file first (its candidates
+      // already include the human file); only fetch the human file when
+      // the neural fetch finds nothing. The old code fetched both in
+      // parallel, paying a wasted human fetch on every word that has a
+      // neural file. Priority is unchanged: fresh neural > human > stale neural.
       const voiceEnv = voiceRepeats ? { ...env, VOICE_REPEATS: voiceRepeats } : env;
-      const [neural, human] = await Promise.all([
-        fetchPrebuiltSpeech(voiceEnv, record).catch(() => null),
-        fetchHumanSpeech(env, record).catch(() => null),
-      ]);
-      if (neural) {
-        // Only the new single-word files are remembered by Telegram file_id; older files are never cached.
-        const fresh = isSingleWordOgg(neural);
-        const voice = { audio: neural, neural: true, wordId: record.id, cacheable: fresh };
-        if (fresh) return voice;
-        if (human) return { audio: human, neural: true, human: true, wordId: record.id };
-        return voice;
-      }
+      const neural = await fetchPrebuiltSpeech(voiceEnv, record).catch(() => null);
+      if (neural && isSingleWordOgg(neural)) return { audio: neural, neural: true, wordId: record.id, cacheable: true };
+      const human = await fetchHumanSpeech(env, record).catch(() => null);
       if (human) return { audio: human, neural: true, human: true, wordId: record.id };
+      if (neural) return { audio: neural, neural: true, wordId: record.id, cacheable: false };
     }
     // No Google fallback: generated audio must come from the Polly Miguel
     // files published by GitHub Actions.
@@ -2162,6 +2173,19 @@ function rememberVoiceFileId(key, fileId) {
   voiceFileIdCache.set(key, fileId);
   if (voiceFileIdCache.size > 6000) voiceFileIdCache.clear();
 }
+// Test isolation: the file_id memory is per isolate in production, but
+// tests share the module across fresh stores — clear it between tests so
+// one test's recording never leaks into another test's store.
+export function resetVoiceFileIdCache() {
+  voiceFileIdCache.clear();
+  voiceNoRecording.clear();
+}
+// Words with no admin recording yet: the DO get that proves it is
+// remembered briefly, so every search does not pay it again. A fresh
+// recording appears within the TTL; saving or deleting a recording
+// clears the entry outright (see the /record save + delete paths).
+const VOICE_NO_RECORDING_TTL_MS = 60000;
+const voiceNoRecording = new Map(); // voiceKey -> timestamp
 
 // Telegram caps captions at 1024 characters; anything longer is truncated in the caption and
 // the full text is sent immediately after the voice (never before it).
@@ -2329,7 +2353,11 @@ async function callAppsScript(config, payload) {
 async function pruneLocalVoices(env, deletedIds) {
   if (!env.USERS) return { removed: 0 };
   const result = await storeCall(env, { op: "voiceDeleteIds", ids: deletedIds.map(String) });
-  return { removed: Number(result?.removed ?? 0) };
+  const removed = Number(result?.removed ?? 0);
+  // Deleted recordings must not keep being served from the file_id
+  // memory; the cache rebuilds from the DO on the next searches.
+  if (removed) { voiceFileIdCache.clear(); voiceNoRecording.clear(); }
+  return { removed };
 }
 async function reconcileDrive(env) {
   const config = await driveConfig(env);
@@ -3697,6 +3725,10 @@ async function captureVoiceRecording(env, message, userId, user, ctx) {
     key: voiceKey(id),
     value: { fileId: message.voice.file_id, duration: message.voice.duration ?? null, savedAt: new Date().toISOString() },
   });
+  // The new recording is live immediately: memoize it and drop the
+  // "no recording" note for this word.
+  rememberVoiceFileId(voiceKey(id), message.voice.file_id);
+  voiceNoRecording.delete(voiceKey(id));
   const archive = archiveAndReport(env, message.chat.id, {
     id,
     record,
@@ -3957,6 +3989,8 @@ async function finishDeleteVoice(env, callback, choice) {
   const remote = await deleteRemoteVoice(env, record.id);
   if (!remote.ok) { await edit(`❌ تعذّر حذف تسجيل «${record.coptic}» من Drive/Sheet: ${remote.error ?? "unknown error"}`); return; }
   await storeCall(env, { op: "delete", key: voiceKey(record.id) });
+  voiceFileIdCache.delete(voiceKey(record.id));
+  voiceNoRecording.delete(voiceKey(record.id));
   await edit(`✅ حُذف تسجيل «${record.coptic}» من البوت وDrive وورقة upload. ستُقرأ الآن بالصوت الآلي.`);
 }
 

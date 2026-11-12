@@ -111,6 +111,11 @@ function includesAscii(bytes, text) {
   return false;
 }
 
+// repeatSingleWordOgg proves the input is a single-word file when it
+// returns a new buffer (all checks passed); remember that so the caller's
+// freshness check does not parse the same pages a second time.
+const singleWordMemo = new WeakMap();
+
 export function repeatSingleWordOgg(input, { times = 3, pauseMs = 700, requireMarker = true } = {}) {
   if (!(times > 1)) return input;
   const pages = parseOggPages(input);
@@ -156,12 +161,16 @@ export function repeatSingleWordOgg(input, { times = 3, pauseMs = 700, requireMa
     result.set(page, at);
     at += page.length;
   }
+  // Recordings are repeated with requireMarker:false and are not
+  // single-word files; only memoize the proven single-word case.
+  if (requireMarker) singleWordMemo.set(result.buffer, true);
   return result.buffer;
 }
 
 // True when the file was built by the single-word generator (new voice), false for older files.
 export function isSingleWordOgg(input) {
   try {
+    if (input && singleWordMemo.has(input)) return singleWordMemo.get(input);
     const pages = parseOggPages(input);
     return pages.length > 2 && includesAscii(pages[1].data, SINGLE_WORD_MARKER);
   } catch {

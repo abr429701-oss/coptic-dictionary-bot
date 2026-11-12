@@ -6,13 +6,13 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import worker, { UserStore } from "../src/index.js";
+import worker, { UserStore, resetVoiceFileIdCache } from "../src/index.js";
 import { translateFieldValue, VALUE_TRANSLATIONS } from "../src/field-translations.js";
 import { resetAudioCaches, HUMAN_AUDIO_VERSION } from "../src/neural-voice.js";
 import records from "../data/dictionary.json" with { type: "json" };
 
 // The in-isolate audio memory must never leak one test's fetched word into the next test.
-test.beforeEach(() => resetAudioCaches());
+test.beforeEach(() => { resetAudioCaches(); resetVoiceFileIdCache(); });
 
 // The Google Sheet is the source of truth for the dictionary, so a headword can gain a
 // gender marker later (ⲁⲃⲱⲕ → ⲁⲃⲱⲕ (ⲡ)). Tests look a word up by its bare Coptic form so a

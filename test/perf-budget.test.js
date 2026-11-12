@@ -16,21 +16,18 @@ import { resetAudioCaches } from "../src/neural-voice.js";
 // the waste they measure is removed. A budget regression fails the suite.
 //
 // Measured baseline (warm config caches, fresh user id):
-// - plain search: 8 DO calls after G3 (10 with cold voice memory: the
+// - plain search: 7 DO calls after G5 (9 with cold voice memory: the
 //   warm-up search caches the word's file_id in isolate memory). G0
-//   measured 21 pre-G1, G1 brought it to 14, G2 to 12. Remaining:
-//   historyAppend x1 + convAppend x1 (the atomic flush ops) + register
-//   x1 + drive-config x1 + menus:v1 x1 + pro:support:flow x1 (first
-//   update on a fresh store; warm in production within TTL) + getUser
-//   x1 + voiceid x1 (G5's target). A repeat message from the same user
-//   within 60 s costs 1 less (registeredCache hit skips the register op).
-// - /start: 7. noop callback: 0. inline query: 1. new user: 8 (10 with
-//   cold voice memory). second search: 4.
-// Note: resetAudioCaches clears only the audio BYTES cache, not the
-// voice file_id memory (voiceFileIdCache in src/index.js) — so the
-// warm-up word stays cached for the whole file. The recorded-voice check
-// (voiceid:<id>) is still read from the DO on EVERY search, before the
-// free memory check — that ordering wart is G5's target.
+//   measured 21 pre-G1, G1 brought it to 14, G2 to 12, G3 to 8.
+//   Remaining: historyAppend x1 + convAppend x1 (the atomic flush ops)
+//   + register x1 + drive-config x1 + menus:v1 x1 + pro:support:flow x1
+//   (first update on a fresh store; warm in production within TTL) +
+//   getUser x1. A repeat message from the same user within 60 s costs 1
+//   less (registeredCache hit skips the register op); a repeat search
+//   for the same word costs only 3 (the two flushes + getUser) — the
+//   voice path reads nothing from the DO once its file_ids are memoized.
+// - /start: 7. noop callback: 0. inline query: 1. new user: 7 (9 with
+//   cold voice memory). second search: 3.
 //
 // Rules that keep the numbers deterministic:
 // - one fresh user id per scenario (rate-limit buckets are module-level and
@@ -183,7 +180,7 @@ test("perf-budget: plain search from a named user (voice on)", async (t) => {
   const calls = await runText(kv, 9101, "ⲫⲱⲥ");
   t.diagnostic(`plain search: ${summary(counts)}`);
   assert.ok(calls.some((c) => c.url.endsWith("/sendVoice")), "the search must still send its voice");
-  assert.ok(counts.total <= 10, `plain search must stay within its DO budget, got ${summary(counts)}`);
+  assert.ok(counts.total <= 9, `plain search must stay within its DO budget, got ${summary(counts)}`);
 });
 
 // G2 regression: one search must read the user record exactly once
@@ -230,6 +227,19 @@ test("perf-budget: registering a new user does not list all users", async (t) =>
   assert.ok(!newLists.includes("user:"), `the second registration must not list users, got lists: ${newLists.join(",") || "none"}`);
 });
 
+// G5 regression: a repeat search for a word with no admin recording must
+// not re-read the recorded-voice key (negative voice memo).
+test("perf-budget: repeat search skips the recorded-voice check (voice memo)", async (t) => {
+  const { kv, counts } = countingKv();
+  kv.store.set("user:9109", NAMED_USER(9109));
+  await runText(kv, 9109, "ⲫⲱⲥ");
+  resetCounts(counts);
+  const calls = await runText(kv, 9109, "ⲫⲱⲥ");
+  t.diagnostic(`repeat search: ${summary(counts)}`);
+  assert.ok(calls.some((c) => c.url.endsWith("/sendVoice")), "the repeat search must still send its voice");
+  assert.equal(counts.byKey.get("voiceid:9251") ?? 0, 0, "the repeat search must not re-read the recorded-voice key");
+});
+
 test("perf-budget: /start from a named user", async (t) => {
   const { kv, counts } = countingKv();
   kv.store.set("user:9102", NAMED_USER(9102));
@@ -254,7 +264,7 @@ test("perf-budget: a second plain search re-reads no null-config keys", async (t
   for (const key of ["wod:config", "alerts:config", "ratelimit:max", "lockdown", "verifygate"]) {
     assert.equal(counts.byKey.get(key) ?? 0, 0, `${key} must be served from cache on a second search`);
   }
-  assert.ok(counts.total <= 6, `second search must stay within its DO budget, got ${summary(counts)}`);
+  assert.ok(counts.total <= 5, `second search must stay within its DO budget, got ${summary(counts)}`);
 });
 
 test("perf-budget: noop callback costs zero DO requests", async (t) => {
@@ -280,5 +290,5 @@ test("perf-budget: first message from a brand-new user (register path)", async (
   const calls = await runText(kv, 9105, "ⲫⲱⲥ");
   t.diagnostic(`new user: ${summary(counts)}`);
   assert.ok(calls.some((c) => c.url.endsWith("/sendMessage")), "a new user must still get the name prompt");
-  assert.ok(counts.total <= 10, `a new user's first message must stay within its DO budget, got ${summary(counts)}`);
+  assert.ok(counts.total <= 9, `a new user's first message must stay within its DO budget, got ${summary(counts)}`);
 });

@@ -308,10 +308,25 @@ export async function checkCertCompletion(code, level) {
 //   { kind: "photo", url, caption } (small icon by URL, as before)
 //   { kind: "text", text }
 //   { kind: "not-found" } (code nowhere) | { kind: "error", text } (sheets unreachable)
+
+// Certificate settings (the settings tab) change only when an admin edits
+// the Sheet, so they are cached briefly per isolate: one less gviz
+// subrequest per lookup. A failed fetch is never cached.
+const CERT_SETTINGS_TTL_MS = 60000;
+let certSettingsCache = { value: null, at: 0 };
+export function resetCertSettingsCache() { certSettingsCache = { value: null, at: 0 }; }
+async function certSettings() {
+  const now = Date.now();
+  if (certSettingsCache.at !== 0 && now - certSettingsCache.at < CERT_SETTINGS_TTL_MS && certSettingsCache.value) return certSettingsCache.value;
+  const rows = await fetchCertSheetCsv(CERT_MAIN_SHEET_ID, { gid: CERT_SETTINGS_GID });
+  const settings = certSettingsFromRows(rows);
+  certSettingsCache = { value: settings, at: Date.now() };
+  return settings;
+}
+
 export async function lookupCertificate(code, level) {
   try {
-    const settingsRows = await fetchCertSheetCsv(CERT_MAIN_SHEET_ID, { gid: CERT_SETTINGS_GID });
-    const settings = certSettingsFromRows(settingsRows);
+    const settings = await certSettings();
     const cfg = settings[Number(level)];
     if (!cfg || !cfg.sheet) return { kind: "error", text: "❌ تعذّر قراءة إعدادات الشهادات." };
     const data = await fetchCertSheetCsv(CERT_MAIN_SHEET_ID, { sheet: cfg.sheet, where: certWhereClause(cfg.lookupLetters, code) });
