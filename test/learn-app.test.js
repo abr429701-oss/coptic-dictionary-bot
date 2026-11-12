@@ -7,6 +7,7 @@ import { LEARN_LEVELS } from "../src/learn-manifest.js";
 
 const testRoot = fileURLToPath(new URL("..", import.meta.url));
 const appJson = JSON.parse(readFileSync(resolve(testRoot, "public", "learn-app", "lessons.json"), "utf8"));
+const examJson = JSON.parse(readFileSync(resolve(testRoot, "public", "learn-app", "exams.json"), "utf8"));
 const appHtml = readFileSync(resolve(testRoot, "public", "learn-app", "index.html"), "utf8");
 
 // The learning web app (2026-11-13): static page, no locks, all lessons open.
@@ -47,7 +48,34 @@ test("learn-app: index.html loads the data and plays video natively", () => {
   assert.ok(appHtml.includes("https://telegram.org/js/telegram-web-app.js"), "Telegram WebApp SDK");
   assert.ok(appHtml.includes('fetch("lessons.json")'), "loads the static lesson data");
   assert.ok(appHtml.includes("<video controls playsinline"), "native video element, no Drive player embed");
-  assert.ok(appHtml.includes('"/video/"'), "videos stream through the bot's /video/ route");
+  assert.ok(appHtml.includes("drive.usercontent.google.com/download"), "videos stream straight from Google, zero Worker requests");
   assert.ok(!appHtml.includes("/preview"), "no Drive preview player iframe");
   assert.ok(appHtml.includes("الامتحان الإلكتروني"), "exam button label");
+});
+
+test("learn-app: exams.json covers all 12 forms with submit URLs and code validation", () => {
+  assert.equal(examJson.forms.length, 12, "one form per exam link");
+  const answerable = examJson.forms.flatMap((f) => f.questions.filter((q) => q.entryId !== null));
+  assert.equal(answerable.length, 122, "14 text + 106 MC + 2 dropdown");
+  for (const form of examJson.forms) {
+    assert.ok(form.submitUrl.endsWith("/formResponse"), `${form.formId} has a submit URL`);
+    assert.ok(form.confirmationMessage.length > 0, `${form.formId} has a confirmation message`);
+    const code = form.questions.find((q) => q.type === 0);
+    assert.ok(code, `${form.formId} has a code question`);
+    assert.ok(code.validation && code.validation.kind === "regex", `${form.formId} code question carries the regex`);
+    assert.equal(code.validation.errorText, "الرقم الكودي غير صحيح");
+    assert.ok(code.validation.pattern.length > 10, `${form.formId} code regex is not empty`);
+    // The verbatim pattern must compile and anchor as a full-string match.
+    const re = new RegExp(`^(?:${code.validation.pattern})$`);
+    assert.equal(typeof re.test, "function");
+  }
+});
+
+test("learn-app: index.html renders the exam in-app and posts to Google", () => {
+  assert.ok(appHtml.includes('fetch("exams.json")'), "exam data loads lazily");
+  assert.ok(appHtml.includes("data-exam"), "lesson exam button opens the in-app exam");
+  assert.ok(appHtml.includes("إرسال الإجابات"), "exam submit button");
+  assert.ok(appHtml.includes('mode: "no-cors"'), "answers POST straight to Google");
+  assert.ok(appHtml.includes("هذا السؤال مطلوب."), "required validation like Google Forms");
+  assert.ok(appHtml.includes("^(?:"), "code regex anchored as a full-string match");
 });

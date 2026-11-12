@@ -49,8 +49,28 @@
   .examBtn {
     display: block; text-align: center; text-decoration: none; font-size: 16px; font-weight: 600;
     background: var(--tg-theme-button-color, #2481cc); color: var(--tg-theme-button-text-color, #fff);
-    border-radius: 12px; padding: 14px; margin: 8px 0;
+    border-radius: 12px; padding: 14px; margin: 8px 0; border: 0; width: 100%; cursor: pointer;
   }
+  .q { margin: 22px 0; }
+  .qTitle { font-size: 15px; font-weight: 600; line-height: 1.7; margin-bottom: 8px; }
+  .qTitle .req { color: #c00; }
+  .qImg { width: 100%; border-radius: 12px; display: block; margin: 8px 0; }
+  .qText, .qSelect {
+    width: 100%; font-size: 15px; padding: 11px 12px;
+    border: 1px solid var(--tg-theme-section-separator-color, #ccc); border-radius: 10px;
+    background: var(--tg-theme-bg-color, #fff); color: var(--tg-theme-text-color, #111);
+  }
+  .opt {
+    display: block; padding: 10px 12px; margin: 6px 0; font-size: 15px; cursor: pointer;
+    border: 1px solid var(--tg-theme-section-separator-color, #e4e4e7); border-radius: 10px;
+  }
+  .opt input { margin-left: 8px; }
+  .qErr { color: #c00; font-size: 13px; margin-top: 6px; display: none; }
+  .qSection {
+    font-size: 16px; margin: 26px 0 4px; padding-top: 14px;
+    border-top: 1px solid var(--tg-theme-section-separator-color, #e4e4e7);
+  }
+  .confirm { white-space: pre-wrap; line-height: 1.9; font-size: 15px; margin: 18px 0; }
   .muted { color: var(--tg-theme-hint-color, #888); font-size: 14px; line-height: 1.7; }
   #error { color: #c00; padding: 20px 0; }
 </style>
@@ -77,12 +97,13 @@
   }
   function driveView(id) { return "https://drive.google.com/file/d/" + encodeURIComponent(id) + "/view"; }
   function driveImg(id) { return "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(id); }
-  // Lesson videos play through the bot itself (/video/<driveId> in
-  // src/index.js): Drive's direct download URL answers a video Range
-  // request with a 303 redirect and an attachment Content-Disposition,
-  // and Telegram's webview fails on both. The Worker streams the file
-  // back with clean media headers, so a plain <video> tag just plays.
-  function driveVideo(id) { return "/video/" + encodeURIComponent(id); }
+  // Lesson videos play natively in the page with a plain <video> tag, at
+  // ZERO Worker requests: the file streams straight from Google's download
+  // host (drive.usercontent.google.com answers video Range requests with
+  // 206 directly — the uc?export=download URL answers Range with a 303
+  // redirect instead, and Telegram's webview fails on that). The bot is
+  // never involved in playback.
+  function driveVideo(id) { return "https://drive.usercontent.google.com/download?id=" + encodeURIComponent(id) + "&export=download"; }
 
   function renderItem(item) {
     if (item.kind === "video") {
@@ -99,14 +120,165 @@
         "<div class='exercise'>" + esc(item.text) + "</div></div>";
     }
     if (item.kind === "url") {
-      return "<div class='item'><a class='examBtn' href='" + esc(item.url) + "' target='_blank' rel='noopener'>" +
-        esc(item.label || "📝 الامتحان الإلكتروني") + "</a></div>";
+      // The exam opens INSIDE the app: same questions, same Google Forms
+      // logic, answers POSTed straight to Google so they land in the same
+      // responses sheet — zero Worker requests. The Google Forms link stays
+      // as a fallback if the in-app exam can't load.
+      var fid = formIdFromUrl(item.url);
+      if (!fid) {
+        return "<div class='item'><a class='examBtn' href='" + esc(item.url) + "' target='_blank' rel='noopener'>" +
+          esc(item.label || "📝 الامتحان الإلكتروني") + "</a></div>";
+      }
+      return "<div class='item'><button class='examBtn' type='button' data-exam='" + esc(fid) + "'>" +
+        esc(item.label || "📝 الامتحان الإلكتروني") + "</button>" +
+        "<a class='fallback' href='" + esc(item.url) + "' target='_blank' rel='noopener'>فتح الامتحان في Google Forms ←</a></div>";
     }
     return "";
   }
 
+  function formIdFromUrl(url) {
+    var m = String(url || "").match(/\/forms\/d\/([A-Za-z0-9_-]+)\//);
+    return m ? m[1] : null;
+  }
+
+  var examCache = null;
+  var examForm = null;
+  var examLesson = null;
+
+  function loadExams() {
+    if (examCache) return Promise.resolve(examCache);
+    return fetch("exams.json")
+      .then(function (r) { if (!r.ok) throw new Error("exams.json: " + r.status); return r.json(); })
+      .then(function (json) { examCache = json; return json; });
+  }
+
+  function renderQuestion(q) {
+    var img = q.imageId
+      ? "<img class='qImg' loading='lazy' src='" + esc(driveImg(q.imageId)) + "' alt=''>"
+      : "";
+    var req = q.required ? " <span class='req'>*</span>" : "";
+    var err = "<div class='qErr' data-err='" + q.entryId + "'></div>";
+    if (q.type === 8) {
+      return "<h3 class='qSection'>" + esc(q.title) + "</h3>";
+    }
+    var head = "<div class='qTitle'>" + esc(q.title) + req + "</div>" + img;
+    if (q.type === 0) {
+      var link = q.link
+        ? "<a class='fallback' href='" + esc(q.link) + "' target='_blank' rel='noopener'>اضغط هنا لإنشاء رقمك الكودي ←</a>"
+        : "";
+      return "<div class='q' data-q='" + q.entryId + "'>" + head +
+        "<input class='qText' type='text' data-entry='" + q.entryId + "' autocomplete='off'>" + link + err + "</div>";
+    }
+    if (q.type === 2) {
+      var opts = (q.options || []).map(function (opt) {
+        return "<label class='opt'><input type='radio' name='q_" + q.entryId + "' value='" + esc(opt) + "'>" + esc(opt) + "</label>";
+      }).join("");
+      return "<div class='q' data-q='" + q.entryId + "'>" + head + opts + err + "</div>";
+    }
+    if (q.type === 4) {
+      // Google renders its dropdowns single-select even when the title says
+      // "choose all" — the in-app exam does the same.
+      var sel = (q.options || []).map(function (opt) {
+        return "<option value='" + esc(opt) + "'>" + esc(opt) + "</option>";
+      }).join("");
+      return "<div class='q' data-q='" + q.entryId + "'>" + head +
+        "<select class='qSelect' data-entry='" + q.entryId + "'><option value=''>— اختر —</option>" + sel + "</select>" + err + "</div>";
+    }
+    return "";
+  }
+
+  function openExam(formId, lessonId) {
+    loadExams().then(function (json) {
+      var form = null;
+      (json.forms || []).forEach(function (f) { if (f.formId === formId) form = f; });
+      if (!form) throw new Error("exam not found");
+      examForm = form;
+      examLesson = lessonId;
+      current = "exam";
+      titleEl.textContent = form.title;
+      backBtn.style.display = "";
+      if (tg && tg.BackButton) { try { tg.BackButton.show(); } catch (e) {} }
+      var html = "<h2>" + esc(form.title) + "</h2>";
+      if (form.label) html += "<div class='muted'>" + esc(form.label) + "</div>";
+      html += "<form id='examForm' novalidate>" +
+        form.questions.map(renderQuestion).join("") +
+        "<button class='examBtn' type='submit'>إرسال الإجابات</button>" +
+        "<div class='muted'>إجابتك هتتبعت لجوجل فورم مباشرة وتتحفظ في نفس شيت النتائج، كأنك فتحت الفورم بالظبط.</div>" +
+        "</form>";
+      view.innerHTML = html;
+      document.getElementById("examForm").addEventListener("submit", submitExam);
+      window.scrollTo(0, 0);
+    }).catch(function () {
+      view.innerHTML = "<div id='error'>تعذّر تحميل الامتحان — افتحه من جوجل فورم.</div>" +
+        "<div class='item'><a class='examBtn' href='https://docs.google.com/forms/d/" + esc(formId) + "/viewform' target='_blank' rel='noopener'>فتح الامتحان في Google Forms ←</a></div>";
+    });
+  }
+
+  function submitExam(ev) {
+    ev.preventDefault();
+    var formEl = document.getElementById("examForm");
+    var answers = [];
+    var firstBad = null;
+    function fail(entryId, msg, el) {
+      var errEl = formEl.querySelector("[data-err='" + entryId + "']");
+      if (errEl) { errEl.textContent = msg; errEl.style.display = "block"; }
+      if (!firstBad) firstBad = el || errEl;
+    }
+    examForm.questions.forEach(function (q) {
+      if (q.entryId === null) return;
+      var value = "";
+      var el = null;
+      if (q.type === 0 || q.type === 4) {
+        el = formEl.querySelector("[data-entry='" + q.entryId + "']");
+        value = el ? el.value.trim() : "";
+      } else if (q.type === 2) {
+        el = formEl.querySelector("input[name='q_" + q.entryId + "']:checked");
+        value = el ? el.value : "";
+      }
+      var errEl = formEl.querySelector("[data-err='" + q.entryId + "']");
+      if (errEl) errEl.style.display = "none";
+      if (q.required && !value) { fail(q.entryId, "هذا السؤال مطلوب.", el); return; }
+      if (value && q.validation && q.validation.kind === "regex") {
+        // Full-string match, exactly like Google's "matches" validation.
+        var re = new RegExp("^(?:" + q.validation.pattern + ")$");
+        if (!re.test(value)) { fail(q.entryId, q.validation.errorText || "إجابة غير صحيحة.", el); return; }
+      }
+      if (value) answers.push({ entryId: q.entryId, value: value });
+    });
+    if (firstBad) { firstBad.scrollIntoView({ block: "center" }); return; }
+    var params = new URLSearchParams();
+    params.set("fvv", "1");
+    params.set("pageHistory", "0");
+    params.set("fbzx", String(Math.floor(Math.random() * 1e20)));
+    answers.forEach(function (a) { params.append("entry." + a.entryId, a.value); });
+    var btn = formEl.querySelector("[type='submit']");
+    btn.disabled = true;
+    btn.textContent = "جارٍ الإرسال…";
+    // Plain form POST straight to Google (no-cors: the response is opaque,
+    // the app cannot read it back — it only knows the request went out).
+    fetch(examForm.submitUrl, {
+      method: "POST", mode: "no-cors", body: params,
+    }).then(function () {
+      view.innerHTML = "<h2>✅ تم إرسال إجابتك</h2>" +
+        "<div class='confirm'>" + esc(examForm.confirmationMessage || "تم استلام إجابتك.") + "</div>" +
+        "<button class='examBtn' type='button' id='examDone'>رجوع للدرس</button>";
+      document.getElementById("examDone").addEventListener("click", function () { showLesson(examLesson); });
+      window.scrollTo(0, 0);
+    }).catch(function () {
+      // Network failure only: the form and everything typed stay in place.
+      btn.disabled = false;
+      btn.textContent = "إرسال الإجابات";
+      var err = document.createElement("div");
+      err.id = "error";
+      err.textContent = "تعذّر الإرسال — اتأكد من النت وحاول تاني.";
+      formEl.insertBefore(err, formEl.firstChild);
+      window.scrollTo(0, 0);
+    });
+  }
+
   function showHome() {
     current = null;
+    examLesson = null;
     titleEl.textContent = "تعلم اللغة القبطية";
     backBtn.style.display = "none";
     if (tg && tg.BackButton) { try { tg.BackButton.hide(); } catch (e) {} }
@@ -137,10 +309,14 @@
     var lesson = findLesson(id);
     if (!lesson) return;
     current = id;
+    examLesson = null;
     titleEl.textContent = lesson.title;
     backBtn.style.display = "";
     if (tg && tg.BackButton) { try { tg.BackButton.show(); } catch (e) {} }
     view.innerHTML = "<h2>" + esc(lesson.title) + "</h2>" + lesson.items.map(renderItem).join("");
+    view.querySelectorAll("[data-exam]").forEach(function (btn) {
+      btn.addEventListener("click", function () { openExam(btn.getAttribute("data-exam"), id); });
+    });
     // If a video fails to load (Drive hiccup), reveal only its own Drive
     // fallback link — the app itself never opens a player.
     view.querySelectorAll("video").forEach(function (v) {
@@ -152,7 +328,10 @@
     window.scrollTo(0, 0);
   }
 
-  function goBack() { if (current) showHome(); }
+  function goBack() {
+    if (examLesson) { showLesson(examLesson); return; }
+    if (current) showHome();
+  }
 
   backBtn.addEventListener("click", goBack);
   if (tg && tg.BackButton) { try { tg.BackButton.onClick(goBack); } catch (e) {} }
