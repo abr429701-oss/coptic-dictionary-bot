@@ -94,7 +94,7 @@ async function adminCallback(kvEnv, id, data) {
   }), kvEnv);
   return calls;
 }
-const ALL_COMMANDS_COUNT = 330;
+const ALL_COMMANDS_COUNT = 331;
 
 const CATEGORY_IDS = ["main", "stats", "voices", "drive", "users", "dict", "broadcast", "system", "advanced", "learn", "support", "security", "menus"];
 const CATEGORY_TITLES = {
@@ -140,7 +140,7 @@ test("admin-all-commands: every command sits in exactly one category, nothing mi
     assert.deepEqual(nav, ["🏠 اللوحة"], `${id} has a home button`);
     seen.push(...cmdButtons.map((b) => String(b.callback_data).split("|")[2]));
   }
-  assert.equal(seen.length, ALL_COMMANDS_COUNT, "all 330 commands are listed");
+  assert.equal(seen.length, ALL_COMMANDS_COUNT, "all 331 commands are listed");
   assert.equal(new Set(seen).size, ALL_COMMANDS_COUNT, "no command appears in two categories");
 });
 

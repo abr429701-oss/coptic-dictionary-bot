@@ -148,11 +148,15 @@ export function createProAdmin2({ telegram, escapeHtml, storeCall, getUser, save
       const parts = arg.split(/\s+/u);
       const cmd = (parts[0] ?? "").toLowerCase();
       const list = (await doGet(K.menubuttons, [])) || [];
-      if (cmd === "list" || !cmd) { await send(env, chatId, list.length ? `🔘 الأزرار المخصصة (${list.length}):\n${list.map((b, i) => `${i + 1}. ${escapeHtml(b.text)} → ${escapeHtml(b.command)}`).join("\n")}\n\nعرضها: /menu\nحذف: /menueditor del <رقم>` : "🔘 لا توجد أزرار مخصصة. أضف: /menueditor add النص | /الأمر"); return true; }
+      // /menu belongs to the menu builder (learn menus); the custom-buttons
+      // keyboard moved to /menueditor show so /menu is not swallowed for
+      // admins (it used to answer "لا توجد أزرار مخصصة" instead).
+      if (cmd === "show") { await showMenu(env, chatId); return true; }
+      if (cmd === "list" || !cmd) { await send(env, chatId, list.length ? `🔘 الأزرار المخصصة (${list.length}):\n${list.map((b, i) => `${i + 1}. ${escapeHtml(b.text)} → ${escapeHtml(b.command)}`).join("\n")}\n\nعرضها: /menueditor show\nحذف: /menueditor del <رقم>` : "🔘 لا توجد أزرار مخصصة. أضف: /menueditor add النص | /الأمر"); return true; }
       if (cmd === "clear") { await doPut(K.menubuttons, []); await send(env, chatId, "✅ تم مسح الأزرار المخصصة."); return true; }
       if (cmd === "del") { const i = Number(parts[1]) - 1; if (i >= 0 && list[i]) { list.splice(i, 1); await doPut(K.menubuttons, list); await send(env, chatId, "✅ تم حذف الزر."); } else await send(env, chatId, "❌ رقم غير صحيح."); return true; }
-      if (cmd === "add") { const rest = parts.slice(1).join(" "); const sep = rest.indexOf("|"); if (sep < 0) { await send(env, chatId, "✏️ الصيغة: /menueditor add نص الزر | /الأمر"); return true; } const text = rest.slice(0, sep).trim(); const command = rest.slice(sep + 1).trim(); if (!text || !command) { await send(env, chatId, "✏️ نص الزر والأمر مطلوبان."); return true; } list.push({ text: text.slice(0, 40), command: command.slice(0, 60) }); await doPut(K.menubuttons, list.slice(-20)); await send(env, chatId, `✅ أُضيف الزر «${escapeHtml(text)}». عرض الكيبورد: /menu`); return true; }
-      await send(env, chatId, "✏️ الأوامر: /menueditor add <نص> | <cmd> · list · del <n> · clear"); return true;
+      if (cmd === "add") { const rest = parts.slice(1).join(" "); const sep = rest.indexOf("|"); if (sep < 0) { await send(env, chatId, "✏️ الصيغة: /menueditor add نص الزر | /الأمر"); return true; } const text = rest.slice(0, sep).trim(); const command = rest.slice(sep + 1).trim(); if (!text || !command) { await send(env, chatId, "✏️ نص الزر والأمر مطلوبان."); return true; } list.push({ text: text.slice(0, 40), command: command.slice(0, 60) }); await doPut(K.menubuttons, list.slice(-20)); await send(env, chatId, `✅ أُضيف الزر «${escapeHtml(text)}». عرض الكيبورد: /menueditor show`); return true; }
+      await send(env, chatId, "✏️ الأوامر: /menueditor add <نص> | <cmd> · list · show · del <n> · clear"); return true;
     },
     async segment(env, chatId, userId, arg) {
       const parts = arg.split(/\s+/u);
@@ -321,7 +325,6 @@ export function createProAdmin2({ telegram, escapeHtml, storeCall, getUser, save
       case "/leavemsg": return handlers.leavemsg(env, chatId, userId, arg);
       case "/setjoinmsg": return handlers.joinmsg(env, chatId, userId, arg);
       case "/menueditor": return handlers.menueditor(env, chatId, userId, arg);
-      case "/menu": return showMenu(env, chatId);
       case "/segment": return handlers.segment(env, chatId, userId, arg);
       case "/toptags": return handlers.toptags(env, chatId);
       case "/templateslib": return handlers.templateslib(env, chatId);

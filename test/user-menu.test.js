@@ -158,3 +158,44 @@ test("user-menu: a command hidden with /hidebutton disappears from the /start li
   assert.ok(adminHelp, "the /start commands list is sent to the admin");
   assert.ok(String(adminHelp.text).includes("/random — كلمة عشوائية من القاموس"), "the admin still sees the hidden command");
 });
+
+test("user-menu: /menu as admin opens the learn menus instead of the old custom-buttons reply", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedUser(kvEnv, ADMIN, "الأدمن");
+  kvEnv.USERS.store.set("menus:v1", { menus: [
+    { id: "m_learn_l1", title: "المستوى الأول", text: "المستوى الأول", parentId: null, buttons: [{ id: "b1", label: "الدرس 1", kind: "lesson", lessonId: "L1-01" }] },
+    { id: "m_learn_l2", title: "المستوى الثاني", text: "المستوى الثاني", parentId: null, buttons: [] },
+  ] });
+  const calls = await say(kvEnv, ADMIN, "/menu");
+  const root = sent(calls).find((p) => String(p.text ?? "").includes("أختر المستوى لبدء تعلم اللغة القبطية"));
+  assert.ok(root, "the admin sees the root menus");
+  assert.ok(!sent(calls).some((p) => String(p.text ?? "").includes("لا توجد أزرار مخصصة")), "the old custom-buttons reply must not swallow /menu");
+});
+
+test("user-menu: /search leaves the menu and prompts for a word", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedUser(kvEnv, 63, "مينا");
+  kvEnv.USERS.store.set("user:63", { ...kvEnv.USERS.store.get("user:63"), menuNav: "m_learn_l1" });
+  const calls = await say(kvEnv, 63, "/search");
+  const prompt = sent(calls).find((p) => String(p.text ?? "").includes("اكتب الكلمة للبحث في القاموس"));
+  assert.ok(prompt, "the search prompt is sent");
+  assert.equal(prompt.reply_markup?.remove_keyboard, true, "the menu keyboard is dropped");
+  const after = kvEnv.USERS.store.get("user:63");
+  assert.ok(!after?.menuNav, "the menu position is cleared");
+});
+
+test("user-menu: tapping the learn-menu search button leaves the menu and prompts for a word", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedUser(kvEnv, 64, "مينا");
+  kvEnv.USERS.store.set("user:64", { ...kvEnv.USERS.store.get("user:64"), menuNav: "m_learn_l1" });
+  kvEnv.USERS.store.set("menus:v1", { menus: [
+    { id: "m_learn_l1", title: "المستوى الأول", text: "المستوى الأول", parentId: null, buttons: [
+      { id: "b_search", label: "🔍 بحث في القاموس", kind: "command", command: "/search" },
+      { id: "b_back", label: "🔙 رجوع", kind: "command", command: "/menu" },
+    ] },
+  ] });
+  const calls = await say(kvEnv, 64, "🔍 بحث في القاموس");
+  const prompt = sent(calls).find((p) => String(p.text ?? "").includes("اكتب الكلمة للبحث في القاموس"));
+  assert.ok(prompt, "tapping the search button prompts for a word");
+  assert.equal(prompt.reply_markup?.remove_keyboard, true, "the menu keyboard is dropped");
+});

@@ -222,6 +222,15 @@ export function buildLearnMenus(levels = LEARN_LEVELS, state = emptyImportState(
       kind: "command",
       command: isLevel2 ? "/cert2" : "/cert1",
     });
+    // Always with the user: a way back to dictionary search from inside
+    // the level (leaves the menu and drops the reply keyboard, so the next
+    // typed word searches instead of tapping a menu button).
+    lessonButtons.push({
+      id: `b_${level.id}_search`,
+      label: "🔍 بحث في القاموس",
+      kind: "command",
+      command: "/search",
+    });
     // A way back: the level menus have no parent, so the keyboard builder
     // adds no Back/Home row for them and the user would be stuck inside
     // the level (only /menu typed by hand would get them out). Both nav

@@ -405,6 +405,16 @@ async function sendRootMenus(env, chatId, userId = chatId) {
   await setMenuNav(env, userId, null);
   await sendMenuMessage(env, chatId, "أختر المستوى لبدء تعلم اللغة القبطية", buildRootReplyKeyboard(stored, { isAdmin: isAdmin(env, userId) }));
 }
+
+// Back to dictionary search: leaves any menu (and any cert/get-code flow,
+// like going home) and drops the reply keyboard, so the next typed word
+// searches the dictionary instead of being read as a code or a menu tap.
+async function beginSearchMode(env, chatId, userId) {
+  const searchUser = await getUser(env, userId);
+  if (searchUser?.certAwaiting || searchUser?.getcodeStep) await saveUser(env, userId, { ...searchUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined });
+  await setMenuNav(env, userId, null);
+  await telegram(env, "sendMessage", { chat_id: chatId, text: "🔍 اكتب الكلمة للبحث في القاموس.", reply_markup: { remove_keyboard: true } });
+}
 async function openMenu(env, chatId, menuId, userId) {
   if (!chatId) return;
   const stored = await loadMenus(env);
@@ -645,6 +655,7 @@ async function runMenuCommand(env, chatId, userId, command) {
   if (command === "/help") { await sendHelp(env, chatId); return; }
   if (command === "/dailyquiz") { await beginQuizV2(env, chatId, dailyQuizType()); return; }
   if (command === "/menu") { await sendRootMenus(env, chatId, chatId); return; }
+  if (command === "/search") { await beginSearchMode(env, chatId, userId); return; }
   if (command === "/cert1") { await beginCertFlow(env, chatId, userId, "0"); return; }
   if (command === "/cert2") { await beginCertFlow(env, chatId, userId, "1"); return; }
   if (command === "/getcode") { await beginGetCodeFlow(env, chatId, userId); return; }
@@ -1832,6 +1843,7 @@ const ADMIN_COMMANDS = [
   { command: "wordaudit", description: "تدقيق كلمة" },
   { command: "gapfill", description: "تعبئة حقول ناقصة" },
   { command: "searchstats", description: "إحصاءات البحث" },
+  { command: "search", description: "بحث في القاموس" },
   { command: "livewords", description: "الأكثر بحثًا الآن" },
   { command: "voicecoverage", description: "تغطية الأصوات" },
   { command: "a2help", description: "أوامر الحزمة الثانية" },
@@ -6201,7 +6213,7 @@ function allBotCommands() {
 // بلا تأكيد من الكود نفسه) تطلب تأكيدًا أولًا قبل التشغيل.
 const ALL_COMMANDS_DANGEROUS = new Set(["resetstats", "purgeinactive", "resetsessions"]);
 const ALL_COMMANDS_CATEGORIES = [
-  { id: "main", title: "⭐ الأوامر الأساسية", commands: ["start", "keyboard", "learn", "menu", "contact", "random", "help", "admin", "dashboard", "about", "cancel", "k", "kbd", "lang"] },
+  { id: "main", title: "⭐ الأوامر الأساسية", commands: ["start", "keyboard", "learn", "menu", "search", "contact", "random", "help", "admin", "dashboard", "about", "cancel", "k", "kbd", "lang"] },
   { id: "stats", title: "📊 الإحصاءات والتقارير", commands: ["usage", "analytics", "topusers", "growth", "usercount", "searchstats", "topwords", "misses", "livewords", "hourly", "dictstats", "wordcount", "fieldreport", "statuspage", "digest", "weekly", "reports", "reportclose", "adminscore", "usertimeline", "trace", "searchcount", "liveusers", "conversations", "userchat", "livemon", "livesearch", "retention", "ops", "funnel", "cohorts", "reflinks", "searchhistory", "report"] },
   { id: "voices", title: "🎙 الأصوات", commands: ["record", "record_choose", "record_select", "record_stop", "record_voice", "voice_delete", "voice_delete_all", "voice_delete_many", "voicecoverage", "voiceoff", "voiceon", "voiceonce", "voicesettings", "voicethree", "noaudio", "nopronounce", "uploadaudio", "rebuildvoice", "voicegaps", "pronounce"] },
   { id: "drive", title: "☁️ Drive والمزامنة", commands: ["drive", "syncdrive", "syncusers", "syncall", "synccancel", "syncreset", "syncstatus", "synctest", "syncwatch", "importusers", "importsheet", "importlearn", "setdrive", "setarchive", "resync"] },
@@ -7745,6 +7757,7 @@ async function handleUpdate(update, env, ctx) {
   if (text === "/cert1" || text === "/cert2") { await beginCertFlow(env, message.chat.id, userId, text === "/cert1" ? "0" : "1"); return; }
   if (text === "/getcode") { await beginGetCodeFlow(env, message.chat.id, userId); return; }
   if (text === "/menu") { await sendRootMenus(env, message.chat.id, userId); return; }
+  if (text === "/search") { await beginSearchMode(env, message.chat.id, userId); return; }
   if (text === "/lang" || text.startsWith("/lang ")) {
     const arg = text.slice("/lang".length).trim().toLowerCase();
     if (arg === "ar" || arg === "en") { await setUserLang(env, userId, arg); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: arg === "en" ? "✅ Language set to English. /help" : "✅ تم ضبط اللغة على العربية. /help" }); return; }
