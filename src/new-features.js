@@ -12,8 +12,14 @@ function escapeHtml(value) {
   return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 const MARKS = /[\u0300-\u036f\u064b-\u065f\u0670\u06d6-\u06ed]/gu;
+// Pure-ASCII strings (backtick excluded on purpose: the slow path strips
+// it) need no NFKC, mark-stripping or Arabic folding — the fast path
+// below returns exactly what the full path would.
+const PLAIN_ASCII = /^[\x20-\x5f\x61-\x7e]*$/u;
 function normalize(value) {
-  return String(value ?? "").normalize("NFKC").toLowerCase()
+  const text = String(value ?? "");
+  if (PLAIN_ASCII.test(text)) return text.toLowerCase().replace(/\s+/gu, " ").trim();
+  return text.normalize("NFKC").toLowerCase()
     .replace(MARKS, "").replace(/`/gu, "")
     .replace(/[أإآٱ]/gu, "ا").replace(/ى/gu, "ي")
     .replace(/\s+/gu, " ").trim();
@@ -230,19 +236,33 @@ export function lessonText(id) {
 // ---------------------------------------------------------------------------
 // 6) Smarter search: "did you mean" on no-result (local Levenshtein)
 // ---------------------------------------------------------------------------
-function levenshtein(a, b, max) {
+// Bounded Levenshtein distance; returns Infinity when beyond `max`.
+// Banded DP: D[i][j] >= |i - j|, so cells outside |i - j| <= max can
+// never finish within max and are skipped. Within the band the row
+// minimum never decreases, so a row whose whole band exceeds max ends
+// the search early. Same result as the full table for every input,
+// at roughly (2*max+1)/len of the work.
+export function levenshtein(a, b, max) {
   if (a === b) return 0;
-  if (!a.length || !b.length) return Math.min(a.length, b.length) <= max ? Math.min(a.length, b.length) : Infinity;
+  // One side empty: the distance is the other side's length (the old
+  // code returned Math.min here, which was wrong: "" vs "abc" is 3).
+  if (!a.length || !b.length) { const d = a.length + b.length; return d <= max ? d : Infinity; }
   if (Math.abs(a.length - b.length) > max) return Infinity;
-  let prev = [];
-  let curr = [];
+  let prev = new Array(b.length + 1);
+  let curr = new Array(b.length + 1).fill(Infinity);
   for (let j = 0; j <= b.length; j += 1) prev[j] = j;
   for (let i = 1; i <= a.length; i += 1) {
     curr[0] = i;
-    for (let j = 1; j <= b.length; j += 1) {
+    const lo = Math.max(1, i - max);
+    const hi = Math.min(b.length, i + max);
+    let rowMin = curr[0] <= max ? curr[0] : Infinity;
+    for (let j = lo; j <= hi; j += 1) {
       curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (curr[j] < rowMin) rowMin = curr[j];
     }
+    if (rowMin > max) return Infinity;
     [prev, curr] = [curr, prev];
+    curr.fill(Infinity);
   }
   return prev[b.length] <= max ? prev[b.length] : Infinity;
 }

@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import worker, { UserStore } from "../src/index.js";
 import records from "../data/dictionary.json" with { type: "json" };
-import { deepLink, shareTextForRecord, sharePlainTextForRecord, shareButtonText, shareKeyboardForRecord, meaningInLanguage, translationInLanguage, wordStartParam, suggestSimilar } from "../src/new-features.js";
+import { deepLink, shareTextForRecord, sharePlainTextForRecord, shareButtonText, shareKeyboardForRecord, meaningInLanguage, translationInLanguage, wordStartParam, suggestSimilar, levenshtein } from "../src/new-features.js";
 const token = "test-token";
 const secret = "test-secret-should-be-long-enough";
 const testRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -176,6 +176,36 @@ test("v2: nf|share sends the word in the callback language, old form stays Arabi
   assert.match(sent(cb)[0].text, /Share the word:/u);
   cb = await sendCallback(kvEnv, 44, "nf|share|5");
   assert.match(sent(cb)[0].text, /فَتَحَ/u);
+});
+
+test("levenshtein (banded) matches a naive full DP on random strings", () => {
+  // Reference implementation: the classic full table, no banding, no
+  // early exit. The banded version must return the exact same value
+  // (distance when <= max, Infinity otherwise) for every input.
+  const naive = (a, b, max) => {
+    const dp = Array.from({ length: a.length + 1 }, (_, i) => Array.from({ length: b.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)));
+    for (let i = 1; i <= a.length; i += 1) {
+      for (let j = 1; j <= b.length; j += 1) {
+        dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      }
+    }
+    const dist = dp[a.length][b.length];
+    return dist <= max ? dist : Infinity;
+  };
+  let seed = 20261112;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  const alphabet = ["a", "b", "c", "ⲁ", "ⲃ", "ف", "ت", "o", "u"];
+  const word = (len) => Array.from({ length: len }, () => alphabet[Math.floor(rnd() * alphabet.length)]).join("");
+  for (let n = 0; n < 400; n += 1) {
+    const a = word(Math.floor(rnd() * 9));
+    const b = word(Math.floor(rnd() * 9));
+    for (const max of [0, 1, 2, 3]) {
+      assert.equal(levenshtein(a, b, max), naive(a, b, max), `levenshtein(${JSON.stringify(a)}, ${JSON.stringify(b)}, ${max})`);
+    }
+  }
+  assert.equal(levenshtein("", "", 1), 0);
+  assert.equal(levenshtein("", "ab", 1), Infinity);
+  assert.equal(levenshtein("abc", "abc", 0), 0);
 });
 
 // "Did you mean" follows the closest suggestion's language, and French/German

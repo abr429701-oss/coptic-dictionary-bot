@@ -1069,7 +1069,22 @@ const FOLD_MAP = { ...ALEF_MAP, ...ACCENT_MAP, "`": "" };
 
 // Hot path (the search index normalizes ~130k words): plain Latin text skips every regex, other text only
 // runs the replacements it actually needs.
+// normalize() is pure, so its result is memoized per update: the search
+// path normalizes the same query (and the same record fields) many
+// times, and the memo turns the repeats into Map lookups. Cleared at
+// the start of every update (handleUpdate) so it never grows across
+// requests; a size cap covers long non-update requests.
+const normalizeMemo = new Map();
 function normalize(value) {
+  const text = String(value ?? "");
+  const hit = normalizeMemo.get(text);
+  if (hit !== undefined) return hit;
+  const out = normalizeUncached(text);
+  if (normalizeMemo.size > 5000) normalizeMemo.clear();
+  normalizeMemo.set(text, out);
+  return out;
+}
+function normalizeUncached(value) {
   const text = String(value ?? "");
   if (PLAIN_ASCII.test(text)) return text.toLowerCase().replace(/\s+/gu, " ").trim();
   let out = text.normalize("NFKC").toLowerCase();
@@ -1094,7 +1109,7 @@ function lazy(build) {
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
 import { audioUrl, audioVersion, fetchHumanSpeech, fetchPrebuiltSpeech, isSingleWordOgg, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 import { copticDateNow, alphabetText, letterStatsText, longestText, originsText, wordCountText, startsWithText, similarText, translateText, vocabText, startGuess, handleGuessReply } from "./features.js";
-import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, suggestSimilar, helpText, retentionText, opsText, recordById } from "./new-features.js";
+import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, suggestSimilar, helpText, retentionText, opsText, recordById, levenshtein } from "./new-features.js";
 import { lookupCertificate } from "./certificates.js";
 import { getCodeFromMacro, buildGetCodeReply, normalizeGetCodePhone, getCodePhoneValid } from "./getcode.js";
 import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VIDEO_MENU_ID, cleanMenuTitle, cleanMenuText, cleanButtonLabel, cleanUrl, cleanCommand, normalizeMenus, findMenu, findButton, rootMenus, descendantMenuIds, buildMenuKeyboard, buildRootKeyboard, menuOpenText, menuAdminListText, menuAdminDetailText, parseMenuTarget, parseButtonTarget, addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton, ensureVideoMenu } from "./menu-builder.js";
@@ -5657,29 +5672,8 @@ async function sendBotInfo(env, chatId) {
 
 const DICTIONARY_LOCAL_FIELDS = ["coptic", "pronunciation", "meaning", "english", "translation_fr", "translation_de", "greek", null, null, "origin", "kind"];
 const DICTIONARY_LOCAL_HEADERS = ["coptic", "ipa", "meaning", "english", "french", "german", "greek", "unused_h", "unused_i", "origin", "kind"];
-// Bounded Levenshtein distance for fuzzy matching; returns Infinity when beyond `max`.
-function levenshtein(a, b, max) {
-  if (a === b) return 0;
-  if (!a.length) return b.length <= max ? b.length : Infinity;
-  if (!b.length) return a.length <= max ? a.length : Infinity;
-  // Early exit when length difference alone exceeds the budget.
-  if (Math.abs(a.length - b.length) > max) return Infinity;
-  let prev = [];
-  let curr = [];
-  for (let j = 0; j <= b.length; j += 1) prev[j] = j;
-  for (let i = 1; i <= a.length; i += 1) {
-    curr[0] = i;
-    let rowMin = curr[0];
-    for (let j = 1; j <= b.length; j += 1) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
-      if (curr[j] < rowMin) rowMin = curr[j];
-    }
-    if (rowMin > max) return Infinity;
-    [prev, curr] = [curr, prev];
-  }
-  return prev[b.length] <= max ? prev[b.length] : Infinity;
-}
+// levenshtein lives in new-features.js (banded + early exit) and is
+// imported above; localDictionaryCandidates uses it for fuzzy matches.
 
 // Local, in-memory candidate search (instant). Returns up to ~8 candidates ranked:
 // exact match first, then partial (contains/contained), then fuzzy (bounded Levenshtein).
@@ -6561,6 +6555,7 @@ async function handleAdminDashboardCallback(env, callback, ctx) {
 }
 async function handleUpdate(update, env, ctx) {
   userMemoFor(env)?.clear();
+  normalizeMemo.clear();
   if (update.inline_query) {
     trackUsage("inline");
     inBackground(ctx, flushAnalyticsSnapshot(env));
