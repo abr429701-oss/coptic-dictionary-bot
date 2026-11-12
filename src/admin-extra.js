@@ -313,7 +313,7 @@ export function createAdminExtras(api) {
     if (adminIds(env).includes(id)) { await reply("❌ لا يمكن حذف حساب أدمن."); return true; }
     const existing = await getUser(env, id);
     if (!existing) { await reply(`📭 لا يوجد مستخدم بالمعرّف <code>${esc(id)}</code>.`); return true; }
-    await storeCall(env, { op: "delete", key: `user:${id}` });
+    await storeCall(env, { op: "deleteUser", userId: id });
     if (logAdminAction) await logAdminAction(env, userId, "userdelete", id);
     await reply(`🗑 حُذف المستخدم <code>${esc(id)}</code> من التخزين. ملاحظة: يبقى صفّه في الشيت كما هو.`);
     return true;

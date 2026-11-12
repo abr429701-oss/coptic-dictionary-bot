@@ -2964,6 +2964,15 @@ export class UserStore {
       await storage.delete(key);
       return Response.json({ ok: true });
     }
+    if (op === "deleteUser") {
+      // /userdelete: remove the user and keep the users:total counter exact.
+      const existed = await storage.delete(`user:${userId}`);
+      if (existed) {
+        const total = await storage.get("users:total");
+        if (typeof total === "number") await storage.put("users:total", Math.max(0, total - 1));
+      }
+      return Response.json({ ok: true, deleted: !!existed });
+    }
     // G3: atomic append ops — one RPC does the whole read-modify-write
     // inside the DO, instead of the Worker paying a get + a put per key
     // (and losing buffered data when the put failed after the buffer was
@@ -3058,7 +3067,20 @@ export class UserStore {
         const firstSeen = new Date().toISOString();
         const created = { firstSeen, lastSeen: firstSeen, ...(username ? { username } : {}), ...(tgName ? { tgName } : {}) };
         await storage.put(`user:${userId}`, created);
-        return Response.json({ created: true, user: created, total: (await storage.list({ prefix: "user:" })).size });
+        // Durable user counter: the old code listed ALL users on every
+        // first contact just to print the total in the join notice. The
+        // counter is incremented here; when it is missing (first run
+        // after this change) it is computed once from the full list and
+        // then kept incrementally (bulk import bumps it, purges and
+        // /userdelete decrement it). Two first contacts racing through
+        // the same await can undercount by one — cosmetic only (the
+        // number feeds the join notice), and far cheaper than a list
+        // scan on every registration.
+        let total = await storage.get("users:total");
+        if (typeof total !== "number") total = (await storage.list({ prefix: "user:" })).size;
+        else total += 1;
+        await storage.put("users:total", total);
+        return Response.json({ created: true, user: created, total });
       }
       let user = existing.blocked ? { ...existing, blocked: false, blockedAt: undefined, blockedReason: undefined } : existing;
       let changed = user !== existing;
@@ -3084,6 +3106,12 @@ export class UserStore {
       const fresh = list.filter((id) => !existingIds.has(id));
       const skipped = list.length - fresh.length;
       await Promise.all(fresh.map((id) => storage.put(`user:${id}`, { firstSeen: now, imported: true })));
+      if (fresh.length) {
+        let total = await storage.get("users:total");
+        if (typeof total !== "number") total = (await storage.list({ prefix: "user:" })).size;
+        else total += fresh.length;
+        await storage.put("users:total", total);
+      }
       return Response.json({ imported: fresh.length, skipped, total: list.length });
     }
     if (op === "userpage") {
@@ -3304,6 +3332,10 @@ export class UserStore {
         const stamp = record?.registeredAt || record?.firstSeen || "";
         if (stamp && new Date(stamp).getTime() < cutoff) { await storage.delete(storedKey); purged += 1; }
       }
+      if (purged) {
+        const total = await storage.get("users:total");
+        if (typeof total === "number") await storage.put("users:total", Math.max(0, total - purged));
+      }
       return Response.json({ purged, days });
     }
     if (op === "listprefix") {
@@ -3313,6 +3345,9 @@ export class UserStore {
     if (op === "purgeprefix") {
       const page = await storage.list({ prefix: String(key ?? "") });
       for (const k of page.keys()) await storage.delete(k);
+      // Wiping users wholesale invalidates the counter; drop it so the
+      // next register recomputes it from the list once.
+      if (String(key ?? "").startsWith("user:")) await storage.delete("users:total");
       return Response.json({ purged: page.size });
     }
     if (op === "setnav") {

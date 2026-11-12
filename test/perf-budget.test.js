@@ -86,11 +86,13 @@ function updateRequest(update, headers = {}) {
 function fakeKv() {
   const store = new Map();
   const alarms = [];
+  const listCalls = [];
   const storage = {
     get: async (key) => store.get(key),
     put: async (key, value) => { store.set(key, value); },
     delete: async (key) => store.delete(key),
     list: async ({ prefix = "", startAfter, limit } = {}) => {
+      listCalls.push(prefix);
       let entries = [...store].filter(([key]) => key.startsWith(prefix)).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
       if (startAfter) entries = entries.filter(([key]) => key > startAfter);
       return new Map(limit ? entries.slice(0, limit) : entries);
@@ -101,6 +103,7 @@ function fakeKv() {
   return {
     store,
     alarms,
+    listCalls,
     object,
     idFromName: (name) => name,
     get: () => ({
@@ -210,6 +213,21 @@ test("perf-budget: one search persists its own history in the same update", asyn
   assert.ok(Array.isArray(conv) && conv.length >= 1, "the message must be in conv:9108 after its own update");
   assert.equal(kv.store.get("history:snapshot"), undefined, "the old global history:snapshot must not be written anymore");
   assert.equal(counts.byKey.get("history:snapshot") ?? 0, 0, "no history:snapshot traffic anymore");
+});
+
+// G4 regression: registering a new user must not list all users — the
+// durable users:total counter replaces the full scan (the first
+// registration on a fresh store seeds it with one list; later ones must
+// not list at all).
+test("perf-budget: registering a new user does not list all users", async (t) => {
+  const { kv, counts } = countingKv();
+  await runText(kv, 9201, "ⲫⲱⲥ");
+  assert.equal(kv.store.get("users:total"), 1, "the counter starts at 1 after the first registration");
+  const listsBefore = kv.listCalls.length;
+  await runText(kv, 9202, "ⲫⲱⲥ");
+  assert.equal(kv.store.get("users:total"), 2, "the counter increments without a list");
+  const newLists = kv.listCalls.slice(listsBefore);
+  assert.ok(!newLists.includes("user:"), `the second registration must not list users, got lists: ${newLists.join(",") || "none"}`);
 });
 
 test("perf-budget: /start from a named user", async (t) => {
