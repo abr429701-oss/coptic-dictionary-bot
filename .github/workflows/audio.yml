@@ -7,7 +7,6 @@ on:
     paths:
       - data/dictionary.json
       - src/neural-voice.js
-      - scripts/gen_audio.mjs
       - scripts/gen_audio_ipa_reader.mjs
       - package.json
       - package-lock.json
