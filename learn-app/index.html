@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>تعلم اللغة القبطية</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif;
+    background: var(--tg-theme-bg-color, #fff);
+    color: var(--tg-theme-text-color, #111);
+  }
+  header {
+    position: sticky; top: 0; z-index: 10;
+    background: var(--tg-theme-header-bg-color, var(--tg-theme-bg-color, #fff));
+    border-bottom: 1px solid var(--tg-theme-section-separator-color, #ddd);
+    padding: 12px 16px; display: flex; align-items: center; gap: 10px;
+  }
+  header h1 { font-size: 18px; margin: 0; flex: 1; }
+  #backBtn {
+    border: 0; background: none; font-size: 20px; cursor: pointer;
+    color: var(--tg-theme-button-color, #2481cc); padding: 4px 8px; display: none;
+  }
+  main { padding: 12px 16px 40px; max-width: 720px; margin: 0 auto; }
+  h2 { font-size: 17px; margin: 22px 0 10px; }
+  h2:first-child { margin-top: 6px; }
+  .lesson {
+    display: block; width: 100%; text-align: right; cursor: pointer;
+    background: var(--tg-theme-secondary-bg-color, #f4f4f5);
+    color: var(--tg-theme-text-color, #111);
+    border: 1px solid var(--tg-theme-section-separator-color, #e4e4e7);
+    border-radius: 12px; padding: 13px 14px; margin: 8px 0; font-size: 15px;
+  }
+  .lesson .num { color: var(--tg-theme-hint-color, #888); font-size: 13px; display: block; }
+  .item { margin: 18px 0; }
+  .item .lbl { font-size: 14px; color: var(--tg-theme-hint-color, #888); margin-bottom: 8px; }
+  .videoWrap { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 12px; overflow: hidden; }
+  .videoWrap iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  .fallback { display: inline-block; margin-top: 8px; font-size: 14px; color: var(--tg-theme-link-color, #2481cc); }
+  .photo { width: 100%; border-radius: 12px; display: block; }
+  .exercise {
+    white-space: pre-wrap; line-height: 1.8; font-size: 15px;
+    background: var(--tg-theme-secondary-bg-color, #f4f4f5);
+    border-radius: 12px; padding: 14px;
+  }
+  .examBtn {
+    display: block; text-align: center; text-decoration: none; font-size: 16px; font-weight: 600;
+    background: var(--tg-theme-button-color, #2481cc); color: var(--tg-theme-button-text-color, #fff);
+    border-radius: 12px; padding: 14px; margin: 8px 0;
+  }
+  .muted { color: var(--tg-theme-hint-color, #888); font-size: 14px; line-height: 1.7; }
+  #error { color: #c00; padding: 20px 0; }
+</style>
+</head>
+<body>
+<header>
+  <button id="backBtn" type="button" aria-label="رجوع">‹</button>
+  <h1 id="title">تعلم اللغة القبطية</h1>
+</header>
+<main id="view"></main>
+<script>
+(function () {
+  var tg = (window.Telegram && window.Telegram.WebApp) || null;
+  if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
+
+  var view = document.getElementById("view");
+  var titleEl = document.getElementById("title");
+  var backBtn = document.getElementById("backBtn");
+  var data = null;
+  var current = null; // lesson id in lesson view, null on home
+
+  function esc(s) {
+    return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  function drivePreview(id) { return "https://drive.google.com/file/d/" + encodeURIComponent(id) + "/preview"; }
+  function driveView(id) { return "https://drive.google.com/file/d/" + encodeURIComponent(id) + "/view"; }
+  function driveImg(id) { return "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(id); }
+
+  function renderItem(item) {
+    if (item.kind === "video") {
+      return "<div class='item'><div class='lbl'>" + esc(item.label || "🎬 فيديو الدرس") + "</div>" +
+        "<div class='videoWrap'><iframe src='" + esc(drivePreview(item.driveId)) + "' allow='autoplay; fullscreen' allowfullscreen></iframe></div>" +
+        "<a class='fallback' href='" + esc(driveView(item.driveId)) + "' target='_blank' rel='noopener'>فتح الفيديو في Drive ←</a></div>";
+    }
+    if (item.kind === "photo") {
+      return "<div class='item'><div class='lbl'>" + esc(item.label || "🖼 صورة") + "</div>" +
+        "<img class='photo' loading='lazy' src='" + esc(driveImg(item.driveId)) + "' alt=''></div>";
+    }
+    if (item.kind === "text") {
+      return "<div class='item'><div class='lbl'>" + esc(item.label || "📝 التدريب") + "</div>" +
+        "<div class='exercise'>" + esc(item.text) + "</div></div>";
+    }
+    if (item.kind === "url") {
+      return "<div class='item'><a class='examBtn' href='" + esc(item.url) + "' target='_blank' rel='noopener'>" +
+        esc(item.label || "📝 الامتحان الإلكتروني") + "</a></div>";
+    }
+    return "";
+  }
+
+  function showHome() {
+    current = null;
+    titleEl.textContent = "تعلم اللغة القبطية";
+    backBtn.style.display = "none";
+    if (tg && tg.BackButton) { try { tg.BackButton.hide(); } catch (e) {} }
+    var html = "";
+    data.levels.forEach(function (level) {
+      html += "<h2>" + esc(level.title) + "</h2>";
+      level.lessons.forEach(function (lesson, i) {
+        html += "<button class='lesson' type='button' data-lesson='" + esc(lesson.id) + "'>" +
+          "<span class='num'>الدرس " + (i + 1) + " من " + level.lessons.length + "</span>" + esc(lesson.title) + "</button>";
+      });
+    });
+    view.innerHTML = html;
+    view.querySelectorAll("[data-lesson]").forEach(function (btn) {
+      btn.addEventListener("click", function () { showLesson(btn.getAttribute("data-lesson")); });
+    });
+    window.scrollTo(0, 0);
+  }
+
+  function findLesson(id) {
+    for (var li = 0; li < data.levels.length; li++) {
+      var lessons = data.levels[li].lessons;
+      for (var i = 0; i < lessons.length; i++) if (lessons[i].id === id) return lessons[i];
+    }
+    return null;
+  }
+
+  function showLesson(id) {
+    var lesson = findLesson(id);
+    if (!lesson) return;
+    current = id;
+    titleEl.textContent = lesson.title;
+    backBtn.style.display = "";
+    if (tg && tg.BackButton) { try { tg.BackButton.show(); } catch (e) {} }
+    view.innerHTML = "<h2>" + esc(lesson.title) + "</h2>" + lesson.items.map(renderItem).join("");
+    window.scrollTo(0, 0);
+  }
+
+  function goBack() { if (current) showHome(); }
+
+  backBtn.addEventListener("click", goBack);
+  if (tg && tg.BackButton) { try { tg.BackButton.onClick(goBack); } catch (e) {} }
+
+  fetch("lessons.json")
+    .then(function (r) { if (!r.ok) throw new Error("lessons.json: " + r.status); return r.json(); })
+    .then(function (json) { data = json; showHome(); })
+    .catch(function (err) {
+      view.innerHTML = "<div id='error'>تعذّر تحميل الدروس — جرّب تاني بعد شوية.</div>" +
+        "<div class='muted'>" + esc(err && err.message ? err.message : err) + "</div>";
+    });
+})();
+</script>
+</body>
+</html>

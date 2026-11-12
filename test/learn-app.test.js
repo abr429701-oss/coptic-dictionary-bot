@@ -1,0 +1,52 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { LEARN_LEVELS } from "../src/learn-manifest.js";
+
+const testRoot = fileURLToPath(new URL("..", import.meta.url));
+const appJson = JSON.parse(readFileSync(resolve(testRoot, "public", "learn-app", "lessons.json"), "utf8"));
+const appHtml = readFileSync(resolve(testRoot, "public", "learn-app", "index.html"), "utf8");
+
+// The learning web app (2026-11-13): static page, no locks, all lessons open.
+// lessons.json is generated from the frozen manifest — this test pins them
+// together so a stale regeneration fails the suite instead of shipping
+// silently wrong content.
+test("learn-app: lessons.json matches the frozen manifest exactly", () => {
+  assert.equal(appJson.version, 1);
+  assert.deepEqual(appJson.levels, LEARN_LEVELS);
+});
+
+test("learn-app: every lesson is complete and every item is well formed", () => {
+  assert.equal(appJson.levels.length, 2, "two levels");
+  const lessons = appJson.levels.flatMap((l) => l.lessons);
+  assert.equal(lessons.length, 27, "17 level-1 + 10 level-2 lessons");
+  for (const lesson of lessons) {
+    assert.ok(lesson.items.length >= 1, `${lesson.id} has items`);
+    for (const item of lesson.items) {
+      if (item.kind === "video" || item.kind === "photo") {
+        assert.ok(item.driveId, `${lesson.id}/${item.key} has a Drive id`);
+      } else if (item.kind === "url") {
+        assert.ok(String(item.url).startsWith("https://docs.google.com/forms/"), `${lesson.id} exam is a Forms link`);
+      } else if (item.kind === "text") {
+        assert.ok(String(item.text).trim().length > 0, `${lesson.id} exercise text is not empty`);
+      } else {
+        assert.fail(`${lesson.id} has unknown item kind ${item.kind}`);
+      }
+    }
+  }
+  const kinds = lessons.flatMap((l) => l.items.map((i) => i.kind));
+  assert.equal(kinds.filter((k) => k === "video").length, 27);
+  assert.equal(kinds.filter((k) => k === "photo").length, 23);
+  assert.equal(kinds.filter((k) => k === "url").length, 12);
+  assert.equal(kinds.filter((k) => k === "text").length, 4);
+});
+
+test("learn-app: index.html loads the data and plays Drive media", () => {
+  assert.ok(appHtml.includes("https://telegram.org/js/telegram-web-app.js"), "Telegram WebApp SDK");
+  assert.ok(appHtml.includes('fetch("lessons.json")'), "loads the static lesson data");
+  assert.ok(appHtml.includes("drive.google.com/file/d/"), "Drive video preview embed");
+  assert.ok(appHtml.includes("uc?export=download"), "Drive photo URLs");
+  assert.ok(appHtml.includes("الامتحان الإلكتروني"), "exam button label");
+});

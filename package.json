@@ -6,10 +6,11 @@
     "build:search-index": "node scripts/build-search-index.mjs",
     "predev": "npm run build:search-index",
     "dev": "wrangler dev",
-    "predeploy": "npm run build:search-index",
+    "predeploy": "npm run build:search-index && npm run build:learn-app",
     "deploy": "wrangler deploy",
-    "pretest": "npm run build:search-index",
-    "test": "node --test"
+    "pretest": "npm run build:search-index && npm run build:learn-app",
+    "test": "node --test",
+    "build:learn-app": "node scripts/generate-learn-app-data.mjs && mkdir -p public/learn-app && cp learn-app/index.html learn-app/lessons.json public/learn-app/"
   },
   "devDependencies": {
     "playwright": "^1.64.1",

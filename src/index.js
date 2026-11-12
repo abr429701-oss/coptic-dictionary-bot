@@ -390,6 +390,10 @@ async function sendMenuMessage(env, chatId, text, replyMarkup) {
   if (res?.ok) return res;
   return telegram(env, "sendMessage", { chat_id: chatId, text });
 }
+// The learning web app (public/learn-app/index.html) is served as a static
+// asset from this Worker, so opening it costs no Worker request; the lesson
+// content loads from lessons.json and the media from public Drive links.
+const LEARN_APP_URL = "https://coptic-dictionary-bot.abr429701.workers.dev/learn-app/index.html";
 async function sendRootMenus(env, chatId, userId = chatId) {
   // Going home leaves the certificate flow and the get-code flow: a later
   // text must search the dictionary again instead of being read as a code,
@@ -6049,6 +6053,7 @@ const EXTRA_BOT_COMMANDS = [
   // أوامر أدمن إضافية: منفَّذة في الـ dispatcher وليست في ADMIN_COMMANDS.
   { command: "analytics", description: "تحليلات البحث وأكثر الكلمات بحثًا" },
   { command: "apikey", description: "إدارة مفتاح API" },
+  { command: "app", description: "تطبيق التعلم (Web App)" },
   { command: "auditlog", description: "سجل تدقيق تعديلات القاموس" },
   { command: "autoreply", description: "ردود تلقائية" },
   { command: "backup", description: "نسخة احتياطية من القاموس" },
@@ -6213,7 +6218,7 @@ function allBotCommands() {
 // بلا تأكيد من الكود نفسه) تطلب تأكيدًا أولًا قبل التشغيل.
 const ALL_COMMANDS_DANGEROUS = new Set(["resetstats", "purgeinactive", "resetsessions"]);
 const ALL_COMMANDS_CATEGORIES = [
-  { id: "main", title: "⭐ الأوامر الأساسية", commands: ["start", "keyboard", "learn", "menu", "search", "contact", "random", "help", "admin", "dashboard", "about", "cancel", "k", "kbd", "lang"] },
+  { id: "main", title: "⭐ الأوامر الأساسية", commands: ["start", "keyboard", "learn", "menu", "search", "app", "contact", "random", "help", "admin", "dashboard", "about", "cancel", "k", "kbd", "lang"] },
   { id: "stats", title: "📊 الإحصاءات والتقارير", commands: ["usage", "analytics", "topusers", "growth", "usercount", "searchstats", "topwords", "misses", "livewords", "hourly", "dictstats", "wordcount", "fieldreport", "statuspage", "digest", "weekly", "reports", "reportclose", "adminscore", "usertimeline", "trace", "searchcount", "liveusers", "conversations", "userchat", "livemon", "livesearch", "retention", "ops", "funnel", "cohorts", "reflinks", "searchhistory", "report"] },
   { id: "voices", title: "🎙 الأصوات", commands: ["record", "record_choose", "record_select", "record_stop", "record_voice", "voice_delete", "voice_delete_all", "voice_delete_many", "voicecoverage", "voiceoff", "voiceon", "voiceonce", "voicesettings", "voicethree", "noaudio", "nopronounce", "uploadaudio", "rebuildvoice", "voicegaps", "pronounce"] },
   { id: "drive", title: "☁️ Drive والمزامنة", commands: ["drive", "syncdrive", "syncusers", "syncall", "synccancel", "syncreset", "syncstatus", "synctest", "syncwatch", "importusers", "importsheet", "importlearn", "setdrive", "setarchive", "resync"] },
@@ -7758,6 +7763,15 @@ async function handleUpdate(update, env, ctx) {
   if (text === "/getcode") { await beginGetCodeFlow(env, message.chat.id, userId); return; }
   if (text === "/menu") { await sendRootMenus(env, message.chat.id, userId); return; }
   if (text === "/search") { await beginSearchMode(env, message.chat.id, userId); return; }
+  if (text === "/app") {
+    await telegram(env, "sendMessage", {
+      chat_id: message.chat.id,
+      text: "🌐 <b>تطبيق التعلم</b>\n\nدروس المستوى الأول والثاني في صفحة واحدة: الفيديو والصور والتدريب والامتحان.",
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: [[{ text: "🌐 فتح تطبيق التعلم", web_app: { url: LEARN_APP_URL } }]] },
+    });
+    return;
+  }
   if (text === "/lang" || text.startsWith("/lang ")) {
     const arg = text.slice("/lang".length).trim().toLowerCase();
     if (arg === "ar" || arg === "en") { await setUserLang(env, userId, arg); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: arg === "en" ? "✅ Language set to English. /help" : "✅ تم ضبط اللغة على العربية. /help" }); return; }
