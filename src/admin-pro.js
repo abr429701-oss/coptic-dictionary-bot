@@ -433,19 +433,34 @@ export function createAdminPro(api) {
   // تذاكر الدعم (/support, /tickets, /ticket, /ticketclose)
   // ==========================================================================
   // ----- أدوات حالة محادثة الدعم (supportFlow) -----
+  // The flow map is read on every plain private message to decide whether
+  // it belongs to an open support ticket. It changes rarely (a ticket
+  // opens/closes), so it is memoized briefly per store binding; the
+  // setters write through, and the TTL bounds cross-isolate staleness
+  // to 5 s (worst case one message is treated as a search instead of a
+  // ticket reply, then routes correctly).
+  const SUPPORT_FLOW_TTL_MS = 5000;
+  const supportFlowMemos = new WeakMap();
   async function getSupportFlow(env) {
+    const now = Date.now();
+    const memo = env.USERS ? supportFlowMemos.get(env.USERS) : null;
+    if (memo && now - memo.at < SUPPORT_FLOW_TTL_MS) return memo.value ?? {};
     const v = await sget(env, AP.supportFlow, {});
-    return (v && typeof v === "object") ? v : {};
+    const flow = (v && typeof v === "object") ? v : {};
+    if (env.USERS) supportFlowMemos.set(env.USERS, { value: flow, at: Date.now() });
+    return flow;
   }
   async function setSupportFlow(env, userId, ticketId) {
     const flow = await getSupportFlow(env);
     flow[String(userId)] = { ticketId: String(ticketId), activeSince: Date.now() };
     await sput(env, AP.supportFlow, flow);
+    if (env.USERS) supportFlowMemos.set(env.USERS, { value: flow, at: Date.now() });
   }
   async function clearSupportFlow(env, userId) {
     const flow = await getSupportFlow(env);
     delete flow[String(userId)];
     await sput(env, AP.supportFlow, flow);
+    if (env.USERS) supportFlowMemos.set(env.USERS, { value: flow, at: Date.now() });
   }
   function findOpenTicket(tickets, userId) {
     const id = String(userId);

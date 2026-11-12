@@ -105,6 +105,7 @@ async function slowModeConfig(env) { const v = await cachedDoGet(env, SLOW_MODE_
 async function setSlowModeConfig(env, cfg) { if (env.USERS) await storeCall(env, { op: "put", key: SLOW_MODE_KEY, value: cfg }); invalidateCache(slowModeCache); }
 function invalidateAllCaches() {
   for (const c of [wodCache, autoReplyCache, searchLimitCache, alertsCache, templatesCache, optOutCache, notesCache, featureFlagsCache, blacklistCache, whitelistCache, whitelistModeCache, banMsgCache, maintMsgCache, slowModeCache, lockdownCache, verifyGateCache, gamifyCache, apiKeyCache, rateLimitCache, bansCache, maintCache, aliasCache, motdCache, extraAdminsCache, welcomeCache, liveMonCache, rulesCache]) invalidateCache(c);
+  for (const c of perStoreCacheObjects) invalidateCache(c);
   registeredCache.clear(); commandMenuReady.clear(); lastLookup.clear();
 }
 async function broadcastControlState(env) { if (!env.USERS) return { paused: false }; const v = ((await storeCall(env, { op: "get", key: BROADCAST_CTRL_KEY })).value ?? { paused: false }); return v && typeof v === "object" ? v : { paused: false }; }
@@ -2281,17 +2282,25 @@ function arrayBufferToBase64(buffer) {
 // Config comes from the APPS_SCRIPT_URL secret, or from /setdrive <url> (stored in the user store).
 const DRIVE_CONFIG_KEY = "drive-config";
 const ARCHIVE_CHAT_KEY = "archive-chat";
+// Per-store cache slots for the two single-key configs below (same reason
+// as userMemoByStore: a module-level singleton would leak one test's
+// config into another's). invalidateAllCaches clears every slot created.
+const perStoreCacheObjects = new Set();
+const driveConfigCaches = new WeakMap();
+const archiveChatCaches = new WeakMap();
+function perStoreCache(map, env) {
+  if (!env.USERS) return { value: null, at: 0 };
+  let slot = map.get(env.USERS);
+  if (!slot) { slot = { value: null, at: 0 }; map.set(env.USERS, slot); perStoreCacheObjects.add(slot); }
+  return slot;
+}
 const SYNC_DRIVE_BATCH = 5;
 
 async function driveConfig(env) {
   // An explicit admin /setdrive URL is an override; the repository secret is only the fallback.
   if (env.USERS) {
-    try {
-      const saved = (await storeCall(env, { op: "get", key: DRIVE_CONFIG_KEY })).value;
-      if (saved?.url) return saved;
-    } catch (error) {
-      console.error("Drive config lookup failed", error instanceof Error ? error.message : "unknown error");
-    }
+    const saved = await cachedDoGet(env, DRIVE_CONFIG_KEY, perStoreCache(driveConfigCaches, env), null);
+    if (saved?.url) return saved;
   }
   return env.APPS_SCRIPT_URL ? { url: env.APPS_SCRIPT_URL } : null;
 }
@@ -2496,6 +2505,7 @@ async function setDriveConfig(env, message, argument) {
   const input = argument.trim();
   if (input.toLowerCase() === "reset") {
     await storeCall(env, { op: "put", key: DRIVE_CONFIG_KEY, value: null });
+    invalidateCache(perStoreCache(driveConfigCaches, env));
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "تم حذف رابط /setdrive. سيستخدم البوت سرّ APPS_SCRIPT_URL إن كان مضبوطًا." });
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: await driveStatusText(env), parse_mode: "HTML", disable_web_page_preview: true });
     return;
@@ -2509,6 +2519,7 @@ async function setDriveConfig(env, message, argument) {
     return;
   }
   await storeCall(env, { op: "put", key: DRIVE_CONFIG_KEY, value: { url } });
+  invalidateCache(perStoreCache(driveConfigCaches, env));
   await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "تم حفظ رابط درايف. جارٍ الاختبار…" });
   await telegram(env, "sendMessage", { chat_id: message.chat.id, text: await driveStatusText(env), parse_mode: "HTML", disable_web_page_preview: true });
 }
@@ -3250,10 +3261,33 @@ async function storeCall(env, payload) {
   return response.json();
 }
 
+// Per-update memo for user records: one Telegram update reads the same
+// user 3-4 times (voice prefs, tail read, ...). Entries live at most 5 s
+// and the memo is cleared at the start of every handleUpdate, so no update
+// ever sees a record from a previous update. saveUser writes through, so
+// a record changed mid-update is never stale afterwards. Scoped per store
+// binding (tests use a fresh KV per test — a module-level memo would leak
+// one test's users into another's). Callers get a copy: some mutate the
+// returned record in place before saving it.
+const USER_MEMO_TTL_MS = 5000;
+const userMemoByStore = new WeakMap();
+function userMemoFor(env) {
+  if (!env.USERS) return null;
+  let memo = userMemoByStore.get(env.USERS);
+  if (!memo) { memo = new Map(); userMemoByStore.set(env.USERS, memo); }
+  return memo;
+}
+
 async function getUser(env, userId) {
   if (!env.USERS) return null;
+  const key = String(userId);
+  const memo = userMemoFor(env);
+  const hit = memo?.get(key);
+  if (hit && Date.now() - hit.at < USER_MEMO_TTL_MS) return hit.record === null ? null : { ...hit.record };
   try {
-    return (await storeCall(env, { op: "get", key: `user:${userId}` })).value ?? null;
+    const value = (await storeCall(env, { op: "get", key: `user:${key}` })).value ?? null;
+    memo?.set(key, { record: value, at: Date.now() });
+    return value === null ? null : { ...value };
   } catch (error) {
     console.error("User lookup failed", error instanceof Error ? error.message : "unknown error");
     return null;
@@ -3264,6 +3298,7 @@ async function saveUser(env, userId, data) {
   if (!env.USERS) return false;
   try {
     await storeCall(env, { op: "put", key: `user:${userId}`, value: data });
+    userMemoFor(env)?.set(String(userId), { record: data, at: Date.now() });
     return true;
   } catch (error) {
     console.error("User save failed", error instanceof Error ? error.message : "unknown error");
@@ -3565,7 +3600,7 @@ async function captureVoiceRecording(env, message, userId, user, ctx) {
 // (bot-to-bot mode) reads it and the scheduled "Archive recordings" workflow stores the file.
 async function archiveChatId(env) {
   try {
-    const saved = env.USERS ? (await storeCall(env, { op: "get", key: ARCHIVE_CHAT_KEY })).value : null;
+    const saved = env.USERS ? await cachedDoGet(env, ARCHIVE_CHAT_KEY, perStoreCache(archiveChatCaches, env), null) : null;
     return saved?.chatId ?? null;
   } catch {
     return null;
@@ -3604,11 +3639,13 @@ async function setArchiveChat(env, message, argument) {
       return;
     }
     await storeCall(env, { op: "put", key: ARCHIVE_CHAT_KEY, value: { chatId: message.chat.id } });
+    invalidateCache(perStoreCache(archiveChatCaches, env));
     await reply(`✅ تم ربط هذه المجموعة (${message.chat.id}) لتحويل التسجيلات إلى @Abram444_bot.`);
     return;
   }
   if (input.toLowerCase() === "off") {
     await storeCall(env, { op: "put", key: ARCHIVE_CHAT_KEY, value: null });
+    invalidateCache(perStoreCache(archiveChatCaches, env));
     await reply("تم إيقاف إرسال التسجيلات لمجموعة الأرشيف.");
     return;
   }
@@ -3629,6 +3666,7 @@ async function setArchiveChat(env, message, argument) {
     return;
   }
   await storeCall(env, { op: "put", key: ARCHIVE_CHAT_KEY, value: { chatId: Number(input) } });
+  invalidateCache(perStoreCache(archiveChatCaches, env));
   await reply("✅ تم الربط. كل تسجيل جديد سيُرسل أيضًا لهذه المجموعة.");
 }
 
@@ -3689,6 +3727,7 @@ async function sendVoiceToArchive(env, chatId, payload) {
   const migratedTo = result?.parameters?.migrate_to_chat_id;
   if (!result?.ok && migratedTo) {
     await storeCall(env, { op: "put", key: ARCHIVE_CHAT_KEY, value: { chatId: migratedTo } });
+    invalidateCache(perStoreCache(archiveChatCaches, env));
     result = await telegram(env, "sendVoice", { ...payload, chat_id: migratedTo });
   }
   return result;
@@ -6348,6 +6387,7 @@ async function handleAdminDashboardCallback(env, callback, ctx) {
   if (action === "findempty") { await setAdminFlow(env, callback.from.id, { kind: "findempty_wait" }); await telegram(env, "sendMessage", { chat_id: chatId, text: "✏️ أرسل اسم الحقل (A-I أو coptic/meaning/pronunciation/...) للعثور على الخلايا الفاضية فيه." }); return; }
 }
 async function handleUpdate(update, env, ctx) {
+  userMemoFor(env)?.clear();
   if (update.inline_query) {
     trackUsage("inline");
     inBackground(ctx, flushAnalyticsSnapshot(env));

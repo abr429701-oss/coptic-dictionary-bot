@@ -16,13 +16,18 @@ import { resetAudioCaches } from "../src/neural-voice.js";
 // the waste they measure is removed. A budget regression fails the suite.
 //
 // Measured baseline (warm config caches, fresh user id):
-// - plain search: 14 DO calls when the word's file_id is already in the
-//   isolate's voice memory (the file warm-up search caches it), 16 when it
-//   is not (cold voice memory pays 2 ttsid reads). Pre-G1 the same search
-//   cost 21 (19 with warm voice memory) — G1 removed the 5 null-config
-//   re-reads. Budget 16 covers both.
-// - /start: 10. noop callback: 0. inline query: 1.
-// - new user: 13 (15 with cold voice memory). second search: 11.
+// - plain search: 12 DO calls after G2 (14 with cold voice memory: the
+//   warm-up search caches the word's file_id in isolate memory). G0
+//   measured 21 pre-G1, G1 brought it to 14. Remaining: 6 flush calls
+//   (history 2, conv 2, conv:active 2 — G3's target), getUser x1, voiceid
+//   x1 (G5's target), drive-config x1 + menus:v1 x1 + pro:support:flow
+//   x1 (first update on a fresh store; warm in production within TTL),
+//   register x1. A repeat message from the same user within 60 s costs 1
+//   less (registeredCache hit skips the register op).
+// - /start: 12 (10 when no history flush is pending — the global snapshot
+//   flush drains whatever the previous update tracked). noop callback: 0.
+//   inline query: 1. new user: 10 (12 with cold voice memory).
+//   second search: 8.
 // Note: resetAudioCaches clears only the audio BYTES cache, not the
 // voice file_id memory (voiceFileIdCache in src/index.js) — so the
 // warm-up word stays cached for the whole file. The recorded-voice check
@@ -177,7 +182,19 @@ test("perf-budget: plain search from a named user (voice on)", async (t) => {
   const calls = await runText(kv, 9101, "ⲫⲱⲥ");
   t.diagnostic(`plain search: ${summary(counts)}`);
   assert.ok(calls.some((c) => c.url.endsWith("/sendVoice")), "the search must still send its voice");
-  assert.ok(counts.total <= 16, `plain search must stay within its DO budget, got ${summary(counts)}`);
+  assert.ok(counts.total <= 14, `plain search must stay within its DO budget, got ${summary(counts)}`);
+});
+
+// G2 regression: one search must read the user record exactly once
+// (getUser memo), not 3 times as before.
+test("perf-budget: one search reads the user record once (getUser memo)", async (t) => {
+  const { kv, counts } = countingKv();
+  kv.store.set("user:9107", NAMED_USER(9107));
+  resetCounts(counts);
+  const calls = await runText(kv, 9107, "ⲫⲱⲥ");
+  t.diagnostic(`memo search: ${summary(counts)}`);
+  assert.ok(calls.some((c) => c.url.endsWith("/sendVoice")), "the search must still send its voice");
+  assert.equal(counts.byKey.get("user:9107") ?? 0, 1, "one search must read the user record exactly once");
 });
 
 test("perf-budget: /start from a named user", async (t) => {
@@ -187,7 +204,7 @@ test("perf-budget: /start from a named user", async (t) => {
   const calls = await runText(kv, 9102, "/start");
   t.diagnostic(`/start: ${summary(counts)}`);
   assert.ok(calls.some((c) => c.url.endsWith("/sendMessage")), "/start must still answer");
-  assert.ok(counts.total <= 10, `/start must stay within its DO budget, got ${summary(counts)}`);
+  assert.ok(counts.total <= 12, `/start must stay within its DO budget, got ${summary(counts)}`);
 });
 
 // G1 regression: cachedDoGet must cache null settings. A second search
@@ -204,7 +221,7 @@ test("perf-budget: a second plain search re-reads no null-config keys", async (t
   for (const key of ["wod:config", "alerts:config", "ratelimit:max", "lockdown", "verifygate"]) {
     assert.equal(counts.byKey.get(key) ?? 0, 0, `${key} must be served from cache on a second search`);
   }
-  assert.ok(counts.total <= 11, `second search must stay within its DO budget, got ${summary(counts)}`);
+  assert.ok(counts.total <= 10, `second search must stay within its DO budget, got ${summary(counts)}`);
 });
 
 test("perf-budget: noop callback costs zero DO requests", async (t) => {
@@ -230,5 +247,5 @@ test("perf-budget: first message from a brand-new user (register path)", async (
   const calls = await runText(kv, 9105, "ⲫⲱⲥ");
   t.diagnostic(`new user: ${summary(counts)}`);
   assert.ok(calls.some((c) => c.url.endsWith("/sendMessage")), "a new user must still get the name prompt");
-  assert.ok(counts.total <= 15, `a new user's first message must stay within its DO budget, got ${summary(counts)}`);
+  assert.ok(counts.total <= 12, `a new user's first message must stay within its DO budget, got ${summary(counts)}`);
 });
