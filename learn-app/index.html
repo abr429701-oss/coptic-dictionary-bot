@@ -77,10 +77,12 @@
   }
   function driveView(id) { return "https://drive.google.com/file/d/" + encodeURIComponent(id) + "/view"; }
   function driveImg(id) { return "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(id); }
-  // All 27 lesson videos are video/mp4 (7–21 MB), so they play natively in
-  // the page with a plain <video> tag — no Drive preview player, no leaving
-  // the app. The Drive file is served directly from Google to the phone.
-  function driveVideo(id) { return driveImg(id); }
+  // Lesson videos play through the bot itself (/video/<driveId> in
+  // src/index.js): Drive's direct download URL answers a video Range
+  // request with a 303 redirect and an attachment Content-Disposition,
+  // and Telegram's webview fails on both. The Worker streams the file
+  // back with clean media headers, so a plain <video> tag just plays.
+  function driveVideo(id) { return "/video/" + encodeURIComponent(id); }
 
   function renderItem(item) {
     if (item.kind === "video") {

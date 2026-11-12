@@ -47,7 +47,7 @@ test("learn-app: index.html loads the data and plays video natively", () => {
   assert.ok(appHtml.includes("https://telegram.org/js/telegram-web-app.js"), "Telegram WebApp SDK");
   assert.ok(appHtml.includes('fetch("lessons.json")'), "loads the static lesson data");
   assert.ok(appHtml.includes("<video controls playsinline"), "native video element, no Drive player embed");
+  assert.ok(appHtml.includes('"/video/"'), "videos stream through the bot's /video/ route");
   assert.ok(!appHtml.includes("/preview"), "no Drive preview player iframe");
-  assert.ok(appHtml.includes("uc?export=download"), "Drive direct media URLs");
   assert.ok(appHtml.includes("الامتحان الإلكتروني"), "exam button label");
 });
