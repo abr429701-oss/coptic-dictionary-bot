@@ -2964,6 +2964,91 @@ export class UserStore {
       await storage.delete(key);
       return Response.json({ ok: true });
     }
+    // G3: atomic append ops — one RPC does the whole read-modify-write
+    // inside the DO, instead of the Worker paying a get + a put per key
+    // (and losing buffered data when the put failed after the buffer was
+    // cleared). The Worker keeps only what it already sent; entries
+    // tracked while the RPC is in flight stay buffered for the next flush.
+    if (op === "historyAppend") {
+      // value: { [userId]: entries[] } — per-user history:<id> keys
+      // (capped), replacing the one global history:snapshot for all users.
+      const histories = value && typeof value === "object" ? value : {};
+      for (const [uid, entries] of Object.entries(histories)) {
+        if (!Array.isArray(entries) || !entries.length) continue;
+        const hkey = `history:${uid}`;
+        const previous = (await storage.get(hkey)) ?? [];
+        await storage.put(hkey, [...previous, ...entries].slice(-USER_HISTORY_MAX));
+      }
+      return Response.json({ ok: true });
+    }
+    if (op === "convAppend") {
+      // value: { convs: { [userId]: entries[] }, actives: { [userId]: { name, at, count } } }
+      const convs = value?.convs && typeof value.convs === "object" ? value.convs : {};
+      const actives = value?.actives && typeof value.actives === "object" ? value.actives : {};
+      for (const [uid, entries] of Object.entries(convs)) {
+        if (!Array.isArray(entries) || !entries.length) continue;
+        const ckey = `conv:${uid}`;
+        const previous = (await storage.get(ckey)) ?? [];
+        await storage.put(ckey, [...previous, ...entries].slice(-CONV_MAX_PER_USER));
+      }
+      if (Object.keys(actives).length) {
+        const activeKey = "conv:active";
+        const prevActive = (await storage.get(activeKey)) ?? {};
+        for (const [uid, info] of Object.entries(actives)) {
+          prevActive[String(uid)] = { name: info?.name, at: info?.at ? new Date(info.at).toISOString() : new Date().toISOString(), count: (prevActive[String(uid)]?.count ?? 0) + (info?.count ?? 0) };
+        }
+        const sorted = Object.entries(prevActive).sort((a, b) => new Date(b[1].at) - new Date(a[1].at)).slice(0, CONV_ACTIVE_MAX);
+        await storage.put(activeKey, Object.fromEntries(sorted));
+      }
+      return Response.json({ ok: true });
+    }
+    if (op === "analyticsAdd") {
+      // value: { searches, commands, inline, topWords: { word: count } }
+      const delta = value && typeof value === "object" ? value : {};
+      const previous = (await storage.get("analytics:snapshot")) ?? { searches: 0, commands: 0, inline: 0, topWords: [] };
+      const mergedTop = new Map(previous.topWords ?? []);
+      for (const [word, count] of Object.entries(delta.topWords ?? {})) mergedTop.set(word, (mergedTop.get(word) ?? 0) + Number(count ?? 0));
+      const merged = {
+        searches: (previous.searches ?? 0) + (delta.searches ?? 0),
+        commands: (previous.commands ?? 0) + (delta.commands ?? 0),
+        inline: (previous.inline ?? 0) + (delta.inline ?? 0),
+        topWords: [...mergedTop.entries()].sort((a, b) => b[1] - a[1]).slice(0, 100),
+        updatedAt: new Date().toISOString(),
+      };
+      await storage.put("analytics:snapshot", merged);
+      return Response.json({ ok: true });
+    }
+    if (op === "auditAppend") {
+      const entries = Array.isArray(value) ? value : [];
+      const previous = (await storage.get("auditlog:recent")) ?? [];
+      await storage.put("auditlog:recent", [...previous, ...entries].slice(-AUDIT_MAX_MEMORY));
+      return Response.json({ ok: true });
+    }
+    if (op === "errorAppend") {
+      const entries = Array.isArray(value) ? value : [];
+      const previous = (await storage.get("errors:recent")) ?? [];
+      await storage.put("errors:recent", [...previous, ...entries].slice(-ERROR_LOG_MAX));
+      return Response.json({ ok: true });
+    }
+    if (op === "gamifyAdd") {
+      // value: { [userId]: { points, streak, lastDay, name } }
+      const scores = value && typeof value === "object" ? value : {};
+      const previous = (await storage.get("gamify:scores")) ?? {};
+      for (const [uid, e] of Object.entries(scores)) {
+        const prev = previous[uid] ?? { points: 0, streak: 0, lastDay: "" };
+        previous[uid] = { points: (prev.points ?? 0) + (e?.points ?? 0), streak: Math.max(prev.streak ?? 0, e?.streak ?? 0), lastDay: e?.lastDay || prev.lastDay, name: e?.name || prev.name };
+      }
+      await storage.put("gamify:scores", previous);
+      return Response.json({ ok: true });
+    }
+    if (op === "historyUserIds") {
+      // User ids that have per-user search history (for the maintenance
+      // user-recovery scan). The old history:snapshot key also matches
+      // the prefix and is excluded.
+      const keys = await storage.list({ prefix: "history:" });
+      const ids = [...keys.keys()].map((k) => k.slice("history:".length)).filter((id) => id !== "snapshot");
+      return Response.json({ ids });
+    }
     if (op === "register") {
       // Atomic "first contact" check so two quick messages never announce the same user twice.
       const existing = await storage.get(`user:${userId}`);
@@ -3055,12 +3140,16 @@ export class UserStore {
     }
     // v2: retention + funnel, computed inside the DO from stored user records
     // (firstSeen/lastSeen are ISO strings), search history and gamify scores.
-    // No new storage keys: reuses user:, history:snapshot and gamify:scores.
+    // Search history lives in per-user history:<id> keys (G3); the old
+    // global history:snapshot is kept as a fallback for unmigrated users.
     if (op === "retention") {
       const now = Date.now();
       const day = 86400000;
       const users = await storage.list({ prefix: "user:" });
-      const history = (await storage.get("history:snapshot")) ?? {};
+      const historyKeys = await storage.list({ prefix: "history:" });
+      const legacyHistory = (await storage.get("history:snapshot")) ?? {};
+      const searchedIds = new Set([...historyKeys.keys()].map((k) => k.slice("history:".length)).filter((id) => id !== "snapshot"));
+      for (const [id, entries] of Object.entries(legacyHistory)) if (Array.isArray(entries) && entries.length) searchedIds.add(id);
       const scores = (await storage.get("gamify:scores")) ?? {};
       const cohort = (days) => {
         let total = 0;
@@ -3076,7 +3165,7 @@ export class UserStore {
       };
       let faved = 0;
       for (const [, value] of users) if (Array.isArray(value?.favs) && value.favs.length) faved += 1;
-      const searched = Object.values(history).filter((entries) => Array.isArray(entries) && entries.length).length;
+      const searched = searchedIds.size;
       // gamify:scores values are objects {points, streak, lastDay, name}, not numbers.
       const quizzed = Object.values(scores).filter((entry) => Number(entry?.points) > 0).length;
       return Response.json({
@@ -4193,23 +4282,20 @@ async function flushAnalyticsSnapshot(env) {
   if (!env.USERS) return;
   const now = Date.now();
   if (analyticsState.pending < ANALYTICS_FLUSH_EVERY && now - analyticsState.lastFlush < ANALYTICS_FLUSH_MS) return;
-  analyticsState.pending = 0;
-  analyticsState.lastFlush = now;
-  const top = [...analyticsState.topWords.entries()].sort((a, b) => b[1] - a[1]).slice(0, 100);
+  const delta = {
+    searches: analyticsState.searches,
+    commands: analyticsState.commands,
+    inline: analyticsState.inline,
+    topWords: Object.fromEntries([...analyticsState.topWords.entries()].sort((a, b) => b[1] - a[1]).slice(0, 100)),
+  };
   try {
-    const previous = (await storeCall(env, { op: "get", key: "analytics:snapshot" })).value ?? { searches: 0, commands: 0, inline: 0, topWords: [] };
-    const mergedTop = new Map(previous.topWords ?? []);
-    for (const [word, count] of top) mergedTop.set(word, (mergedTop.get(word) ?? 0) + count);
-    const merged = {
-      searches: (previous.searches ?? 0) + analyticsState.searches,
-      commands: (previous.commands ?? 0) + analyticsState.commands,
-      inline: (previous.inline ?? 0) + analyticsState.inline,
-      topWords: [...mergedTop.entries()].sort((a, b) => b[1] - a[1]).slice(0, 100),
-      updatedAt: new Date().toISOString(),
-    };
+    await storeCall(env, { op: "analyticsAdd", value: delta });
     analyticsState.searches = 0; analyticsState.commands = 0; analyticsState.inline = 0; analyticsState.topWords.clear();
-    await storeCall(env, { op: "put", key: "analytics:snapshot", value: merged });
+    analyticsState.pending = 0; analyticsState.lastFlush = now;
   } catch (error) {
+    // Keep the counters buffered (they are unbounded ints, the top list
+    // is capped); back off so a down DO is not retried on every update.
+    analyticsState.lastFlush = now;
     console.error("Analytics snapshot failed", error instanceof Error ? error.message : "unknown error");
   }
 }
@@ -4237,12 +4323,14 @@ function logAudit(entry) {
 }
 async function flushAuditLog(env) {
   if (!env.USERS || !auditLog.length) return;
+  const pending = [...auditLog];
   try {
-    const previous = (await storeCall(env, { op: "get", key: "auditlog:recent" })).value ?? [];
-    const merged = [...previous, ...auditLog].slice(-AUDIT_MAX_MEMORY);
-    auditLog.length = 0;
-    await storeCall(env, { op: "put", key: "auditlog:recent", value: merged });
+    await storeCall(env, { op: "auditAppend", value: pending });
+    auditLog.splice(0, pending.length);
   } catch (error) {
+    // Keep the entries buffered; cap the array so a long DO outage
+    // cannot grow memory without bound. The next flush retries.
+    if (auditLog.length > AUDIT_MAX_MEMORY * 2) auditLog.splice(0, auditLog.length - AUDIT_MAX_MEMORY * 2);
     console.error("Audit log flush failed", error instanceof Error ? error.message : "unknown error");
   }
 }
@@ -4467,12 +4555,11 @@ function logError(env, error, context = {}) {
 }
 async function flushErrorLog(env) {
   if (!env.USERS || !errorLog.length) return;
+  const pending = [...errorLog];
   try {
-    const previous = (await storeCall(env, { op: "get", key: "errors:recent" })).value ?? [];
-    const merged = [...previous, ...errorLog].slice(-ERROR_LOG_MAX);
-    errorLog.length = 0;
-    await storeCall(env, { op: "put", key: "errors:recent", value: merged });
-  } catch {}
+    await storeCall(env, { op: "errorAppend", value: pending });
+    errorLog.splice(0, pending.length);
+  } catch { /* kept buffered (already capped at ERROR_LOG_MAX); the next flush retries */ }
 }
 async function readErrorLog(env) {
   const persisted = env.USERS ? ((await storeCall(env, { op: "get", key: "errors:recent" })).value ?? []) : [];
@@ -4492,16 +4579,30 @@ function trackSearchHistory(userId, query) {
 }
 async function flushUserHistory(env) {
   if (!env.USERS || !userHistory.size) return;
+  // Snapshot copies: entries tracked while the RPC is in flight must not
+  // be dropped with the flushed ones.
+  const pending = [...userHistory.entries()].map(([id, arr]) => [id, [...arr]]);
   try {
-    const previous = (await storeCall(env, { op: "get", key: "history:snapshot" })).value ?? {};
-    for (const [key, arr] of userHistory) previous[key] = [...(previous[key] ?? []), ...arr].slice(-USER_HISTORY_MAX);
-    userHistory.clear();
-    await storeCall(env, { op: "put", key: "history:snapshot", value: previous });
-  } catch {}
+    await storeCall(env, { op: "historyAppend", value: Object.fromEntries(pending) });
+    for (const [id, snapshot] of pending) {
+      const current = userHistory.get(id);
+      if (!current) continue;
+      if (current.length <= snapshot.length) userHistory.delete(id);
+      else userHistory.set(id, current.slice(snapshot.length));
+    }
+  } catch { /* kept buffered; the next flush retries (bounded by the caps) */ }
 }
 async function getUserHistory(env, userId) {
   const key = String(userId);
-  const persisted = env.USERS ? (((await storeCall(env, { op: "get", key: "history:snapshot" })).value ?? {})[key] ?? []) : [];
+  let persisted = [];
+  if (env.USERS) {
+    const fresh = ((await storeCall(env, { op: "get", key: `history:${key}` })).value ?? null);
+    if (Array.isArray(fresh) && fresh.length) persisted = fresh;
+    else {
+      // Legacy fallback: entries still in the old global snapshot.
+      persisted = ((await storeCall(env, { op: "get", key: "history:snapshot" })).value ?? {})[key] ?? [];
+    }
+  }
   return [...persisted, ...(userHistory.get(key) ?? [])].slice(-20).reverse();
 }
 
@@ -4558,24 +4659,23 @@ function trackConvMessage(userId, name, message) {
 }
 async function flushConvLog(env) {
   if (!env.USERS || !convLog.size) return;
-  const pending = new Map(convLog);
-  const pendingActive = new Map(convActive);
-  convLog.clear();
-  convActive.clear();
+  const convs = Object.fromEntries([...convLog.entries()].map(([id, arr]) => [id, [...arr]]));
+  const actives = Object.fromEntries([...convActive.entries()].map(([id, info]) => [id, { ...info }]));
   try {
-    for (const [userId, arr] of pending) {
-      const key = `conv:${userId}`;
-      const previous = (await storeCall(env, { op: "get", key })).value ?? [];
-      await storeCall(env, { op: "put", key, value: [...previous, ...arr].slice(-CONV_MAX_PER_USER) });
+    await storeCall(env, { op: "convAppend", value: { convs, actives } });
+    for (const [id, snapshot] of Object.entries(convs)) {
+      const current = convLog.get(id);
+      if (!current) continue;
+      if (current.length <= snapshot.length) convLog.delete(id);
+      else convLog.set(id, current.slice(snapshot.length));
     }
-    const activeKey = "conv:active";
-    const previousActive = (await storeCall(env, { op: "get", key: activeKey })).value ?? {};
-    for (const [userId, info] of pendingActive) {
-      previousActive[userId] = { name: info.name, at: new Date(info.at).toISOString(), count: (previousActive[userId]?.count ?? 0) + info.count };
+    for (const [id, snapshot] of Object.entries(actives)) {
+      const current = convActive.get(id);
+      if (!current) continue;
+      if ((current.count ?? 0) <= (snapshot.count ?? 0)) convActive.delete(id);
+      else convActive.set(id, { ...current, count: (current.count ?? 0) - (snapshot.count ?? 0) });
     }
-    const sorted = Object.entries(previousActive).sort((a, b) => new Date(b[1].at) - new Date(a[1].at)).slice(0, CONV_ACTIVE_MAX);
-    await storeCall(env, { op: "put", key: activeKey, value: Object.fromEntries(sorted) });
-  } catch {}
+  } catch { /* kept buffered; the next flush retries */ }
 }
 async function getUserConv(env, userId) {
   const key = String(userId);
@@ -4683,15 +4783,17 @@ async function flushGamify(env) {
   const now = Date.now();
   if (now - gamifyFlushAt < 60000) return;
   gamifyFlushAt = now;
+  const pending = Object.fromEntries([...gamifyScores.entries()].map(([key, e]) => [key, { ...e }]));
   try {
-    const previous = (await storeCall(env, { op: "get", key: "gamify:scores" })).value ?? {};
-    for (const [key, e] of gamifyScores) {
-      const prev = previous[key] ?? { points: 0, streak: 0, lastDay: "" };
-      previous[key] = { points: (prev.points ?? 0) + e.points, streak: Math.max(prev.streak ?? 0, e.streak), lastDay: e.lastDay || prev.lastDay, name: e.name || prev.name };
+    await storeCall(env, { op: "gamifyAdd", value: pending });
+    for (const [key, snapshot] of Object.entries(pending)) {
+      const current = gamifyScores.get(key);
+      if (!current) continue;
+      // Points accrued while the RPC was in flight stay buffered.
+      if ((current.points ?? 0) <= (snapshot.points ?? 0)) gamifyScores.delete(key);
+      else gamifyScores.set(key, { ...current, points: (current.points ?? 0) - (snapshot.points ?? 0), streak: Math.max(current.streak ?? 0, snapshot.streak ?? 0), lastDay: current.lastDay || snapshot.lastDay, name: current.name || snapshot.name });
     }
-    gamifyScores.clear();
-    await storeCall(env, { op: "put", key: "gamify:scores", value: previous });
-  } catch {}
+  } catch { /* kept buffered; the next flush retries */ }
 }
 async function leaderboardTop(env, n = 10) {
   const persisted = env.USERS ? ((await storeCall(env, { op: "get", key: "gamify:scores" })).value ?? {}) : {};
@@ -5155,6 +5257,8 @@ async function recoverMissingUsers(env, chatId, ctx) {
   try {
     const history = ((await storeCall(env, { op: "get", key: "history:snapshot" })).value ?? {});
     for (const id of Object.keys(history)) addId(id);
+    const freshIds = (await storeCall(env, { op: "historyUserIds" })).ids ?? [];
+    for (const id of freshIds) addId(id);
   } catch { /* non-critical */ }
   // 2) Persisted gamify scores (logged for every text search while gamify was on; carries the display name).
   try {
@@ -6602,6 +6706,16 @@ async function handleUpdate(update, env, ctx) {
     return;
   }
   if (text) trackUsage(text.startsWith("/") ? "command" : "search", text.startsWith("/") ? undefined : text);
+  // Track this update's activity FIRST so the flushes below persist it in
+  // the same update (the old order flushed before tracking, so the current
+  // search only reached the DO on the NEXT update — and a crash in between
+  // lost it).
+  const isSearchText = text && !text.startsWith("/");
+  if (isPrivate && !isAdmin(env, userId)) trackConvMessage(userId, displayName(message.from), message);
+  if (isSearchText) trackSearchHistory(userId, text);
+  if (isSearchText) pushRecentSearch(userId, displayName(message.from), text);
+  const gamifyNow = isSearchText && (await gamifyOn(env));
+  if (gamifyNow) trackGamify(userId, displayName(message.from));
   inBackground(ctx, flushAnalyticsSnapshot(env));
   inBackground(ctx, flushAuditLog(env));
   inBackground(ctx, refreshExtraAdmins(env));
@@ -6611,13 +6725,10 @@ async function handleUpdate(update, env, ctx) {
   // (text, commands, media + captions) and, when the live toggle is on,
   // forward it to the admins as it arrives, with a quick-reply button.
   if (isPrivate && !isAdmin(env, userId)) {
-    trackConvMessage(userId, displayName(message.from), message);
     inBackground(ctx, flushConvLog(env));
     if (await liveMonitorOn(env)) inBackground(ctx, forwardLiveMessage(env, message, userId, displayName(message.from)));
   }
-  if (text && !text.startsWith("/")) trackSearchHistory(userId, text);
-  if (text && !text.startsWith("/")) pushRecentSearch(userId, displayName(message.from), text);
-  if (text && !text.startsWith("/") && await gamifyOn(env)) { trackGamify(userId, displayName(message.from)); inBackground(ctx, flushGamify(env)); }
+  if (gamifyNow) inBackground(ctx, flushGamify(env));
   // Register the user BEFORE any banned/whitelist/maintenance early-return, so their id is
   // always recorded in the user store and pushed to the sheet — even during maintenance.
   const registerPromise = registerOnFirstContact(env, message, userId, ctx);
