@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8">
@@ -6,106 +6,290 @@
 <title>تعلم اللغة القبطية</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-  :root { color-scheme: light dark; }
+  :root {
+    --ink: #1d2b29;
+    --muted: #66756f;
+    --paper: #f5f2ea;
+    --card: #ffffff;
+    --line: #e5ddcc;
+    --teal: #0f6a64;
+    --teal-dark: #0a4f4a;
+    --teal-soft: #e2efec;
+    --gold: #b98f2e;
+    --gold-soft: #f6ecd2;
+    --danger: #b3261e;
+    --danger-soft: #fbeae8;
+    --ok: #1e7a4c;
+    --ok-soft: #e3f2e9;
+    --radius: 16px;
+    --shadow: 0 1px 3px rgba(29, 43, 41, .08), 0 10px 28px rgba(29, 43, 41, .07);
+  }
   * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
   body {
-    margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif;
-    background: var(--tg-theme-bg-color, #fff);
-    color: var(--tg-theme-text-color, #111);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Tahoma, "Noto Sans Arabic", Arial, sans-serif;
+    background: var(--paper); color: var(--ink); line-height: 1.8;
+    -webkit-tap-highlight-color: transparent;
   }
-  header {
-    position: sticky; top: 0; z-index: 10;
-    background: var(--tg-theme-header-bg-color, var(--tg-theme-bg-color, #fff));
-    border-bottom: 1px solid var(--tg-theme-section-separator-color, #ddd);
-    padding: 12px 16px; display: flex; align-items: center; gap: 10px;
+  button { font-family: inherit; }
+
+  /* ---- top bar ---- */
+  .topbar {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; align-items: center; gap: 10px;
+    padding: calc(10px + env(safe-area-inset-top)) 16px 10px;
+    background: rgba(245, 242, 234, .94);
+    border-bottom: 1px solid var(--line);
   }
-  header h1 { font-size: 18px; margin: 0; flex: 1; }
   #backBtn {
-    border: 0; background: none; font-size: 20px; cursor: pointer;
-    color: var(--tg-theme-button-color, #2481cc); padding: 4px 8px; display: none;
+    flex: 0 0 auto; width: 38px; height: 38px; border-radius: 50%;
+    border: 1px solid var(--line); background: var(--card); color: var(--ink);
+    font-size: 24px; line-height: 1; cursor: pointer; padding: 0 0 3px;
   }
-  main { padding: 12px 16px 40px; max-width: 720px; margin: 0 auto; }
-  h2 { font-size: 17px; margin: 22px 0 10px; }
-  h2:first-child { margin-top: 6px; }
-  .lesson {
-    display: block; width: 100%; text-align: right; cursor: pointer;
-    background: var(--tg-theme-secondary-bg-color, #f4f4f5);
-    color: var(--tg-theme-text-color, #111);
-    border: 1px solid var(--tg-theme-section-separator-color, #e4e4e7);
-    border-radius: 12px; padding: 13px 14px; margin: 8px 0; font-size: 15px;
+  #title { flex: 1; font-size: 17px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .topbarSpacer { flex: 0 0 38px; }
+
+  main { max-width: 680px; margin: 0 auto; padding: 0 16px calc(28px + env(safe-area-inset-bottom)); }
+
+  /* ---- home hero ---- */
+  .hero {
+    margin: 18px 0 22px; padding: 26px 22px 22px; border-radius: 22px;
+    background: linear-gradient(135deg, var(--teal-dark), var(--teal) 60%, #12837a);
+    color: #fff; box-shadow: var(--shadow);
   }
-  .lesson .num { color: var(--tg-theme-hint-color, #888); font-size: 13px; display: block; }
+  .heroMark { font-size: 30px; font-weight: 700; color: #f2d98c; line-height: 1.2; }
+  .hero h1 { margin: 6px 0 4px; font-size: 26px; line-height: 1.4; }
+  .hero p { margin: 0; font-size: 14px; line-height: 1.9; color: #d9ebe8; }
+
+  /* ---- level sections + lesson cards ---- */
+  .levelHead { display: flex; align-items: baseline; justify-content: space-between; margin: 26px 2px 12px; }
+  .levelHead h2 { margin: 0; font-size: 19px; }
+  .countPill {
+    font-size: 12px; font-weight: 700; color: var(--teal);
+    background: var(--teal-soft); border-radius: 999px; padding: 3px 12px;
+  }
+  .lessonCard {
+    display: flex; align-items: center; gap: 14px; width: 100%; text-align: right;
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 15px 16px; margin: 0 0 10px; cursor: pointer; box-shadow: var(--shadow);
+  }
+  .lessonCard:active { transform: scale(.99); }
+  .lessonNum {
+    flex: 0 0 auto; width: 44px; height: 44px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 17px; font-weight: 700; color: #fff; background: var(--teal);
+  }
+  .lessonCard.lvl2 .lessonNum { background: var(--gold); }
+  .lessonBody { flex: 1; min-width: 0; }
+  .lessonTitle { display: block; font-size: 16px; font-weight: 700; line-height: 1.6; }
+  .lessonChips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .chip {
+    font-size: 11px; font-weight: 600; color: var(--muted);
+    background: var(--paper); border: 1px solid var(--line); border-radius: 999px; padding: 1px 9px;
+  }
+  .lessonArrow { flex: 0 0 auto; font-size: 26px; color: #b9bfae; line-height: 1; }
+
+  /* ---- lesson view ---- */
+  .lessonHead { margin: 20px 2px 16px; }
+  .levelTag {
+    display: inline-block; font-size: 12px; font-weight: 700; color: var(--teal);
+    background: var(--teal-soft); border-radius: 999px; padding: 3px 12px; margin-bottom: 8px;
+  }
+  .lessonHead h2 { margin: 0; font-size: 23px; line-height: 1.5; }
   .item { margin: 18px 0; }
-  .item .lbl { font-size: 14px; color: var(--tg-theme-hint-color, #888); margin-bottom: 8px; }
-  .videoWrap { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 12px; overflow: hidden; }
+  .lbl { font-size: 14px; font-weight: 700; color: var(--muted); margin-bottom: 8px; }
+  .videoWrap { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); }
   .videoWrap video { position: absolute; inset: 0; width: 100%; height: 100%; background: #000; }
   .videoWrap iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
-  .fallback { display: inline-block; margin-top: 8px; font-size: 14px; color: var(--tg-theme-link-color, #2481cc); }
-  .photo { width: 100%; border-radius: 12px; display: block; }
+  .photo { width: 100%; border-radius: var(--radius); display: block; box-shadow: var(--shadow); }
   .exercise {
-    white-space: pre-wrap; line-height: 1.8; font-size: 15px;
-    background: var(--tg-theme-secondary-bg-color, #f4f4f5);
-    border-radius: 12px; padding: 14px;
+    background: var(--gold-soft); border: 1px solid #eadfba; border-radius: var(--radius);
+    padding: 16px 18px; font-size: 15px;
   }
+  .fallback { display: inline-block; color: var(--teal); font-size: 13px; margin-top: 10px; }
+  .muted { color: var(--muted); font-size: 13px; }
+
+  /* ---- exam CTA in a lesson ---- */
+  .examCta {
+    background: linear-gradient(135deg, var(--teal-dark), var(--teal));
+    border-radius: 20px; padding: 20px; color: #fff; box-shadow: var(--shadow);
+  }
+  .examCtaTitle { font-size: 17px; font-weight: 700; }
+  .examCta .muted { color: #cfe4e1; }
+  .examCta .examBtn { margin-top: 14px; background: #fff; color: var(--teal-dark); }
+  .examCta .fallback { color: #f2d98c; }
+
   .examBtn {
-    display: block; text-align: center; text-decoration: none; font-size: 16px; font-weight: 600;
-    background: var(--tg-theme-button-color, #2481cc); color: var(--tg-theme-button-text-color, #fff);
+    display: block; text-align: center; text-decoration: none; font-size: 16px; font-weight: 700;
+    background: var(--teal); color: #fff;
     border-radius: 12px; padding: 14px; margin: 8px 0; border: 0; width: 100%; cursor: pointer;
   }
-  .q { margin: 22px 0; }
-  .qTitle { font-size: 15px; font-weight: 600; line-height: 1.7; margin-bottom: 8px; }
-  .qTitle .req { color: #c00; }
-  .qImg { width: 100%; border-radius: 12px; display: block; margin: 8px 0; }
+  .examBtn:disabled { opacity: .6; }
+
+  /* ---- exam screen ---- */
+  .examHead {
+    background: var(--card); border: 1px solid var(--line); border-radius: 20px;
+    padding: 18px; margin: 18px 0 6px; box-shadow: var(--shadow);
+  }
+  .examHeadTitle { font-size: 19px; font-weight: 700; line-height: 1.6; }
+  .examHeadLabel { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .progress { height: 8px; background: var(--teal-soft); border-radius: 999px; overflow: hidden; margin: 14px 0 6px; }
+  .progressBar { height: 100%; width: 0; background: var(--teal); border-radius: 999px; transition: width .3s ease; }
+  .qCard {
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 16px; margin: 14px 0; box-shadow: var(--shadow);
+  }
+  .qTop { display: flex; align-items: flex-start; gap: 10px; }
+  .qNum {
+    flex: 0 0 auto; width: 30px; height: 30px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 700; color: var(--teal); background: var(--teal-soft);
+  }
+  .qTitle { flex: 1; font-size: 15px; font-weight: 600; line-height: 1.8; }
+  .qTitle .req { color: var(--danger); }
+  .qImg { width: 100%; border-radius: 12px; display: block; margin: 12px 0 4px; }
   .qText, .qSelect {
-    width: 100%; font-size: 15px; padding: 11px 12px;
-    border: 1px solid var(--tg-theme-section-separator-color, #ccc); border-radius: 10px;
-    background: var(--tg-theme-bg-color, #fff); color: var(--tg-theme-text-color, #111);
+    width: 100%; font-size: 15px; padding: 12px;
+    border: 1.5px solid var(--line); border-radius: 10px; outline: none;
+    background: var(--card); color: var(--ink);
   }
+  .qText:focus, .qSelect:focus { border-color: var(--teal); }
+  .qText.invalid, .qSelect.invalid { border-color: var(--danger); background: #fffafa; }
+  .qText.valid { border-color: var(--ok); background: #f6fcf8; }
   .opt {
-    display: block; padding: 10px 12px; margin: 6px 0; font-size: 15px; cursor: pointer;
-    border: 1px solid var(--tg-theme-section-separator-color, #e4e4e7); border-radius: 10px;
+    display: flex; align-items: center; gap: 10px; padding: 11px 13px; margin: 8px 0;
+    font-size: 15px; cursor: pointer; border: 1.5px solid var(--line); border-radius: 12px;
+    background: var(--card);
   }
-  .opt input { margin-left: 8px; }
-  .qErr { color: #c00; font-size: 13px; margin-top: 6px; display: none; }
+  .opt input { accent-color: var(--teal); width: 18px; height: 18px; flex: 0 0 auto; margin: 0; }
+  .opt:has(input:checked) { border-color: var(--teal); background: var(--teal-soft); }
+  .qErr { color: var(--danger); font-size: 13px; font-weight: 600; margin-top: 8px; display: none; }
   .qSection {
-    font-size: 16px; margin: 26px 0 4px; padding-top: 14px;
-    border-top: 1px solid var(--tg-theme-section-separator-color, #e4e4e7);
+    font-size: 17px; font-weight: 700; margin: 28px 2px 4px; padding-top: 16px;
+    border-top: 2px solid var(--line);
   }
-  .confirm { white-space: pre-wrap; line-height: 1.9; font-size: 15px; margin: 18px 0; }
-  .muted { color: var(--tg-theme-hint-color, #888); font-size: 14px; line-height: 1.7; }
-  #error { color: #c00; padding: 20px 0; }
+  .submitBar { position: sticky; bottom: 0; padding: 12px 0 calc(4px + env(safe-area-inset-bottom)); background: linear-gradient(rgba(245, 242, 234, 0), var(--paper) 30%); }
+  .examNote { text-align: center; margin: 4px 0 10px; }
+
+  /* ---- success / error ---- */
+  .success { text-align: center; padding: 40px 16px; }
+  .checkCircle {
+    width: 76px; height: 76px; margin: 0 auto 18px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 38px; color: #fff; background: var(--ok);
+  }
+  .success h2 { margin: 0 0 8px; font-size: 22px; }
+  .confirm { white-space: pre-wrap; line-height: 1.9; font-size: 15px; margin: 12px 0 20px; }
+  #error {
+    background: var(--danger-soft); color: var(--danger); border: 1px solid #f0c9c6;
+    padding: 14px 16px; border-radius: 12px; margin: 18px 0; font-size: 14px; font-weight: 600;
+  }
 </style>
 </head>
 <body>
-<header>
-  <button id="backBtn" type="button" aria-label="رجوع">‹</button>
-  <h1 id="title">تعلم اللغة القبطية</h1>
+<header class="topbar">
+  <button id="backBtn" type="button" aria-label="رجوع" style="display:none">‹</button>
+  <div id="title">تعلم اللغة القبطية</div>
+  <span class="topbarSpacer"></span>
 </header>
 <main id="view"></main>
 <script>
 (function () {
-  var tg = (window.Telegram && window.Telegram.WebApp) || null;
+  var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
   if (tg) { try { tg.ready(); tg.expand(); } catch (e) {} }
-
   var view = document.getElementById("view");
   var titleEl = document.getElementById("title");
   var backBtn = document.getElementById("backBtn");
-  var data = null;
-  var current = null; // lesson id in lesson view, null on home
+  var current = null; // lesson id, "exam", or null = home
+  var lessons = null;
+  var examCache = null;
+  var examForm = null;
+  var examLesson = null;
 
   function esc(s) {
-    return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
   }
   function driveView(id) { return "https://drive.google.com/file/d/" + encodeURIComponent(id) + "/view"; }
   function drivePreview(id) { return "https://drive.google.com/file/d/" + encodeURIComponent(id) + "/preview"; }
   function driveImg(id) { return "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(id); }
-  // Lesson videos play natively in the page with a plain <video> tag, at
-  // ZERO Worker requests: the file streams straight from Google's download
-  // host (drive.usercontent.google.com answers video Range requests with
-  // 206 directly — the uc?export=download URL answers Range with a 303
-  // redirect instead, and Telegram's webview fails on that). The bot is
-  // never involved in playback.
+
+  // Lesson videos stream straight from Google's download host (it answers
+  // video Range with 206; the uc URL 303-redirects on Range and Telegram's
+  // webview fails on that) — zero Worker requests, the bot is never involved.
   function driveVideo(id) { return "https://drive.usercontent.google.com/download?id=" + encodeURIComponent(id) + "&export=download"; }
+
+  function formIdFromUrl(url) {
+    var m = String(url || "").match(/\/forms\/d\/([A-Za-z0-9_-]+)\//);
+    return m ? m[1] : null;
+  }
+
+  function loadLessons() {
+    if (lessons) return Promise.resolve(lessons);
+    return fetch("lessons.json")
+      .then(function (r) { if (!r.ok) throw new Error("lessons.json: " + r.status); return r.json(); })
+      .then(function (json) { lessons = json; return json; });
+  }
+
+  function loadExams() {
+    if (examCache) return Promise.resolve(examCache);
+    return fetch("exams.json")
+      .then(function (r) { if (!r.ok) throw new Error("exams.json: " + r.status); return r.json(); })
+      .then(function (json) { examCache = json; return json; });
+  }
+
+  function lessonChips(lesson) {
+    var kinds = lesson.items.map(function (i) { return i.kind; });
+    var chips = [];
+    if (kinds.indexOf("video") !== -1) chips.push("🎬 فيديو");
+    if (kinds.indexOf("photo") !== -1) chips.push("🖼 صور");
+    if (kinds.indexOf("text") !== -1) chips.push("📝 تدريب");
+    if (kinds.indexOf("url") !== -1) chips.push("📝 امتحان");
+    return chips.map(function (c) { return "<span class='chip'>" + c + "</span>"; }).join("");
+  }
+
+  function showHome() {
+    current = null;
+    examLesson = null;
+    titleEl.textContent = "تعلم اللغة القبطية";
+    backBtn.style.display = "none";
+    if (tg && tg.BackButton) { try { tg.BackButton.hide(); } catch (e) {} }
+    loadLessons().then(function (data) {
+      var html = "<div class='hero'><div class='heroMark'>Ⲭⲏⲙⲓ</div>" +
+        "<h1>تعلم اللغة القبطية</h1>" +
+        "<p>دروس فيديو وصور وتمارين وامتحانات — كل الدروس مفتوحة، وابدأ من أي مكان.</p></div>";
+      data.levels.forEach(function (level, li) {
+        html += "<section><div class='levelHead'><h2>" + esc(level.title) + "</h2>" +
+          "<span class='countPill'>" + level.lessons.length + " دروس</span></div>";
+        level.lessons.forEach(function (lesson, i) {
+          html += "<button class='lessonCard lvl" + (li + 1) + "' type='button' data-lesson='" + esc(lesson.id) + "'>" +
+            "<span class='lessonNum'>" + (i + 1) + "</span>" +
+            "<span class='lessonBody'><span class='lessonTitle'>" + esc(lesson.title) + "</span>" +
+            "<span class='lessonChips'>" + lessonChips(lesson) + "</span></span>" +
+            "<span class='lessonArrow'>‹</span></button>";
+        });
+        html += "</section>";
+      });
+      view.innerHTML = html;
+      view.querySelectorAll("[data-lesson]").forEach(function (btn) {
+        btn.addEventListener("click", function () { showLesson(btn.getAttribute("data-lesson")); });
+      });
+      window.scrollTo(0, 0);
+    }).catch(function () {
+      view.innerHTML = "<div id='error'>تعذّر تحميل الدروس — اتأكد من النت وحاول تاني.</div>";
+    });
+  }
+
+  function findLesson(id) {
+    var found = null;
+    (lessons.levels || []).forEach(function (level) {
+      (level.lessons || []).forEach(function (lesson) {
+        if (lesson.id === id) found = { lesson: lesson, levelTitle: level.title };
+      });
+    });
+    return found;
+  }
 
   function renderItem(item) {
     if (item.kind === "video") {
@@ -118,8 +302,7 @@
         "<img class='photo' loading='lazy' src='" + esc(driveImg(item.driveId)) + "' alt=''></div>";
     }
     if (item.kind === "text") {
-      return "<div class='item'><div class='lbl'>" + esc(item.label || "📝 التدريب") + "</div>" +
-        "<div class='exercise'>" + esc(item.text) + "</div></div>";
+      return "<div class='item exercise'><div class='lbl'>📝 التدريب</div><div>" + esc(item.text) + "</div></div>";
     }
     if (item.kind === "url") {
       // The exam opens INSIDE the app: same questions, same Google Forms
@@ -131,209 +314,25 @@
         return "<div class='item'><a class='examBtn' href='" + esc(item.url) + "' target='_blank' rel='noopener'>" +
           esc(item.label || "📝 الامتحان الإلكتروني") + "</a></div>";
       }
-      return "<div class='item'><button class='examBtn' type='button' data-exam='" + esc(fid) + "'>" +
-        esc(item.label || "📝 الامتحان الإلكتروني") + "</button>" +
-        "<a class='fallback' href='" + esc(item.url) + "' target='_blank' rel='noopener'>فتح الامتحان في Google Forms ←</a></div>";
+      return "<div class='item examCta'><div class='examCtaTitle'>" + esc(item.label || "📝 الامتحان الإلكتروني") + "</div>" +
+        "<div class='muted'>حل الامتحان جوه التطبيق — نفس الأسئلة ونفس النتيجة.</div>" +
+        "<button class='examBtn' type='button' data-exam='" + esc(fid) + "'>ابدأ الامتحان ←</button>" +
+        "<a class='fallback' href='" + esc(item.url) + "' target='_blank' rel='noopener'>أو افتح الامتحان في Google Forms ←</a></div>";
     }
     return "";
-  }
-
-  function formIdFromUrl(url) {
-    var m = String(url || "").match(/\/forms\/d\/([A-Za-z0-9_-]+)\//);
-    return m ? m[1] : null;
-  }
-
-  var examCache = null;
-  var examForm = null;
-  var examLesson = null;
-
-  function loadExams() {
-    if (examCache) return Promise.resolve(examCache);
-    return fetch("exams.json")
-      .then(function (r) { if (!r.ok) throw new Error("exams.json: " + r.status); return r.json(); })
-      .then(function (json) { examCache = json; return json; });
-  }
-
-  function renderQuestion(q) {
-    var img = q.imageId
-      ? "<img class='qImg' loading='lazy' src='" + esc(driveImg(q.imageId)) + "' alt=''>"
-      : "";
-    var req = q.required ? " <span class='req'>*</span>" : "";
-    var err = "<div class='qErr' data-err='" + q.entryId + "'></div>";
-    if (q.type === 8) {
-      return "<h3 class='qSection'>" + esc(q.title) + "</h3>";
-    }
-    var head = "<div class='qTitle'>" + esc(q.title) + req + "</div>" + img;
-    if (q.type === 0) {
-      var link = q.link
-        ? "<a class='fallback' href='" + esc(q.link) + "' target='_blank' rel='noopener'>اضغط هنا لإنشاء رقمك الكودي ←</a>"
-        : "";
-      return "<div class='q' data-q='" + q.entryId + "'>" + head +
-        "<input class='qText' type='text' data-entry='" + q.entryId + "' autocomplete='off'>" + link + err + "</div>";
-    }
-    if (q.type === 2) {
-      var opts = (q.options || []).map(function (opt) {
-        return "<label class='opt'><input type='radio' name='q_" + q.entryId + "' value='" + esc(opt) + "'>" + esc(opt) + "</label>";
-      }).join("");
-      return "<div class='q' data-q='" + q.entryId + "'>" + head + opts + err + "</div>";
-    }
-    if (q.type === 4) {
-      // Google renders its dropdowns single-select even when the title says
-      // "choose all" — the in-app exam does the same.
-      var sel = (q.options || []).map(function (opt) {
-        return "<option value='" + esc(opt) + "'>" + esc(opt) + "</option>";
-      }).join("");
-      return "<div class='q' data-q='" + q.entryId + "'>" + head +
-        "<select class='qSelect' data-entry='" + q.entryId + "'><option value=''>— اختر —</option>" + sel + "</select>" + err + "</div>";
-    }
-    return "";
-  }
-
-  function openExam(formId, lessonId) {
-    loadExams().then(function (json) {
-      var form = null;
-      (json.forms || []).forEach(function (f) { if (f.formId === formId) form = f; });
-      if (!form) throw new Error("exam not found");
-      examForm = form;
-      examLesson = lessonId;
-      current = "exam";
-      titleEl.textContent = form.title;
-      backBtn.style.display = "";
-      if (tg && tg.BackButton) { try { tg.BackButton.show(); } catch (e) {} }
-      var html = "<h2>" + esc(form.title) + "</h2>";
-      if (form.label) html += "<div class='muted'>" + esc(form.label) + "</div>";
-      html += "<form id='examForm' novalidate>" +
-        form.questions.map(renderQuestion).join("") +
-        "<button class='examBtn' type='submit'>إرسال الإجابات</button>" +
-        "<div class='muted'>إجابتك هتتبعت لجوجل فورم مباشرة وتتحفظ في نفس شيت النتائج، كأنك فتحت الفورم بالظبط.</div>" +
-        "</form>";
-      view.innerHTML = html;
-      document.getElementById("examForm").addEventListener("submit", submitExam);
-      window.scrollTo(0, 0);
-    }).catch(function () {
-      view.innerHTML = "<div id='error'>تعذّر تحميل الامتحان — افتحه من جوجل فورم.</div>" +
-        "<div class='item'><a class='examBtn' href='https://docs.google.com/forms/d/" + esc(formId) + "/viewform' target='_blank' rel='noopener'>فتح الامتحان في Google Forms ←</a></div>";
-    });
-  }
-
-  // The code check, exactly like Google's "matches" validation (full-string
-  // match against the alternation of allowed codes). The pattern is huge
-  // (~17KB, ~2000 codes) and some phone JS engines refuse to compile a
-  // regex that big — so if the regex fails, fall back to a plain set lookup
-  // of the same alternatives, and if that cannot be done either, block the
-  // submit rather than let an unchecked code through (fail closed, never
-  // fail open).
-  function codeMatches(pattern, value) {
-    try {
-      return new RegExp("^(?:" + pattern + ")$").test(value);
-    } catch (e) { /* fall through to the set check */ }
-    if (pattern.charAt(0) === "(" && pattern.charAt(pattern.length - 1) === ")") {
-      var alts = pattern.slice(1, -1).split("|");
-      for (var i = 0; i < alts.length; i++) if (alts[i] === value) return true;
-      return false;
-    }
-    return false;
-  }
-
-  function submitExam(ev) {
-    ev.preventDefault();
-    var formEl = document.getElementById("examForm");
-    var answers = [];
-    var firstBad = null;
-    function fail(entryId, msg, el) {
-      var errEl = formEl.querySelector("[data-err='" + entryId + "']");
-      if (errEl) { errEl.textContent = msg; errEl.style.display = "block"; }
-      if (!firstBad) firstBad = el || errEl;
-    }
-    examForm.questions.forEach(function (q) {
-      if (q.entryId === null) return;
-      var value = "";
-      var el = null;
-      if (q.type === 0 || q.type === 4) {
-        el = formEl.querySelector("[data-entry='" + q.entryId + "']");
-        value = el ? el.value.trim() : "";
-      } else if (q.type === 2) {
-        el = formEl.querySelector("input[name='q_" + q.entryId + "']:checked");
-        value = el ? el.value : "";
-      }
-      var errEl = formEl.querySelector("[data-err='" + q.entryId + "']");
-      if (errEl) errEl.style.display = "none";
-      if (q.required && !value) { fail(q.entryId, "هذا السؤال مطلوب.", el); return; }
-      if (value && q.validation && q.validation.kind === "regex") {
-        // Full-string match, exactly like Google's "matches" validation.
-        if (!codeMatches(q.validation.pattern, value)) { fail(q.entryId, q.validation.errorText || "إجابة غير صحيحة.", el); return; }
-      }
-      if (value) answers.push({ entryId: q.entryId, value: value });
-    });
-    if (firstBad) { firstBad.scrollIntoView({ block: "center" }); return; }
-    var params = new URLSearchParams();
-    params.set("fvv", "1");
-    params.set("pageHistory", "0");
-    params.set("fbzx", String(Math.floor(Math.random() * 1e20)));
-    answers.forEach(function (a) { params.append("entry." + a.entryId, a.value); });
-    var btn = formEl.querySelector("[type='submit']");
-    btn.disabled = true;
-    btn.textContent = "جارٍ الإرسال…";
-    // Plain form POST straight to Google (no-cors: the response is opaque,
-    // the app cannot read it back — it only knows the request went out).
-    fetch(examForm.submitUrl, {
-      method: "POST", mode: "no-cors", body: params,
-    }).then(function () {
-      view.innerHTML = "<h2>✅ تم إرسال إجابتك</h2>" +
-        "<div class='confirm'>" + esc(examForm.confirmationMessage || "تم استلام إجابتك.") + "</div>" +
-        "<button class='examBtn' type='button' id='examDone'>رجوع للدرس</button>";
-      document.getElementById("examDone").addEventListener("click", function () { showLesson(examLesson); });
-      window.scrollTo(0, 0);
-    }).catch(function () {
-      // Network failure only: the form and everything typed stay in place.
-      btn.disabled = false;
-      btn.textContent = "إرسال الإجابات";
-      var err = document.createElement("div");
-      err.id = "error";
-      err.textContent = "تعذّر الإرسال — اتأكد من النت وحاول تاني.";
-      formEl.insertBefore(err, formEl.firstChild);
-      window.scrollTo(0, 0);
-    });
-  }
-
-  function showHome() {
-    current = null;
-    examLesson = null;
-    titleEl.textContent = "تعلم اللغة القبطية";
-    backBtn.style.display = "none";
-    if (tg && tg.BackButton) { try { tg.BackButton.hide(); } catch (e) {} }
-    var html = "";
-    data.levels.forEach(function (level) {
-      html += "<h2>" + esc(level.title) + "</h2>";
-      level.lessons.forEach(function (lesson, i) {
-        html += "<button class='lesson' type='button' data-lesson='" + esc(lesson.id) + "'>" +
-          "<span class='num'>الدرس " + (i + 1) + " من " + level.lessons.length + "</span>" + esc(lesson.title) + "</button>";
-      });
-    });
-    view.innerHTML = html;
-    view.querySelectorAll("[data-lesson]").forEach(function (btn) {
-      btn.addEventListener("click", function () { showLesson(btn.getAttribute("data-lesson")); });
-    });
-    window.scrollTo(0, 0);
-  }
-
-  function findLesson(id) {
-    for (var li = 0; li < data.levels.length; li++) {
-      var lessons = data.levels[li].lessons;
-      for (var i = 0; i < lessons.length; i++) if (lessons[i].id === id) return lessons[i];
-    }
-    return null;
   }
 
   function showLesson(id) {
-    var lesson = findLesson(id);
-    if (!lesson) return;
+    var found = findLesson(id);
+    if (!found) return;
+    var lesson = found.lesson;
     current = id;
     examLesson = null;
     titleEl.textContent = lesson.title;
     backBtn.style.display = "";
     if (tg && tg.BackButton) { try { tg.BackButton.show(); } catch (e) {} }
-    view.innerHTML = "<h2>" + esc(lesson.title) + "</h2>" + lesson.items.map(renderItem).join("");
+    view.innerHTML = "<div class='lessonHead'><span class='levelTag'>" + esc(found.levelTitle) + "</span>" +
+      "<h2>" + esc(lesson.title) + "</h2></div>" + lesson.items.map(renderItem).join("");
     view.querySelectorAll("[data-exam]").forEach(function (btn) {
       btn.addEventListener("click", function () { openExam(btn.getAttribute("data-exam"), id); });
     });
@@ -360,17 +359,214 @@
     if (examLesson) { showLesson(examLesson); return; }
     if (current) showHome();
   }
-
   backBtn.addEventListener("click", goBack);
   if (tg && tg.BackButton) { try { tg.BackButton.onClick(goBack); } catch (e) {} }
 
-  fetch("lessons.json")
-    .then(function (r) { if (!r.ok) throw new Error("lessons.json: " + r.status); return r.json(); })
-    .then(function (json) { data = json; showHome(); })
-    .catch(function (err) {
-      view.innerHTML = "<div id='error'>تعذّر تحميل الدروس — جرّب تاني بعد شوية.</div>" +
-        "<div class='muted'>" + esc(err && err.message ? err.message : err) + "</div>";
+  // The code check, exactly like Google's "matches" validation (full-string
+  // match against the alternation of allowed codes). The pattern is huge
+  // (~17KB, ~2000 codes) and some phone JS engines refuse to compile a
+  // regex that big — so if the regex fails, fall back to a plain set lookup
+  // of the same alternatives, and if that cannot be done either, block the
+  // submit rather than let an unchecked code through (fail closed, never
+  // fail open).
+  function codeMatches(pattern, value) {
+    try {
+      return new RegExp("^(?:" + pattern + ")$").test(value);
+    } catch (e) { /* fall through to the set check */ }
+    if (pattern.charAt(0) === "(" && pattern.charAt(pattern.length - 1) === ")") {
+      var alts = pattern.slice(1, -1).split("|");
+      for (var i = 0; i < alts.length; i++) if (alts[i] === value) return true;
+      return false;
+    }
+    return false;
+  }
+
+  function renderQuestion(q, num) {
+    var img = q.imageId
+      ? "<img class='qImg' loading='lazy' src='" + esc(driveImg(q.imageId)) + "' alt=''>"
+      : "";
+    var req = q.required ? " <span class='req'>*</span>" : "";
+    var err = "<div class='qErr' data-err='" + q.entryId + "'></div>";
+    if (q.type === 8) {
+      return "<h3 class='qSection'>" + esc(q.title) + "</h3>";
+    }
+    var head = "<div class='qTop'><span class='qNum'>" + num + "</span>" +
+      "<div class='qTitle'>" + esc(q.title) + req + "</div></div>" + img;
+    if (q.type === 0) {
+      var link = q.link
+        ? "<a class='fallback' href='" + esc(q.link) + "' target='_blank' rel='noopener'>اضغط هنا لإنشاء رقمك الكودي ←</a>"
+        : "";
+      return "<div class='qCard' data-q='" + q.entryId + "'>" + head +
+        "<input class='qText' type='text' data-entry='" + q.entryId + "' autocomplete='off' inputmode='numeric'>" + link + err + "</div>";
+    }
+    if (q.type === 2) {
+      var opts = (q.options || []).map(function (opt) {
+        return "<label class='opt'><input type='radio' name='q_" + q.entryId + "' value='" + esc(opt) + "'><span>" + esc(opt) + "</span></label>";
+      }).join("");
+      return "<div class='qCard' data-q='" + q.entryId + "'>" + head + opts + err + "</div>";
+    }
+    if (q.type === 4) {
+      // Google renders its dropdowns single-select even when the title says
+      // "choose all" — the in-app exam does the same.
+      var sel = (q.options || []).map(function (opt) {
+        return "<option value='" + esc(opt) + "'>" + esc(opt) + "</option>";
+      }).join("");
+      return "<div class='qCard' data-q='" + q.entryId + "'>" + head +
+        "<select class='qSelect' data-entry='" + q.entryId + "'><option value=''>— اختر —</option>" + sel + "</select>" + err + "</div>";
+    }
+    return "";
+  }
+
+  function openExam(formId, lessonId) {
+    loadExams().then(function (json) {
+      var form = null;
+      (json.forms || []).forEach(function (f) { if (f.formId === formId) form = f; });
+      if (!form) throw new Error("exam not found");
+      examForm = form;
+      examLesson = lessonId;
+      current = "exam";
+      titleEl.textContent = form.title;
+      backBtn.style.display = "";
+      if (tg && tg.BackButton) { try { tg.BackButton.show(); } catch (e) {} }
+      var total = form.questions.filter(function (q) { return q.entryId !== null; }).length;
+      var n = 0;
+      var body = form.questions.map(function (q) {
+        if (q.entryId !== null) n++;
+        return renderQuestion(q, q.entryId === null ? null : n);
+      }).join("");
+      view.innerHTML = "<div class='examHead'><div class='examHeadTitle'>" + esc(form.title) + "</div>" +
+        (form.label ? "<div class='examHeadLabel'>" + esc(form.label) + "</div>" : "") +
+        "<div class='progress'><div class='progressBar' id='examProgressBar'></div></div>" +
+        "<div class='muted' id='examProgressText'>أجبت على 0 من " + total + " أسئلة</div></div>" +
+        "<form id='examForm' novalidate>" + body +
+        "<div class='submitBar'><button class='examBtn' type='submit'>إرسال الإجابات</button></div>" +
+        "<div class='muted examNote'>إجابتك هتتبعت لجوجل فورم مباشرة وتتحفظ في نفس شيت النتائج، كأنك فتحت الفورم بالظبط.</div>" +
+        "</form>";
+      var formEl = document.getElementById("examForm");
+      formEl.addEventListener("submit", submitExam);
+      formEl.addEventListener("input", updateProgress);
+      formEl.addEventListener("change", updateProgress);
+      // Live code check: the error appears the moment the student types a
+      // code that is not in the list, and clears the moment it matches.
+      examForm.questions.forEach(function (q) {
+        if (!q.validation || q.entryId === null) return;
+        var input = formEl.querySelector("[data-entry='" + q.entryId + "']");
+        var errEl = formEl.querySelector("[data-err='" + q.entryId + "']");
+        if (!input || !errEl) return;
+        input.addEventListener("input", function () {
+          var v = input.value.trim();
+          if (!v) {
+            errEl.style.display = "none";
+            input.classList.remove("invalid", "valid");
+            return;
+          }
+          if (codeMatches(q.validation.pattern, v)) {
+            errEl.style.display = "none";
+            input.classList.remove("invalid");
+            input.classList.add("valid");
+          } else {
+            errEl.textContent = q.validation.errorText || "إجابة غير صحيحة.";
+            errEl.style.display = "block";
+            input.classList.remove("valid");
+            input.classList.add("invalid");
+          }
+        });
+      });
+      updateProgress();
+      window.scrollTo(0, 0);
+    }).catch(function () {
+      view.innerHTML = "<div id='error'>تعذّر تحميل الامتحان — افتحه من جوجل فورم.</div>" +
+        "<div class='item'><a class='examBtn' href='https://docs.google.com/forms/d/" + esc(formId) + "/viewform' target='_blank' rel='noopener'>فتح الامتحان في Google Forms ←</a></div>";
     });
+  }
+
+  function updateProgress() {
+    var formEl = document.getElementById("examForm");
+    if (!formEl || !examForm) return;
+    var total = 0, done = 0;
+    examForm.questions.forEach(function (q) {
+      if (q.entryId === null) return;
+      total++;
+      var v = "";
+      if (q.type === 0 || q.type === 4) {
+        var el = formEl.querySelector("[data-entry='" + q.entryId + "']");
+        v = el ? el.value.trim() : "";
+      } else if (q.type === 2) {
+        v = formEl.querySelector("input[name='q_" + q.entryId + "']:checked") ? "x" : "";
+      }
+      if (v) done++;
+    });
+    var bar = document.getElementById("examProgressBar");
+    var txt = document.getElementById("examProgressText");
+    if (bar) bar.style.width = (total ? Math.round(done / total * 100) : 0) + "%";
+    if (txt) txt.textContent = "أجبت على " + done + " من " + total + " أسئلة";
+  }
+
+  function submitExam(ev) {
+    ev.preventDefault();
+    var formEl = document.getElementById("examForm");
+    var answers = [];
+    var firstBad = null;
+    function fail(entryId, msg, el) {
+      var errEl = formEl.querySelector("[data-err='" + entryId + "']");
+      if (errEl) { errEl.textContent = msg; errEl.style.display = "block"; }
+      if (el && el.classList) el.classList.add("invalid");
+      if (!firstBad) firstBad = el || errEl;
+    }
+    examForm.questions.forEach(function (q) {
+      if (q.entryId === null) return;
+      var value = "";
+      var el = null;
+      if (q.type === 0 || q.type === 4) {
+        el = formEl.querySelector("[data-entry='" + q.entryId + "']");
+        value = el ? el.value.trim() : "";
+      } else if (q.type === 2) {
+        el = formEl.querySelector("input[name='q_" + q.entryId + "']:checked");
+        value = el ? el.value : "";
+      }
+      var errEl = formEl.querySelector("[data-err='" + q.entryId + "']");
+      if (errEl) errEl.style.display = "none";
+      if (el && el.classList) el.classList.remove("invalid");
+      if (q.required && !value) { fail(q.entryId, "هذا السؤال مطلوب.", el); return; }
+      if (value && q.validation && q.validation.kind === "regex") {
+        // Full-string match, exactly like Google's "matches" validation.
+        if (!codeMatches(q.validation.pattern, value)) { fail(q.entryId, q.validation.errorText || "إجابة غير صحيحة.", el); return; }
+      }
+      if (value) answers.push({ entryId: q.entryId, value: value });
+    });
+    if (firstBad) { firstBad.scrollIntoView({ block: "center" }); return; }
+    var params = new URLSearchParams();
+    params.set("fvv", "1");
+    params.set("pageHistory", "0");
+    params.set("fbzx", String(Math.floor(Math.random() * 1e20)));
+    answers.forEach(function (a) { params.append("entry." + a.entryId, a.value); });
+    var btn = formEl.querySelector("[type='submit']");
+    btn.disabled = true;
+    btn.textContent = "جارٍ الإرسال…";
+    // Plain form POST straight to Google (no-cors: the response is opaque,
+    // the app cannot read it back — it only knows the request went out).
+    fetch(examForm.submitUrl, {
+      method: "POST", mode: "no-cors", body: params,
+    }).then(function () {
+      view.innerHTML = "<div class='success'><div class='checkCircle'>✓</div>" +
+        "<h2>تم إرسال إجابتك</h2>" +
+        "<div class='confirm'>" + esc(examForm.confirmationMessage || "تم استلام إجابتك.") + "</div>" +
+        "<button class='examBtn' type='button' id='examDone'>رجوع للدرس</button></div>";
+      document.getElementById("examDone").addEventListener("click", function () { showLesson(examLesson); });
+      window.scrollTo(0, 0);
+    }).catch(function () {
+      // Network failure only: the form and everything typed stay in place.
+      btn.disabled = false;
+      btn.textContent = "إرسال الإجابات";
+      var err = document.createElement("div");
+      err.id = "error";
+      err.textContent = "تعذّر الإرسال — اتأكد من النت وحاول تاني.";
+      formEl.insertBefore(err, formEl.firstChild);
+      window.scrollTo(0, 0);
+    });
+  }
+
+  showHome();
 })();
 </script>
 </body>
