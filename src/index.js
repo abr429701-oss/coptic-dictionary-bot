@@ -82,8 +82,8 @@ async function blacklistedWords(env) { const v = await cachedDoGet(env, BLACKLIS
 async function isBlacklistedWord(env, query) { const list = await blacklistedWords(env); const q = normalize(query); return list.some((w) => q === normalize(w) || q.includes(normalize(w))); }
 async function addBlacklist(env, word) { const list = await blacklistedWords(env); if (!list.includes(String(word))) list.push(String(word).slice(0, 80)); if (env.USERS) await storeCall(env, { op: "put", key: BLACKLIST_KEY, value: list.slice(-200) }); invalidateCache(blacklistCache); }
 async function removeBlacklist(env, word) { const list = (await blacklistedWords(env)).filter((w) => normalize(w) !== normalize(word)); if (env.USERS) await storeCall(env, { op: "put", key: BLACKLIST_KEY, value: list }); invalidateCache(blacklistCache); }
-async function whitelistUsers(env) { const v = await cachedDoGet(env, WHITELIST_KEY, whitelistCache, []); return Array.isArray(v) ? v : []; }
-async function whitelistModeOn(env) { const v = await cachedDoGet(env, WHITELIST_MODE_KEY, whitelistModeCache, false); return v === true; }
+async function whitelistUsers(env) { const v = await cachedDoGet(env, WHITELIST_KEY, whitelistCache, [], SAFETY_CACHE_TTL); return Array.isArray(v) ? v : []; }
+async function whitelistModeOn(env) { const v = await cachedDoGet(env, WHITELIST_MODE_KEY, whitelistModeCache, false, SAFETY_CACHE_TTL); return v === true; }
 async function setWhitelistMode(env, on) { if (env.USERS) await storeCall(env, { op: "put", key: WHITELIST_MODE_KEY, value: !!on }); invalidateCache(whitelistModeCache); }
 async function addWhitelistUser(env, id) { const list = await whitelistUsers(env); if (!list.includes(String(id))) list.push(String(id)); if (env.USERS) await storeCall(env, { op: "put", key: WHITELIST_KEY, value: list.slice(-1000) }); invalidateCache(whitelistCache); }
 async function removeWhitelistUser(env, id) { const list = (await whitelistUsers(env)).filter((x) => x !== String(id)); if (env.USERS) await storeCall(env, { op: "put", key: WHITELIST_KEY, value: list }); invalidateCache(whitelistCache); }
@@ -101,10 +101,10 @@ async function logAdminAction(env, userId, action, detail = "") {
   } catch { /* non-critical */ }
 }
 async function readAdminAudit(env) { if (!env.USERS) return []; const v = ((await storeCall(env, { op: "get", key: ADMIN_AUDIT_KEY })).value ?? []); return Array.isArray(v) ? v : []; }
-async function slowModeConfig(env) { const v = await cachedDoGet(env, SLOW_MODE_KEY, slowModeCache, { on: false, seconds: 5 }); return v && typeof v === "object" ? v : { on: false, seconds: 5 }; }
+async function slowModeConfig(env) { const v = await cachedDoGet(env, SLOW_MODE_KEY, slowModeCache, { on: false, seconds: 5 }, SAFETY_CACHE_TTL); return v && typeof v === "object" ? v : { on: false, seconds: 5 }; }
 async function setSlowModeConfig(env, cfg) { if (env.USERS) await storeCall(env, { op: "put", key: SLOW_MODE_KEY, value: cfg }); invalidateCache(slowModeCache); }
 function invalidateAllCaches() {
-  for (const c of [wodCache, autoReplyCache, searchLimitCache, alertsCache, templatesCache, optOutCache, notesCache, featureFlagsCache, blacklistCache, whitelistCache, whitelistModeCache, banMsgCache, maintMsgCache, slowModeCache, lockdownCache, verifyGateCache, gamifyCache, apiKeyCache, rateLimitCache, bansCache, maintCache, aliasCache, motdCache]) { c.value = null; c.at = 0; }
+  for (const c of [wodCache, autoReplyCache, searchLimitCache, alertsCache, templatesCache, optOutCache, notesCache, featureFlagsCache, blacklistCache, whitelistCache, whitelistModeCache, banMsgCache, maintMsgCache, slowModeCache, lockdownCache, verifyGateCache, gamifyCache, apiKeyCache, rateLimitCache, bansCache, maintCache, aliasCache, motdCache, extraAdminsCache, welcomeCache, liveMonCache, rulesCache]) invalidateCache(c);
   registeredCache.clear(); commandMenuReady.clear(); lastLookup.clear();
 }
 async function broadcastControlState(env) { if (!env.USERS) return { paused: false }; const v = ((await storeCall(env, { op: "get", key: BROADCAST_CTRL_KEY })).value ?? { paused: false }); return v && typeof v === "object" ? v : { paused: false }; }
@@ -4243,16 +4243,41 @@ const extraAdminsCache = { value: null, at: 0 };
 const bansCache = { value: null, at: 0 };
 const maintCache = { value: null, at: 0 };
 const welcomeCache = { value: null, at: 0 };
-async function cachedDoGet(env, key, cache, fallback = null) {
+// Safety gates (lockdown / verifygate / bans / whitelist / maintenance /
+// slow-mode) must propagate within seconds, not a minute.
+const SAFETY_CACHE_TTL = 15000;
+// In-flight DO reads, keyed by cache object: concurrent readers of the
+// same setting share one fetch instead of stampeding the DO.
+const cacheInflight = new Map();
+// Invalidation counter per cache object: a fetch that started before a
+// setter invalidated the cache must not write its pre-write value back.
+const cacheVersions = new Map();
+async function cachedDoGet(env, key, cache, fallback = null, ttl = ADMIN_CACHE_TTL) {
   const now = Date.now();
-  if (cache.value !== null || now - cache.at < ADMIN_CACHE_TTL) {
-    if (cache.value !== null) return cache.value;
-  }
-  let value = fallback;
-  if (env.USERS) { try { value = (await storeCall(env, { op: "get", key })).value ?? fallback; } catch { value = fallback; } }
-  cache.value = value; cache.at = now; return value;
+  // A loaded entry stays fresh until its TTL passes — including null. The
+  // old guard returned only non-null values, so null settings were re-read
+  // from the DO on every call, and non-null values were served stale forever.
+  if (cache.at !== 0 && now - cache.at < ttl) return cache.value;
+  const pending = cacheInflight.get(cache);
+  if (pending) return pending;
+  const job = (async () => {
+    const version = cacheVersions.get(cache) ?? 0;
+    let value = fallback;
+    if (env.USERS) { try { value = (await storeCall(env, { op: "get", key })).value ?? fallback; } catch { value = fallback; } }
+    if ((cacheVersions.get(cache) ?? 0) === version) { cache.value = value; cache.at = Date.now(); }
+    return value;
+  })();
+  cacheInflight.set(cache, job);
+  try { return await job; } finally { cacheInflight.delete(cache); }
 }
-function invalidateCache(cache) { cache.value = null; cache.at = 0; }
+function invalidateCache(cache) { cache.value = null; cache.at = 0; cacheVersions.set(cache, (cacheVersions.get(cache) ?? 0) + 1); }
+// Lets modules that write settings directly (src/pro-admin2.js) invalidate
+// the matching in-memory cache; without this a toggle answers "✅" while
+// the old cached value keeps being served (lockdown / verifygate).
+function invalidateSettingsCache(key) {
+  if (key === "lockdown") invalidateCache(lockdownCache);
+  else if (key === "verifygate") invalidateCache(verifyGateCache);
+}
 
 // ---- Extra admins (merged with the fixed DEFAULT_ADMIN_IDS) ----
 async function extraAdminIds(env) {
@@ -4274,7 +4299,7 @@ async function removeExtraAdmin(env, id) {
 
 // ---- Bans ----
 async function bannedSet(env) {
-  const obj = await cachedDoGet(env, "bans:list", bansCache, {});
+  const obj = await cachedDoGet(env, "bans:list", bansCache, {}, SAFETY_CACHE_TTL);
   return obj && typeof obj === "object" ? obj : {};
 }
 async function isBanned(env, userId) {
@@ -4302,7 +4327,7 @@ async function unbanUser(env, userId) {
 }
 
 // ---- Maintenance mode ----
-async function maintenanceOn(env) { return Boolean(await cachedDoGet(env, "maintenance:on", maintCache, false)); }
+async function maintenanceOn(env) { return Boolean(await cachedDoGet(env, "maintenance:on", maintCache, false, SAFETY_CACHE_TTL)); }
 async function setMaintenance(env, on) {
   if (env.USERS) await storeCall(env, { op: "put", key: "maintenance:on", value: Boolean(on) });
   invalidateCache(maintCache);
@@ -6571,7 +6596,7 @@ async function handleUpdate(update, env, ctx) {
   // Batch 6: hard lockdown — non-admins are blocked entirely until lifted.
   if (!adminNow) {
     try {
-      const ld = await cachedDoGet(env, "lockdown", lockdownCache, null);
+      const ld = await cachedDoGet(env, "lockdown", lockdownCache, null, SAFETY_CACHE_TTL);
       if (ld?.on) { await registerPromise.catch(() => null); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: String(ld.msg || "🔒 البوت متوقف حاليًا بشكل كامل (Lockdown). سيعود قريبًا.").slice(0, 500) }); return; }
     } catch { /* lockdown unavailable — fall through */ }
   }
@@ -6602,7 +6627,7 @@ async function handleUpdate(update, env, ctx) {
   // Batch 6: verification gate — unverified users must press a button before searching.
   if (!adminNow && text && !text.startsWith("/")) {
     try {
-      const vg = await cachedDoGet(env, "verifygate", verifyGateCache, null);
+      const vg = await cachedDoGet(env, "verifygate", verifyGateCache, null, SAFETY_CACHE_TTL);
       if (vg?.on) {
         const regUser = known ?? await getUser(env, userId);
         if (!regUser?.verified) {
@@ -7746,7 +7771,7 @@ const adminPro = createAdminPro({
 // their internal helpers; activeEnv is bound by the time any handler runs.
 const boundStore = (payload) => storeCall(activeEnv, payload);
 const security = createSecurity({ telegram, escapeHtml, storeCall: boundStore, isAdmin, adminIds, logAdminAction, notifyAdmins });
-const proAdmin2 = createProAdmin2({ telegram, escapeHtml, storeCall: boundStore, getUser, saveUser, isAdmin, adminIds, logAdminAction, notifyAdmins });
+const proAdmin2 = createProAdmin2({ telegram, escapeHtml, storeCall: boundStore, getUser, saveUser, isAdmin, adminIds, logAdminAction, notifyAdmins, invalidateSettingsCache });
 const proUser2 = createProUser2({ telegram, storeCall: boundStore, getUser, saveUser, isAdmin, notifyAdmins, sendTextFile });
 
 const adminSuite = createAdminSuite({

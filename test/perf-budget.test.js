@@ -15,16 +15,19 @@ import { resetAudioCaches } from "../src/neural-voice.js";
 // pre-fix code (see t.diagnostic output); groups G1–G3 tighten them as
 // the waste they measure is removed. A budget regression fails the suite.
 //
-// Measured baseline (warm config caches, fresh user id, cold voice file_id
-// memory — resetAudioCaches runs before each test, so the first search for
-// a word pays its file_id reads):
-// - plain search: 21 DO calls = 5 null-fallback cachedDoGet reads
-//   (wod/alerts/ratelimit/lockdown/verifygate) + 6 flush calls
-//   (history 2, conv 2, conv:active 2) + getUser x3 + register x1 +
-//   voice file_id reads x3 (voiceid + 2x ttsid) + drive-config, menus:v1,
-//   pro:support:flow. A repeat message from the same user within 60 s
-//   costs 1 less (registeredCache hit skips the register op).
-// - /start: 14. noop callback: 0. inline query: 1. new user: 20.
+// Measured baseline (warm config caches, fresh user id):
+// - plain search: 14 DO calls when the word's file_id is already in the
+//   isolate's voice memory (the file warm-up search caches it), 16 when it
+//   is not (cold voice memory pays 2 ttsid reads). Pre-G1 the same search
+//   cost 21 (19 with warm voice memory) — G1 removed the 5 null-config
+//   re-reads. Budget 16 covers both.
+// - /start: 10. noop callback: 0. inline query: 1.
+// - new user: 13 (15 with cold voice memory). second search: 11.
+// Note: resetAudioCaches clears only the audio BYTES cache, not the
+// voice file_id memory (voiceFileIdCache in src/index.js) — so the
+// warm-up word stays cached for the whole file. The recorded-voice check
+// (voiceid:<id>) is still read from the DO on EVERY search, before the
+// free memory check — that ordering wart is G5's target.
 //
 // Rules that keep the numbers deterministic:
 // - one fresh user id per scenario (rate-limit buckets are module-level and
@@ -58,7 +61,10 @@ function fakeTelegramApi(calls) {
     const body = options.body;
     const payload = !body ? null : typeof body === "string" ? JSON.parse(body) : Object.fromEntries(body.entries());
     calls.push({ url: String(url), options, payload });
-    return Response.json({ ok: true, result: { message_id: 900 } });
+    // Production Telegram returns the uploaded voice's file_id, which the
+    // bot then caches (memory + DO) so the word is uploaded once. The fake
+    // must return one too, or every search would re-read the file_id keys.
+    return Response.json({ ok: true, result: { message_id: 900, voice: { file_id: "fake-voice-file-id" } } });
   };
 }
 
@@ -171,7 +177,7 @@ test("perf-budget: plain search from a named user (voice on)", async (t) => {
   const calls = await runText(kv, 9101, "ⲫⲱⲥ");
   t.diagnostic(`plain search: ${summary(counts)}`);
   assert.ok(calls.some((c) => c.url.endsWith("/sendVoice")), "the search must still send its voice");
-  assert.ok(counts.total <= 21, `plain search must stay within its DO budget, got ${summary(counts)}`);
+  assert.ok(counts.total <= 16, `plain search must stay within its DO budget, got ${summary(counts)}`);
 });
 
 test("perf-budget: /start from a named user", async (t) => {
@@ -181,7 +187,24 @@ test("perf-budget: /start from a named user", async (t) => {
   const calls = await runText(kv, 9102, "/start");
   t.diagnostic(`/start: ${summary(counts)}`);
   assert.ok(calls.some((c) => c.url.endsWith("/sendMessage")), "/start must still answer");
-  assert.ok(counts.total <= 14, `/start must stay within its DO budget, got ${summary(counts)}`);
+  assert.ok(counts.total <= 10, `/start must stay within its DO budget, got ${summary(counts)}`);
+});
+
+// G1 regression: cachedDoGet must cache null settings. A second search
+// from the same user on the same isolate must not re-read any of the
+// null-fallback config keys (wod/alerts/ratelimit/lockdown/verifygate).
+test("perf-budget: a second plain search re-reads no null-config keys", async (t) => {
+  const { kv, counts } = countingKv();
+  kv.store.set("user:9106", NAMED_USER(9106));
+  await runText(kv, 9106, "ⲫⲱⲥ"); // warms the caches + the register cache
+  resetCounts(counts);
+  const calls = await runText(kv, 9106, "ⲫⲱⲥ");
+  t.diagnostic(`second search: ${summary(counts)}`);
+  assert.ok(calls.some((c) => c.url.endsWith("/sendVoice")), "the second search must still send its voice");
+  for (const key of ["wod:config", "alerts:config", "ratelimit:max", "lockdown", "verifygate"]) {
+    assert.equal(counts.byKey.get(key) ?? 0, 0, `${key} must be served from cache on a second search`);
+  }
+  assert.ok(counts.total <= 11, `second search must stay within its DO budget, got ${summary(counts)}`);
 });
 
 test("perf-budget: noop callback costs zero DO requests", async (t) => {
@@ -207,5 +230,5 @@ test("perf-budget: first message from a brand-new user (register path)", async (
   const calls = await runText(kv, 9105, "ⲫⲱⲥ");
   t.diagnostic(`new user: ${summary(counts)}`);
   assert.ok(calls.some((c) => c.url.endsWith("/sendMessage")), "a new user must still get the name prompt");
-  assert.ok(counts.total <= 20, `a new user's first message must stay within its DO budget, got ${summary(counts)}`);
+  assert.ok(counts.total <= 15, `a new user's first message must stay within its DO budget, got ${summary(counts)}`);
 });

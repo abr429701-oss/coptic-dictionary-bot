@@ -11,7 +11,7 @@ const K = {
   adminpwd: "adminpwd", welcomesticker: "welcomesticker", bcstats: "broadcast:stats",
 };
 
-export function createProAdmin2({ telegram, escapeHtml, storeCall, getUser, saveUser, isAdmin, adminIds, logAdminAction, notifyAdmins }) {
+export function createProAdmin2({ telegram, escapeHtml, storeCall, getUser, saveUser, isAdmin, adminIds, logAdminAction, notifyAdmins, invalidateSettingsCache }) {
   async function doGet(key, fallback = null) {
     try { return (await storeCall({ op: "get", key })).value ?? fallback; } catch { return fallback; }
   }
@@ -58,10 +58,11 @@ export function createProAdmin2({ telegram, escapeHtml, storeCall, getUser, save
     async lockdown(env, chatId, userId, arg) {
       const parts = arg.split(/\s+/u);
       const mode = (parts[0] ?? "").toLowerCase();
-      if (mode === "off") { await doPut(K.lockdown, { on: false }); await send(env, chatId, "✅ تم رفع الحظر الشامل (Lockdown). عاد البوت ليعمل بشكل طبيعي."); await logAdminAction?.(env, userId, "lockdown_off"); return true; }
+      if (mode === "off") { await doPut(K.lockdown, { on: false }); invalidateSettingsCache?.(K.lockdown); await send(env, chatId, "✅ تم رفع الحظر الشامل (Lockdown). عاد البوت ليعمل بشكل طبيعي."); await logAdminAction?.(env, userId, "lockdown_off"); return true; }
       if (mode === "on" || mode === "") {
         const msg = parts.slice(mode ? 1 : 0).join(" ").trim() || "🔒 البوت متوقف حاليًا بشكل كامل (Lockdown). سيعود قريبًا.";
         await doPut(K.lockdown, { on: true, msg, at: Date.now() });
+        invalidateSettingsCache?.(K.lockdown);
         await send(env, chatId, `🔒 تم تفعيل الحظر الشامل. جميع المستخدمين (عدا الأدمن) سيستلمون رسالة التوقف.\nللإلغاء: /lockdown off`);
         await logAdminAction?.(env, userId, "lockdown_on");
         return true;
@@ -103,6 +104,7 @@ export function createProAdmin2({ telegram, escapeHtml, storeCall, getUser, save
     async verifygate(env, chatId, userId, arg) {
       const on = !/off|0|false/i.test(arg);
       await doPut(K.verifygate, { on });
+      invalidateSettingsCache?.(K.verifygate);
       await send(env, chatId, on ? "✅ تم تفعيل بوابة التحقق: المستخدم الجديد يجب أن يضغط زر «أنا لست روبوت» قبل البحث." : "✅ تم إيقاف بوابة التحقق.");
       await logAdminAction?.(env, userId, "verifygate", on ? "on" : "off");
       return true;
