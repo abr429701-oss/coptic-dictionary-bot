@@ -1,6 +1,5 @@
 import records from "../data/dictionary.json" with { type: "json" };
 import { translateFieldValue } from "./field-translations.js";
-import cardManifest from "../data/cards.json" with { type: "json" };
 import welcomeImageBase64 from "./welcome-image.js";
 import { createAdminExtras } from "./admin-extra.js";
 import { createAdminExtras2 } from "./admin-extra2.js";
@@ -67,7 +66,7 @@ const slowModeCache = { value: null, at: 0 };
 // change only when an admin runs /lockdown or /verifygate.
 const lockdownCache = { value: null, at: 0 };
 const verifyGateCache = { value: null, at: 0 };
-const FEATURE_DEFAULTS = { audio: true, cards: true, voice_transcribe: true, inline_mode: true, keyboard: true, suggestions: true, gamify: true, contact: true, wod: true, autoreply: true };
+const FEATURE_DEFAULTS = { audio: true, voice_transcribe: true, inline_mode: true, keyboard: true, suggestions: true, gamify: true, contact: true, wod: true, autoreply: true };
 const recentSearches = []; // ring buffer of { userId, name, query, at }
 const RECENT_SEARCHES_MAX = 200;
 const lastUserSearchAt = new Map(); // userId -> ts (slow mode)
@@ -351,7 +350,7 @@ async function handleNewFeaturesCallback(env, callback) {
     return;
   }
 }
-// Per-user voice preference: the stored word card/voice stays, only auto-sending changes.
+// Per-user voice preference: the stored word voice stays, only auto-sending changes.
 async function voiceAutoOn(env, chatId) {
   if (!env.USERS || Number(chatId) <= 0) return true; // groups and storage-less keep the default
   const user = await getUser(env, String(chatId));
@@ -871,7 +870,7 @@ async function sendMyStats(env, chatId, userId, name) {
   await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML" });
 }
 
-// ---- Batch 6: group rules, warnings, temp bans, hidden cards, word info, search count ----
+// ---- Batch 6: group rules, warnings, temp bans, word info, search count ----
 const RULES_KEY = "group:rules";
 const rulesCache = { value: null, at: 0 };
 async function rulesText(env) { const v = await cachedDoGet(env, RULES_KEY, rulesCache, ""); return typeof v === "string" ? v : ""; }
@@ -916,16 +915,6 @@ async function sendWordInfo(env, chatId, query) {
     text: [`🔍 <b>معلومات الكلمة</b> (صف ${idx + 2})`, `🔊 صوت مسجل: ${voiceIds.has(Number(record.id)) ? "نعم ✅" : "لا ❌"}`, "", ...fields].join("\n").slice(0, 3800),
     parse_mode: "HTML",
   });
-}
-async function sendHiddenCards(env, chatId) {
-  const entries = env.USERS ? ((await storeCall(env, { op: "listprefix", key: "card-disabled:" })).entries ?? []) : [];
-  if (!entries.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: "✅ لا توجد بطاقات مخفية." }); return; }
-  const lines = entries.slice(0, 40).map(({ key }) => {
-    const id = Number(key.slice("card-disabled:".length));
-    const record = records.find((r) => r.id === id);
-    return `• ${escapeHtml(String(record?.coptic ?? `id:${id}`).slice(0, 40))} — إظهار: /card_show ${escapeHtml(String(record?.coptic ?? id))}`;
-  });
-  await telegram(env, "sendMessage", { chat_id: chatId, text: `🖼 <b>البطاقات المخفية</b> (${entries.length}):\n${lines.join("\n")}\n\nلإظهار الكل: /unhideall`, parse_mode: "HTML" });
 }
 
 // ---- Word of the day ----
@@ -1251,8 +1240,6 @@ const neuralKey = (id) => `ttsid:${NEURAL_VOICE_VERSION}:${id}:${audioVersion(id
 const humanKey = (id) => `ttsid:human:${HUMAN_AUDIO_VERSION}:${id}`;
 const voiceKey = (id) => `${VOICE_PREFIX}${id}`;
 const repeatedRecordingKey = (fileId) => `rep3:${fileId}`;
-const CARD_DISABLED_PREFIX = "card-disabled:";
-const cardDisabledKey = (id) => `${CARD_DISABLED_PREFIX}${id}`;
 const recordIndexById = lazy(() => {
   const map = new Map();
   records.forEach((record, index) => {
@@ -2579,56 +2566,13 @@ async function setDriveConfig(env, message, argument) {
   await telegram(env, "sendMessage", { chat_id: message.chat.id, text: await driveStatusText(env), parse_mode: "HTML", disable_web_page_preview: true });
 }
 
-// ---- Word cards (images drawn in GitHub Actions; see scripts/render_cards.mjs) ----
-const CARDS_BASE_URL = "https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/main/cards";
-
-function cardHash(record) {
-  return record?.id != null ? cardManifest[String(record.id)] ?? null : null;
-}
-
-function cardStorageKey(id, language = "ar") {
-  return language === "ar" ? `card:${id}` : `card:${id}:${language}`;
-}
-
-// Only words that have a card pay for the extra lookup; it also carries the saved recording (one call).
-function lookupMedia(env, record, language = "ar") {
-  if (!cardHash(record)) return null;
-  if (!env.USERS) return Promise.resolve({ voice: null, card: null });
-  return storeCall(env, { op: "media", id: record.id, language }).catch((error) => {
-    console.error("Media lookup failed", error instanceof Error ? error.message : "unknown error");
-    return { voice: null, card: null };
-  });
-}
-
-// Sends the entry text first, then the single supplied card image. The voice is sent by the caller.
-async function sendCardEntry(env, chatId, record, text, media, replyMarkup = undefined, language = "ar") {
-  // Word-card photos are disabled for now; dictionary results remain text + voice only.
-  return false;
-}
-
-async function cardRecord(query, env) {
+async function findRecordByQuery(query, env) {
   const clean = String(query ?? "").trim();
   if (!clean) return null;
   const matches = await findMatches(clean, env);
   return records[matches[0]] ?? null;
 }
 
-async function setCardVisibility(env, chatId, query, visible) {
-  const record = await cardRecord(query, env);
-  if (record?.id == null || !cardHash(record)) {
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "لم أجد بطاقة لهذه الكلمة. أرسل الكلمة كما هي أو تأكد أن لها بطاقة." });
-    return;
-  }
-  if (visible) {
-    await storeCall(env, { op: "delete", key: cardDisabledKey(record.id) });
-    await telegram(env, "sendMessage", { chat_id: chatId, text: `✅ ستظهر بطاقة «${record.coptic}» مرة أخرى في البحث التالي.` });
-    await sendSearch(env, chatId, record.coptic, 0);
-    return;
-  }
-  await storeCall(env, { op: "put", key: cardDisabledKey(record.id), value: true });
-  await storeCall(env, { op: "delete", key: `card:${record.id}` });
-  await telegram(env, "sendMessage", { chat_id: chatId, text: `🗑️ تم إخفاء بطاقة «${record.coptic}». ستعود فقط عند تسجيل Voice جديد أو استخدام /card_show.` });
-}
 function widenResultText(value, minimumWidth = 36) {
   const text = String(value ?? "");
   const currentWidth = Math.max(...text.split("\n").map((line) => [...line].length), 0);
@@ -2685,26 +2629,20 @@ async function prepareSearch(env, chatId, query, page = 0, messageId = undefined
   const singleOptions = meaningOptions(matchIndex, normalizedQuery);
   const singleSelected = singleOptions[0] ?? { index: matchIndex, part: matchedPartIndex(records[matchIndex], normalizedQuery) };
   const singleRecord = records[singleSelected.index];
-  const singleCardLanguage = uiLanguage(normalizedQuery);
-  const singleMedia = messageId === undefined ? lookupMedia(env, singleRecord, singleCardLanguage) : null;
+  const singleResultLanguage = uiLanguage(normalizedQuery);
   const singleVoiceRecord = voiceRecordForSearch(singleRecord, normalizedQuery);
   const singleVoice = messageId === undefined
-    ? prepareWordVoice(env, singleVoiceRecord, singleMedia, { skipRecorded: scriptKind(normalizedQuery) === "el", voiceRepeats: await voiceRepeatCount(env, chatId) })
+    ? prepareWordVoice(env, singleVoiceRecord, null, { skipRecorded: scriptKind(normalizedQuery) === "el", voiceRepeats: await voiceRepeatCount(env, chatId) })
     : null;
   return async () => {
     const options = singleOptions;
     const selected = singleSelected;
     const record = singleRecord;
-    const cardLanguage = singleCardLanguage;
-    const media = singleMedia;
+    const resultLanguage = singleResultLanguage;
     const voiceRecord = singleVoiceRecord;
     const voice = singleVoice;
-    const more = withShareButton(env, record, moreMeaning(options, matchIndex, 1, undefined, true, uiLanguage(normalizedQuery)), singleCardLanguage);
+    const more = withShareButton(env, record, moreMeaning(options, matchIndex, 1, undefined, true, uiLanguage(normalizedQuery)), singleResultLanguage);
     const text = widenResultText(`${formatRecord(record, selected.part, normalizedQuery)}${more.notice ?? ""}`).slice(0, MAX_MESSAGE_LENGTH);
-    if (await sendCardEntry(env, chatId, record, text, media, more.reply_markup, cardLanguage)) {
-      await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery, text, { textFallback: text });
-      return undefined;
-    }
     // One message: the voice carries the result as its caption, so the text and the audio can never
     // arrive separately. Long results (over the 1024-character caption cap) still fall back to a
     // separate text message, because Telegram cannot hold them in a caption.
@@ -2768,37 +2706,34 @@ async function sendOption(env, chatId, options, baseIndex, step, fallback = unde
   const record = records[selected?.index];
   if (!record) return;
   lastLookup.set(String(chatId), { index: selected.index, coptic: String(record.coptic ?? "").slice(0, 60), meaning: String(record.meaning ?? "").slice(0, 60), at: new Date().toISOString() });
-  const cardLanguage = uiLanguage(searchKey);
-  const media = lookupMedia(env, record, cardLanguage);
+  const resultLanguage = uiLanguage(searchKey);
   const voiceRecord = voiceRecordForSearch(record, searchKey);
   const isGreekSearch = scriptKind(normalize(searchKey)) === "el";
-  const voice = prepareWordVoice(env, voiceRecord, media, { skipRecorded: isGreekSearch, voiceRepeats: await voiceRepeatCount(env, chatId) });
-  const more = withShareButton(env, record, moreMeaning(options, baseIndex, step + 1, callbackFor ?? (searchKey ? chainCallback(searchKey) : undefined), true, uiLanguage(searchKey)), cardLanguage);
+  const voice = prepareWordVoice(env, voiceRecord, null, { skipRecorded: isGreekSearch, voiceRepeats: await voiceRepeatCount(env, chatId) });
+  const more = withShareButton(env, record, moreMeaning(options, baseIndex, step + 1, callbackFor ?? (searchKey ? chainCallback(searchKey) : undefined), true, uiLanguage(searchKey)), resultLanguage);
   const text = widenResultText(`${formatRecord(record, selected.part, searchKey)}${more.notice ?? ""}`).slice(0, MAX_MESSAGE_LENGTH);
   const wantVoice = sendVoice && await featureEnabled(env, "audio") && await voiceAutoOn(env, chatId);
   const captionMode = voiceCaptionMode(env); // on in production: voice+text travel as one message
   let voiceAttempted = false;
-  if (!(await sendCardEntry(env, chatId, record, text, media, more.reply_markup, cardLanguage))) {
-    if (wantVoice && captionMode) {
-      voiceAttempted = true;
-      // Voice is prepared first (silent upload_voice indicator), then voice+caption sent in
-      // one request. Long captions are truncated and the full text is sent right after.
-      const caption = captionFor(text);
-      const sent = await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, searchKey, caption, { textFallback: null });
-      if (sent.ok) {
-        if (more.reply_markup && sent.messageId) {
-          await telegram(env, "editMessageReplyMarkup", { chat_id: chatId, message_id: sent.messageId, reply_markup: more.reply_markup }).catch(() => null);
-        }
-        if (text.length > CAPTION_MAX) {
-          await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) }).catch(() => null);
-        }
-        return;
+  if (wantVoice && captionMode) {
+    voiceAttempted = true;
+    // Voice is prepared first (silent upload_voice indicator), then voice+caption sent in
+    // one request. Long captions are truncated and the full text is sent right after.
+    const caption = captionFor(text);
+    const sent = await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, searchKey, caption, { textFallback: null });
+    if (sent.ok) {
+      if (more.reply_markup && sent.messageId) {
+        await telegram(env, "editMessageReplyMarkup", { chat_id: chatId, message_id: sent.messageId, reply_markup: more.reply_markup }).catch(() => null);
       }
-      if (sent.reason !== "no-audio") logError(env, new Error(`voice send failed: ${sent.reason ?? "unknown"}`), { where: "option-voice", word: String(record?.coptic ?? "").slice(0, 30) });
+      if (text.length > CAPTION_MAX) {
+        await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) }).catch(() => null);
+      }
+      return;
     }
-    // Voice unavailable or failed: deliver the text immediately, never block.
-    await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
+    if (sent.reason !== "no-audio") logError(env, new Error(`voice send failed: ${sent.reason ?? "unknown"}`), { where: "option-voice", word: String(record?.coptic ?? "").slice(0, 30) });
   }
+  // Voice unavailable or failed: deliver the text immediately, never block.
+  await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
   if (wantVoice && !voiceAttempted) await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, searchKey, "", { textFallback: text });
 }
 
@@ -3227,13 +3162,6 @@ export class UserStore {
       const entries = await Promise.all(wanted.map(async (wordId) => [wordId, (await storage.get(voiceKey(wordId)))?.fileId ?? null]));
       return Response.json({ files: Object.fromEntries(entries.filter(([, fileId]) => fileId)) });
     }
-    if (op === "media") {
-      // One call returns both the saved recording and the cached card photo of a word.
-      const [voice, card, disabled] = await Promise.all([
-        storage.get(voiceKey(id)), storage.get(cardStorageKey(id, language)), storage.get(cardDisabledKey(id)),
-      ]);
-      return Response.json({ voice: voice ?? null, card: card ?? null, disabled: disabled === true });
-    }
     if (op === "bccount") return Response.json({ count: (await this.recipients(exclude)).length });
     if (op === "bcstatus") {
       const job = await storage.get("broadcast");
@@ -3476,8 +3404,6 @@ async function buildCommandsHelpText(env, userId) {
     lines.push("/syncdrive — مزامنة الأصوات مع Drive");
     lines.push("/syncusers — مزامنة المستخدمين مع الشيت");
     lines.push("/record — تسجيل نطق كلمة جديدة");
-    lines.push("/card_hide &lt;كلمة&gt; — إخفاء بطاقة كلمة");
-    lines.push("/card_show &lt;كلمة&gt; — إظهار بطاقة كلمة");
     lines.push("/setdrive &lt;رابط&gt; — ضبط رابط Apps Script");
     lines.push("/setarchive &lt;here|id&gt; — ضبط مجموعة الأرشيف");
     lines.push("/voice_delete &lt;كلمة&gt; — حذف تسجيل صوتي");
@@ -3492,7 +3418,7 @@ async function buildCommandsHelpText(env, userId) {
     lines.push("/reply &lt;id&gt; &lt;نص&gt; — الرد على رسالة /contact | /exportuserscsv — تصدير المستخدمين");
     lines.push("/alias اختصار = كلمة — اختصار بحث فوري | /motd النص — رسالة اليوم | /points &lt;id&gt; &lt;عدد&gt; — منح/خصم نقاط");
     lines.push("/rules — قواعد البوت (كأدمن: /rules نص أو /rules حذف) | /warn &lt;id&gt; — تحذير (3 = حظر 24س) | /tempban &lt;id&gt; &lt;ساعات&gt; — حظر مؤقت");
-    lines.push("/wordinfo &lt;كلمة&gt; — كل حقول الكلمة | /searchcount &lt;كلمة&gt; — عدد مرات بحثها | /hiddencards — البطاقات المخفية | /unhideall — إظهار الكل");
+    lines.push("/wordinfo &lt;كلمة&gt; — كل حقول الكلمة | /searchcount &lt;كلمة&gt; — عدد مرات بحثها");
     lines.push("— Batch 4 —");
     lines.push("/feature &lt;ميزة&gt; on|off — مفاتيح الميزات (audio/keyboard/contact/...)");
     lines.push("/blacklist add|remove &lt;كلمة&gt; — كلمات محظورة | /whitelist on|off/add|remove — القائمة البيضاء");
@@ -3665,8 +3591,6 @@ async function captureVoiceRecording(env, message, userId, user, ctx) {
     key: voiceKey(id),
     value: { fileId: message.voice.file_id, duration: message.voice.duration ?? null, savedAt: new Date().toISOString() },
   });
-  // A fresh recording explicitly reactivates the word's card.
-  await storeCall(env, { op: "delete", key: cardDisabledKey(id) });
   const archive = archiveAndReport(env, message.chat.id, {
     id,
     record,
@@ -3850,7 +3774,7 @@ async function askDeleteVoice(env, chatId, query) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: "🗑️ لحذف تسجيلك لكلمة وإرجاعها للصوت الآلي أرسل:\n/voice_delete الكلمة" });
     return;
   }
-  const record = await cardRecord(clean, env);
+  const record = await findRecordByQuery(clean, env);
   if (record?.id == null) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: "لم أجد هذه الكلمة. أرسلها كما هي في القاموس." });
     return;
@@ -3876,7 +3800,7 @@ async function askDeleteManyVoices(env, chatId, userId, user, argument, all = fa
     const page = await storeCall(env, { op: "voiceIds" });
     ids = page.ids ?? [];
   } else {
-    const selected = await Promise.all(String(argument ?? "").split(/[|،,\n]+/u).map((item) => cardRecord(item.trim(), env)));
+    const selected = await Promise.all(String(argument ?? "").split(/[|،,\n]+/u).map((item) => findRecordByQuery(item.trim(), env)));
     ids = selected.map((record) => record?.id).filter((id) => id != null);
   }
   ids = [...new Set(ids.map(Number))].slice(0, 100);
@@ -5871,7 +5795,6 @@ function adminMenuMarkup(page = "home") {
     [{ text: "📥 إضافة دفعة كلمات", callback_data: "ad|bulkadd" }, { text: "🚫 المحظورون", callback_data: "ad|blocked" }],
     [{ text: "📦 تصدير القاموس JSON", callback_data: "ad|exportdict" }, { text: "👥 تصدير المستخدمين CSV", callback_data: "ad|exportusers" }],
     [{ text: "💾 نسخة احتياطية", callback_data: "ad|backup" }, { text: "🔄 تحديث الأوامر", callback_data: "ad|commands" }],
-    [{ text: "🖼 إخفاء بطاقة كلمة", callback_data: "ad|cardhide" }, { text: "🖼 إظهار بطاقة كلمة", callback_data: "ad|cardshow" }],
     [{ text: "📢 حالة الإرسال", callback_data: "ad|bcstatus" }, { text: "🧹 مسح الجلسة", callback_data: "ad|clearflow" }],
     [{ text: "☀️ كلمة اليوم", callback_data: "ad|wod" }, { text: "🤖 ردود تلقائية", callback_data: "ad|autoreply" }],
     [{ text: "⏳ حد بحث يومي", callback_data: "ad|searchlimit" }, { text: "🚨 تنبيه استخدام", callback_data: "ad|usagealert" }],
@@ -5931,8 +5854,6 @@ const EXTRA_BOT_COMMANDS = [
   { command: "bulkadd", description: "إضافة عدة كلمات للقاموس دفعة واحدة" },
   { command: "bulkedit", description: "تعديل عدة كلمات دفعة واحدة" },
   { command: "cancel", description: "إلغاء العملية الجارية" },
-  { command: "card_hide", description: "إخفاء بطاقة كلمة" },
-  { command: "card_show", description: "إظهار بطاقة كلمة" },
   { command: "configexport", description: "نسخة احتياطية للإعدادات JSON" },
   { command: "dashboard", description: "لوحة تحكم الأدمن" },
   { command: "deleteword", description: "حذف كلمة من القاموس" },
@@ -5947,7 +5868,6 @@ const EXTRA_BOT_COMMANDS = [
   { command: "findempty", description: "خلايا فاضية في القاموس" },
   { command: "gamify", description: "إعدادات النقاط والمكافآت" },
   { command: "healthcheck", description: "فحص شامل لصحة البوت" },
-  { command: "hiddencards", description: "البطاقات المخفية" },
   { command: "importlearn", description: "استيراد دروس التعلم من الشيت" },
   { command: "importsheet", description: "استيراد المعرّفات من ورقة Google" },
   { command: "importusers", description: "استيراد قائمة معرّفات مستخدمين" },
@@ -6002,7 +5922,6 @@ const EXTRA_BOT_COMMANDS = [
   { command: "tplsave", description: "حفظ قالب بث" },
   { command: "tplsend", description: "إرسال قالب بث" },
   { command: "unban", description: "فك حظر مستخدم" },
-  { command: "unhideall", description: "إظهار كل البطاقات المخفية" },
   { command: "unpin", description: "فك كل الرسائل المثبتة" },
   { command: "uploadaudio", description: "رفع ملف صوتي" },
   { command: "usage", description: "تقرير استخدام البوت اليومي" },
@@ -6099,7 +6018,7 @@ const ALL_COMMANDS_CATEGORIES = [
   { id: "learn", title: "🎓 التعلم والاختبارات", commands: ["quiz", "quiz2", "quizstats", "dailyquiz", "flashcards", "study", "streak", "hangman", "guess", "daily", "wod", "wordoftheday", "fav", "favorites", "myfav", "mywords", "removefav", "mystats", "recent", "gamify", "badges", "exportanki", "examples", "compare", "cert1", "cert2", "getcode"] },
   { id: "support", title: "💬 الدعم والتواصل", commands: ["support", "tickets", "ticket", "ticketclose", "mytickets", "reply", "feedback", "bug", "suggest", "suggestword", "suggestions", "contribute", "invite", "myref", "toptop", "refinfo", "donate", "donation", "subscribe", "unsubscribe", "notify", "exportmydata", "clearhistory", "alerts", "exitsupport"] },
   { id: "security", title: "🔐 الأمان والصلاحيات", commands: ["2fa", "password", "unlock", "lockdown", "verifygate", "captcha", "ratewarn", "ratelimit", "blacklist", "whitelist", "antispam", "spamlist", "spamclear", "setrole", "roles", "myrole", "admins"] },
-  { id: "menus", title: "🎛 القوائم والبوت", commands: ["menuadmin", "menueditor", "addmenu", "addbutton", "delmenu", "delbutton", "movebtn", "addvideo", "videolist", "delvideo", "toptags", "card_hide", "card_show", "hiddencards", "unhideall", "welcomemedia", "welcomesticker", "leavemsg", "setjoinmsg", "editwelcome", "resetwelcome", "pin", "pinhere", "unpin", "hidebutton", "hiddenbuttons", "showbutton"] },
+  { id: "menus", title: "🎛 القوائم والبوت", commands: ["menuadmin", "menueditor", "addmenu", "addbutton", "delmenu", "delbutton", "movebtn", "addvideo", "videolist", "delvideo", "toptags", "welcomemedia", "welcomesticker", "leavemsg", "setjoinmsg", "editwelcome", "resetwelcome", "pin", "pinhere", "unpin", "hidebutton", "hiddenbuttons", "showbutton"] },
 ];
 function allCommandsCategory(id) {
   const cat = ALL_COMMANDS_CATEGORIES.find((c) => c.id === id);
@@ -6283,8 +6202,6 @@ async function handleAdminFlow(env, message, userId, user, text) {
   else if (flow === "setarchive") await setArchiveChat(env, message, text);
   else if (flow === "deleteone") await askDeleteVoice(env, message.chat.id, text);
   else if (flow === "deletemany") await askDeleteManyVoices(env, message.chat.id, userId, user, text);
-  else if (flow === "cardhide") await setCardVisibility(env, message.chat.id, text, false);
-  else if (flow === "cardshow") await setCardVisibility(env, message.chat.id, text, true);
   else if (flow === "findempty_wait" || flow.kind === "findempty_wait") { await clearAdminFlow(env, userId); await sendFindEmptyReport(env, message.chat.id, text); return true; }
   else if (flow === "importusers" || flow.kind === "importusers") { await clearAdminFlow(env, userId); await importUserIds(env, message.chat.id, text); return true; }
   else if (flow === "replyto" || flow.kind === "replyto") { await clearAdminFlow(env, userId); await sendReplyToUser(env, message.chat.id, flow.target ?? flow, text); return true; }
@@ -6371,7 +6288,7 @@ async function handleAdminDashboardCallback(env, callback, ctx) {
   if (action === "recover") { await recoverMissingUsers(env, chatId, ctx); return; }
   if (action === "bulkadd") { await setAdminFlow(env, callback.from.id, { kind: "bulk_add" }); await telegram(env, "sendMessage", { chat_id: chatId, text: "📥 أرسل الآن الكلمات، كل كلمة في سطر، مفصولة بـ | بهذا الترتيب:\nقبطي | النطق | المعنى | English | Français | Deutsch | اليوناني | الأصل | النوع\n\nالحقلان المطلوبان: القبطي والمعنى. اكتب — لحقل تريد تركه فاضيًا." }); return; }
   if (action === "blocked") { await listBlockedUsers(env, chatId); return; }
-  const prompts = { deleteone: ["🗑 أرسل كلمة واحدة لحذف تسجيلها:", "deleteone"], deletemany: ["🗑 أرسل الكلمات مفصولة بعلامة | أو فاصلة:", "deletemany"], setdrive: ["🔗 أرسل رابط Apps Script المنتهي بـ /exec:", "setdrive"], setarchive: ["📦 أرسل رقم المجموعة، أو off لإيقاف الأرشيف:", "setarchive"], cardhide: ["🖼 أرسل الكلمة لإخفاء بطاقتها:", "cardhide"], cardshow: ["🖼 أرسل الكلمة لإظهار بطاقتها:", "cardshow"] };
+  const prompts = { deleteone: ["🗑 أرسل كلمة واحدة لحذف تسجيلها:", "deleteone"], deletemany: ["🗑 أرسل الكلمات مفصولة بعلامة | أو فاصلة:", "deletemany"], setdrive: ["🔗 أرسل رابط Apps Script المنتهي بـ /exec:", "setdrive"], setarchive: ["📦 أرسل رقم المجموعة، أو off لإيقاف الأرشيف:", "setarchive"] };
   if (prompts[action]) { await setAdminFlow(env, callback.from.id, prompts[action][1]); await telegram(env, "sendMessage", { chat_id: chatId, text: prompts[action][0] }); return; }
   if (action === "resetdrive") { await setDriveConfig(env, { chat: { id: chatId } }, "reset"); return; }
   if (action === "broadcast") { await beginBroadcast(env, chatId, callback.from.id, await getUser(env, callback.from.id) ?? {}); return; }
@@ -7302,12 +7219,6 @@ async function handleUpdate(update, env, ctx) {
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `🔎 كلمة «${escapeHtml(word.slice(0, 60))}» بحثت <b>${Number(count).toLocaleString("en-US")}</b> مرة.`, parse_mode: "HTML" });
       return;
     }
-    if (text === "/hiddencards") { await sendHiddenCards(env, message.chat.id); return; }
-    if (text === "/unhideall") {
-      const result = await storeCall(env, { op: "purgeprefix", key: "card-disabled:" });
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ أُعيد إظهار ${Number(result?.purged ?? 0).toLocaleString("en-US")} بطاقة مخفية.` });
-      return;
-    }
     // ---- Batch 5 admin commands: aliases, MOTD, manual points ----
     if (text === "/alias" || text.startsWith("/alias ")) {
       const arg = text.slice("/alias".length).trim();
@@ -7347,14 +7258,6 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     if (text === "/reply" || text.startsWith("/reply ")) { await handleAdminReply(env, message, text); return; }
-    if (text === "/card_hide" || text.startsWith("/card_hide ")) {
-      await setCardVisibility(env, message.chat.id, text.slice("/card_hide".length), false);
-      return;
-    }
-    if (text === "/card_show" || text.startsWith("/card_show ")) {
-      await setCardVisibility(env, message.chat.id, text.slice("/card_show".length), true);
-      return;
-    }
     if (text === "/setdrive" || text.startsWith("/setdrive ")) {
       await setDriveConfig(env, message, text.slice("/setdrive".length).trim());
       return;

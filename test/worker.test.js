@@ -1,4 +1,3 @@
-import cardManifest from "../data/cards.json" with { type: "json" };
 
 // Strip Arabic tashkeel and Coptic jinkim (combining marks) for test comparisons.
 const stripDiacritics = (s) => String(s ?? "").replace(/[\u0300-\u036f\u064b-\u065f\u0670\u06d6-\u06ed]/gu, "");
@@ -20,9 +19,6 @@ test.beforeEach(() => resetAudioCaches());
 // sheet edit cannot break them.
 const bareCoptic = (value) => stripDiacritics(value).replaceAll("`", "").replace(/\s*\([^)]*\)\s*/gu, " ").replace(/\s+/gu, " ").trim();
 const findCopticRecord = (word) => records.find((record) => bareCoptic(record.coptic) === bareCoptic(word));
-
-// The real manifest lists whichever words have a card today; tests start from "no cards" and add their own.
-for (const key of Object.keys(cardManifest)) delete cardManifest[key];
 
 const token = "test-token";
 const secret = "test-secret-should-be-long-enough";
@@ -1514,7 +1510,7 @@ test("/botinfo (admin) reports inline support, webhook updates and IPA Reader sp
   assert.match(text, /Amazon Polly.*Miguel/u);
 });
 
-// ---- Word cards ----
+// ---- search results never send a photo ----
 function photoWorld({ photoOk = true } = {}) {
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
@@ -1530,87 +1526,28 @@ function photoWorld({ photoOk = true } = {}) {
   return calls;
 }
 
-test("a word with a card is sent as text and voice without a card photo", async () => {
+test("a word is sent as text and voice, never as a card photo", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  const record = findCopticRecord("ⲁⲃⲱⲕ");
-  cardManifest[String(record.id)] = "hash0001";
-  try {
-    const calls = photoWorld();
-    await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲱⲕ", chat: { id: 70 } } }), kvEnv);
-    const textIndex = calls.findIndex((call) => call.url.endsWith("/sendMessage") && /<b>الكلمة/u.test(call.payload?.text ?? ""));
-    const photos = calls.filter((call) => call.url.endsWith("/sendPhoto"));
-    assert.ok(textIndex >= 0);
-    assert.equal(photos.length, 0);
+  const calls = photoWorld();
+  await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲱⲕ", chat: { id: 70 } } }), kvEnv);
+  const textIndex = calls.findIndex((call) => call.url.endsWith("/sendMessage") && /<b>الكلمة/u.test(call.payload?.text ?? ""));
+  const photos = calls.filter((call) => call.url.endsWith("/sendPhoto"));
+  assert.ok(textIndex >= 0);
+  assert.equal(photos.length, 0);
 
-    const again = photoWorld();
-    await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲱⲕ", chat: { id: 70 } } }), kvEnv);
-    assert.equal(again.filter((call) => call.url.endsWith("/sendPhoto")).length, 0);
-
-    cardManifest[String(record.id)] = "hash0002"; // the card was redrawn: the old file id must not be used
-    const redrawn = photoWorld();
-    await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲱⲕ", chat: { id: 70 } } }), kvEnv);
-    assert.equal(redrawn.filter((call) => call.url.endsWith("/sendPhoto")).length, 0);
-  } finally {
-    delete cardManifest[String(record.id)];
-  }
+  const again = photoWorld();
+  await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲱⲕ", chat: { id: 70 } } }), kvEnv);
+  assert.equal(again.filter((call) => call.url.endsWith("/sendPhoto")).length, 0);
 });
 
-test("if the card cannot be sent the entry still arrives as text; words without a card are unchanged", async () => {
+test("a word without a card is sent as text only", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  const record = findCopticRecord("ⲁⲃⲱⲕ");
-  cardManifest[String(record.id)] = "hash0003";
-  try {
-    const calls = photoWorld({ photoOk: false });
-    await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲱⲕ", chat: { id: 71 } } }), kvEnv);
-    assert.ok(calls.some((call) => call.url.endsWith("/sendMessage") && /<b>الكلمة:<\/b> ⲁⲃⲱⲕ/u.test(stripDiacritics(call.payload.text))));
-  } finally {
-    delete cardManifest[String(record.id)];
-  }
   const plain = photoWorld();
   await worker.fetch(updateRequest({ message: { text: "ⲁⲃⲱⲕ", chat: { id: 72 } } }), kvEnv);
   assert.ok(!plain.some((call) => call.url.endsWith("/sendPhoto")));
   assert.ok(plain.some((call) => call.url.endsWith("/sendMessage")));
 });
 
-test("admin can hide a card until showing it or recording a new voice", async () => {
-  const kvEnv = { ...env, USERS: fakeKv() };
-  const record = findCopticRecord("ⲁⲃⲱⲕ");
-  cardManifest[String(record.id)] = "hash-hide";
-  try {
-    await worker.fetch(updateRequest({ message: { text: `/card_hide ${record.coptic}`, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
-    assert.equal(kvEnv.USERS.store.get(`card-disabled:${record.id}`), true);
-    const hidden = photoWorld();
-    await worker.fetch(updateRequest({ message: { text: record.coptic, chat: { id: 73 } } }), kvEnv);
-    assert.equal(hidden.filter((call) => call.url.endsWith("/sendPhoto")).length, 0);
-
-    const shown = photoWorld();
-    await worker.fetch(updateRequest({ message: { text: `/card_show ${record.coptic}`, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
-    assert.equal(kvEnv.USERS.store.get(`card-disabled:${record.id}`), undefined);
-    assert.equal(shown.filter((call) => call.url.endsWith("/sendPhoto")).length, 0);
-
-    await worker.fetch(updateRequest({ message: { text: `/card_hide ${record.coptic}`, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
-    kvEnv.USERS.store.set(`user:${ADMIN}`, { voiceRec: { id: record.id, mode: "chosen" } });
-    photoWorld();
-    await worker.fetch(updateRequest({ message: { voice: { file_id: "new-voice", duration: 2 }, chat: { id: ADMIN }, from: { id: ADMIN } } }), kvEnv);
-    assert.equal(kvEnv.USERS.store.get(`card-disabled:${record.id}`), undefined);
-  } finally {
-    delete cardManifest[String(record.id)];
-  }
-});
-
-test("the card renderer produces the single supplied card layout", async () => {
-  const { cardSvg, renderCard } = await import("../scripts/card.mjs");
-  assert.match(cardSvg({ word: "ⲁ", meaning: "صورة", typeLabel: "", origin: "", qrText: "" }), /Ⲭⲏⲙⲓ/u);
-  assert.match(cardSvg({ word: "ⲁ", meaning: "صورة، معنى طويل", typeLabel: "", origin: "", qrText: "", language: "en" }), /MEANING/u);
-  const png = renderCard({ word: "ⲙⲟⲣⲫⲏ", meaning: "صورة", typeLabel: "مؤنثة", origin: "يونانية", qrText: "https://t.me/Uploade33_bot", dateText: "4/10/2026 — 25 توت 1743" });
-  assert.equal(Buffer.from(png).subarray(1, 4).toString(), "PNG");
-  assert.equal(Buffer.from(png).readUInt32BE(16), 907);
-  assert.equal(Buffer.from(png).readUInt32BE(20), 1280);
-  const { cardData } = await import("../scripts/render_cards.mjs");
-  const data = cardData([{ coptic: "ⲁ", meaning: "أ، ب", gender: "", kind: "اسم", origin: "قبطية" }, { coptic: "ⲁ", meaning: "ب، ج", gender: "مذكرة", kind: "", origin: "" }], "");
-  assert.deepEqual([data.meaning, data.typeLabel, data.origin], ["أ، ب، ج", "مذكرة", "قبطية"]);
-  assert.equal(data.qrText, "https://t.me/Uploade33_bot");
-});
 
 // ---- voice caption: "<meaning>. <Coptic word>. <origin>. <gender>." ----
 const sonIndex = records.findIndex((record) => bareCoptic(record.coptic) === "ⲥⲟⲛ" && /^أخ/u.test(stripDiacritics(record.meaning ?? "")));

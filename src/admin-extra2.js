@@ -513,7 +513,7 @@ export function createAdminExtras2(api) {
     const record = records[index];
     const missing = GAP_FIELDS.filter((field) => !String(record[field] ?? "").trim());
     const meanings = String(record.meaning ?? "").split(/[،,;|]/u).filter((part) => part.trim()).length;
-    const media = await storeCall(env, { op: "media", id: record.id }).catch(() => null);
+    const savedVoice = await sget(env, `voiceid:${record.id}`);
     await reply([
       `🔍 <b>تدقيق كلمة</b> — ${esc(record.coptic)}`, HR,
       `• رقم الصف في الذاكرة: <code>${fmt(index)}</code> | id: <code>${esc(record.id ?? "—")}</code>`,
@@ -521,9 +521,7 @@ export function createAdminExtras2(api) {
       `• عدد المعاني المفصولة: <b>${fmt(meanings)}</b>`,
       `• النطق: ${record.pronunciation ? "✅" : "❌"} | اليوناني: ${record.greek ? "✅" : "❌"} | النوع: ${record.kind ? "✅" : "❌"} | الأصل: ${record.origin ? "✅" : "❌"}`,
       `• الترجمة الفرنسية: ${record.translation_fr ? "✅" : "❌"} | الألمانية: ${record.translation_de ? "✅" : "❌"}`,
-      `• تسجيل صوتي محفوظ: ${media?.voice ? "🎙 موجود" : "🔇 لا يوجد (يُستخدم الصوت المولّد)"}`,
-      `• بطاقة مصوّرة: ${media?.card ? (media?.disabled ? "🖼 مخفية إداريًا" : "🖼 موجودة") : "— لا بطاقة"}`,
-      missing.length ? `• حقول ناقصة: <b>${esc(missing.join(", "))}</b>` : "• ✅ كل الحقول ممتلئة",
+      `• تسجيل صوتي محفوظ: ${savedVoice?.fileId ? "🎙 موجود" : "🔇 لا يوجد (يُستخدم الصوت المولّد)"}`,      missing.length ? `• حقول ناقصة: <b>${esc(missing.join(", "))}</b>` : "• ✅ كل الحقول ممتلئة",
       HR,
       `للتعديل: /admin ← تعديل القاموس، وابحث عن «${esc(String(record.coptic).slice(0, 30))}».`,
     ].join("\n"));
