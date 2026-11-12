@@ -3007,6 +3007,24 @@ export class UserStore {
       await storage.delete(key);
       return Response.json({ ok: true });
     }
+    if (op === "claimTick") {
+      // Atomic per-tick mutex for the mass-send ticks (campaigns and
+      // events). The DO runs one fetch at a time, so this get+put is
+      // atomic: the first isolate to claim a name owns that send until
+      // the TTL passes; every other isolate skips instead of sending
+      // the same batch twice. key: claim name; value: { ttlMs }.
+      // TTL (45 s) exceeds one batch of sends but stays under the
+      // 60 s per-isolate tick throttle, so progress never stalls long.
+      const claimKey = `tickclaim:${key}`;
+      const ttlMs = Number(value?.ttlMs ?? 45000);
+      const prev = await storage.get(claimKey);
+      const now = Date.now();
+      if (prev && typeof prev === "object" && now - Number(prev.at ?? 0) < ttlMs) {
+        return Response.json({ claimed: false });
+      }
+      await storage.put(claimKey, { at: now });
+      return Response.json({ claimed: true });
+    }
     if (op === "deleteUser") {
       // /userdelete: remove the user and keep the users:total counter exact.
       const existed = await storage.delete(`user:${userId}`);
@@ -3198,16 +3216,17 @@ export class UserStore {
       return Response.json({ claimed: true });
     }
     if (op === "adminStats") {
-      const [users, voiced, pending] = await Promise.all([
+      // One voice scan: VOICE_PREFIX is "voiceid:", so the old code
+      // listed the same prefix twice (voiced + pending were identical).
+      const [users, voices] = await Promise.all([
         storage.list({ prefix: "user:" }),
         storage.list({ prefix: VOICE_PREFIX }),
-        storage.list({ prefix: "voiceid:" }),
       ]);
       let pendingUploads = 0;
       let blocked = 0;
-      for (const [, value] of pending) if (!value?.drive) pendingUploads += 1;
+      for (const [, value] of voices) if (!value?.drive) pendingUploads += 1;
       for (const [, value] of users) if (value?.blocked === true) blocked += 1;
-      return Response.json({ users: users.size, voices: voiced.size, pendingUploads, blocked });
+      return Response.json({ users: users.size, voices: voices.size, pendingUploads, blocked });
     }
     // v2: retention + funnel, computed inside the DO from stored user records
     // (firstSeen/lastSeen are ISO strings), search history and gamify scores.

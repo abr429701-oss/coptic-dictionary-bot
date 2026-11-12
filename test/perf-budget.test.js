@@ -240,6 +240,20 @@ test("perf-budget: repeat search skips the recorded-voice check (voice memo)", a
   assert.equal(counts.byKey.get("voiceid:9251") ?? 0, 0, "the repeat search must not re-read the recorded-voice key");
 });
 
+// G7 regression: /health (which runs adminStats) must scan the voiceid:
+// prefix exactly once — the old op listed it twice. /health is
+// admin-only, so this runs as the default admin (813894692).
+test("perf-budget: /health lists the voice prefix once (adminStats dedupe)", async (t) => {
+  const { kv, counts } = countingKv();
+  kv.store.set("user:813894692", NAMED_USER(813894692));
+  kv.store.set("voiceid:9251", { fileId: "v1" });
+  kv.store.set("voiceid:9252", { fileId: "v2", drive: { url: "https://drive.example/1" } });
+  const calls = await runText(kv, 813894692, "/health");
+  assert.ok(calls.some((c) => c.url.endsWith("/sendMessage") && String(c.payload?.text ?? "").includes("فحص صحة البوت")), "/health must still send its report");
+  assert.equal(kv.listCalls.filter((p) => p === "voiceid:").length, 1, `voiceid: must be listed once, got ${kv.listCalls.join(",")}`);
+  t.diagnostic(`/health: ${summary(counts)} lists=[${kv.listCalls.join(",")}]`);
+});
+
 test("perf-budget: /start from a named user", async (t) => {
   const { kv, counts } = countingKv();
   kv.store.set("user:9102", NAMED_USER(9102));

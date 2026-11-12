@@ -1871,3 +1871,35 @@ test("bot: plain search still works after the features block (no regression)", a
   assert.ok(calls.some((call) => call.url.endsWith("/sendVoice")), "plain ⲫⲱⲥ search must still send the voice");
   assert.ok(calls.some((call) => call.url.endsWith("/sendMessage")), "plain ⲫⲱⲥ search must still send the text");
 });
+
+test("claimTick grants a send claim once until it expires (G7)", async () => {
+  const kv = fakeKv();
+  const claim = async (key) => {
+    const res = await kv.object.fetch(new Request("http://do/", {
+      method: "POST",
+      body: JSON.stringify({ op: "claimTick", key, value: { ttlMs: 45000 } }),
+    }));
+    return res.json();
+  };
+  assert.equal((await claim("campaign:123")).claimed, true, "first claim wins");
+  assert.equal((await claim("campaign:123")).claimed, false, "second claim for the same send loses");
+  assert.equal((await claim("event:EVT-2")).claimed, true, "a different send claims independently");
+});
+
+test("adminStats counts users, voices and pending uploads from one voice scan (G7)", async () => {
+  const kv = fakeKv();
+  kv.store.set("user:1", { blocked: false });
+  kv.store.set("user:2", { blocked: true });
+  kv.store.set("voiceid:10", { fileId: "a", drive: { url: "https://drive.example/1" } });
+  kv.store.set("voiceid:11", { fileId: "b" });
+  kv.store.set("voiceid:12", { fileId: "c" });
+  const res = await kv.object.fetch(new Request("http://do/", {
+    method: "POST",
+    body: JSON.stringify({ op: "adminStats" }),
+  }));
+  const stats = await res.json();
+  assert.equal(stats.users, 2);
+  assert.equal(stats.voices, 3);
+  assert.equal(stats.pendingUploads, 2);
+  assert.equal(stats.blocked, 1);
+});

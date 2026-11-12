@@ -88,8 +88,6 @@ export function createAdminPro(api) {
     return out;
   }
   let lastTickAt = 0;
-  // عدّاد السبام في الذاكرة (لكل عملية معزولة) — يُصفّى كل دقيقة
-  const spamCounters = new Map();
   const SPAM_THRESHOLD = 30;
 
   // ==========================================================================
@@ -400,9 +398,26 @@ export function createAdminPro(api) {
       ]] },
     });
   }
+  // Mass-send ticks (campaigns, events) run on every isolate that gets
+  // a message, throttled to once a minute per isolate — but two
+  // isolates can still tick at the same moment and send the same batch
+  // twice. The DO claim below is the mutex: the first isolate to claim
+  // a send owns it until the TTL passes; the others skip. A batch of
+  // 25 sends takes seconds, well inside the 45 s TTL; if the DO is
+  // unreachable the tick skips rather than risking a duplicate send.
+  const TICK_CLAIM_TTL_MS = 45000;
+  async function claimTick(env, name) {
+    if (!env.USERS) return true;
+    try {
+      const res = await storeCall(env, { op: "claimTick", key: name, value: { ttlMs: TICK_CLAIM_TTL_MS } });
+      return res?.claimed === true;
+    } catch { return false; }
+  }
+
   async function campaignTick(env) {
     const state = await sget(env, AP.campaignState, null);
     if (!state || state.status !== "sending" || !Array.isArray(state.targets)) return;
+    if (!await claimTick(env, `campaign:${state.createdAt ?? "current"}`)) return;
     const batch = state.targets.splice(0, CAMPAIGN_BATCH);
     for (const id of batch) {
       try {
@@ -878,38 +893,16 @@ export function createAdminPro(api) {
   // ==========================================================================
   // 10) كشف السبام والحماية التلقائية (Anti-Spam)
   // ==========================================================================
-  function bumpSpamCounter(env, userId) {
-    const id = String(userId);
-    const now = Date.now();
-    const rec = spamCounters.get(id) || { count: 0, windowStart: now };
-    if (now - rec.windowStart > 60000) { rec.count = 0; rec.windowStart = now; }
-    rec.count += 1;
-    spamCounters.set(id, rec);
-    return rec.count;
-  }
+  // NOTE: the automatic flagging tick was removed (perf G7). It could
+  // never flag anyone: its in-memory counters were fed by
+  // bumpSpamCounter, which had no caller anywhere, and its autoban line
+  // called .add() on the bans OBJECT returned by bannedSet() — a no-op
+  // that marked the flag "banned" without banning anybody. The admin
+  // commands below (/antispam status + on/off, /spamlist, /spamclear)
+  // and the stored flags stay as they are.
   async function getSpamFlags(env) {
     const v = await sget(env, AP.antispamFlags, {});
     return (v && typeof v === "object") ? v : {};
-  }
-  async function antispamTick(env) {
-    const now = Date.now();
-    const flags = await getSpamFlags(env);
-    let changed = false;
-    for (const [id, rec] of spamCounters.entries()) {
-      if (now - rec.windowStart > 60000) { spamCounters.delete(id); continue; }
-      if (rec.count > SPAM_THRESHOLD && !flags[id]) {
-        flags[id] = { flaggedAt: now, peak: rec.count, status: "warned" };
-        changed = true;
-        const autoban = Boolean(await sget(env, AP.antispamAutoban, false));
-        if (autoban && bannedSet) {
-          try { await bannedSet(env).add?.(id); } catch { /* ignore */ }
-          flags[id].status = "banned";
-          await logSecurity(env, "system", "antispam_autoban", `user=${id} peak=${rec.count}`);
-        }
-        await sendAlert(env, "spam", `مستخدم <code>${esc(id)}</code> تجاوز عتبة السبام (${fmt(rec.count)} طلب/دقيقة).${autoban ? " تم حظره تلقائيًا." : ""}`);
-      }
-    }
-    if (changed) await sput(env, AP.antispamFlags, flags);
   }
   async function cmdAntispam(env, chatId, userId, args) {
     if (!await requireRole(env, userId, chatId, ROLE_LEVELS.admin)) return;
@@ -919,13 +912,11 @@ export function createAdminPro(api) {
     const autoban = Boolean(await sget(env, AP.antispamAutoban, false));
     const flags = await getSpamFlags(env);
     const active = Object.keys(flags).length;
-    const liveCount = spamCounters.size;
     await say(env, chatId)([
       "🛡️ <b>حالة الحماية من السبام</b>", HR,
       `الحظر التلقائي: <b>${autoban ? "مفعّل ⚠️" : "معطّل"}</b> (غيّره: /antispam on|off)`,
       `العتبة: <b>${SPAM_THRESHOLD}</b> طلب/دقيقة`,
       `مستخدمون مُعلمون: <b>${fmt(active)}</b>`,
-      `جلسات نشطة بالذاكرة: <b>${fmt(liveCount)}</b>`,
       "",
       "المُعلمون: /spamlist — مسح: /spamclear &lt;id&gt;",
     ].join("\n"));
@@ -945,7 +936,6 @@ export function createAdminPro(api) {
     if (!targetId) { await say(env, chatId)("ℹ️ الاستخدام: <code>/spamclear &lt;id&gt;</code>"); return; }
     const flags = await getSpamFlags(env);
     delete flags[targetId];
-    spamCounters.delete(targetId);
     await sput(env, AP.antispamFlags, flags);
     await logSecurity(env, userId, "spamclear", `user=${targetId}`);
     await say(env, chatId)(`✅ تم مسح علامة السبام للمستخدم <code>${esc(targetId)}</code>.`);
@@ -1026,6 +1016,9 @@ export function createAdminPro(api) {
     for (const e of events) {
       if (e.sent || e.sending) continue;
       if (e.date_iso > today) continue;
+      // One isolate owns this event's send until the claim expires;
+      // without it two isolates would send the same first batch.
+      if (!await claimTick(env, `event:${e.id ?? `${e.date_iso}:${e.title}`}`)) continue;
       e.sending = true;
       e.targets = e.targets || null;
       if (!e.targets) {
@@ -1536,10 +1529,9 @@ export function createAdminPro(api) {
     try { await campaignTick(env); } catch { /* ignore */ }
     try { await alertsTick(env); } catch { /* ignore */ }
     try { await weeklyTick(env); } catch { /* ignore */ }
-    try { await antispamTick(env); } catch { /* ignore */ }
     try { await eventsTick(env); } catch { /* ignore */ }
     try { await maintAdvTick(env); } catch { /* ignore */ }
   }
 
-  return { handle, handleCallback, tick, commands: COMMANDS, addPoints, registerReferral, isFeatureEnabled, bumpSpamCounter };
+  return { handle, handleCallback, tick, commands: COMMANDS, addPoints, registerReferral, isFeatureEnabled };
 }
