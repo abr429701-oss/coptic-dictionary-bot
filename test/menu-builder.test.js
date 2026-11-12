@@ -77,7 +77,12 @@ test("menu-builder: cleanUrl / cleanCommand accept only real values", () => {
   assert.equal(cleanUrl("javascript:alert(1)"), "");
   assert.equal(cleanUrl("ftp://x"), "");
   assert.equal(cleanCommand("/quiz"), "/quiz");
-  assert.equal(cleanCommand("/VIDEOLessons"), "/videolessons");
+  // /videolessons was removed (lessons moved into /menu), so it is no
+  // longer an allowed menu command — cleanCommand must reject it.
+  assert.equal(cleanCommand("/VIDEOLessons"), "");
+  assert.equal(cleanCommand("/videolessons"), "");
+  assert.equal(cleanCommand("/cert1"), "/cert1");
+  assert.equal(cleanCommand("/getcode"), "/getcode");
   assert.equal(cleanCommand("/deleteword"), "");
   assert.equal(cleanCommand("quiz"), "");
 });
@@ -391,7 +396,9 @@ test("menu-builder: a video lesson is added from the studio and played for users
   const vid = storedMenus(kvEnv).find((m) => m.id === VIDEO_MENU_ID);
   assert.equal(vid.buttons.length, 1);
   assert.equal(vid.buttons[0].fileId, "VID_TEST_1");
-  const list = await say(kvEnv, 57, "/videolessons");
+  // /videolessons is gone: users open the video menu from /menu instead.
+  await say(kvEnv, 57, "/menu");
+  const list = await say(kvEnv, 57, "🎬 دروس فيديو");
   assert.ok(anyText(list, 57, /دروس فيديو|الدرس الأول/));
   const listMessages = toChat(list, 57);
   const videoKeyboard = listMessages.at(-1)?.reply_markup?.keyboard ?? [];

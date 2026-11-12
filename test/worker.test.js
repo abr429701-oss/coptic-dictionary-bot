@@ -1863,7 +1863,11 @@ test("bot: plain search still works after the features block (no regression)", a
   const kvEnv = { ...env, USERS: fakeKv() };
   const calls = [];
   fakeTelegramApi(calls);
-  await worker.fetch(updateRequest({ message: { text: "ⲫⲱⲥ", chat: { id: 4242 }, from: { id: 4242 } } }), kvEnv);
+  // Fresh user id on purpose: the rate-limit buckets are module-level and
+  // shared across this file, and user 4242's 30-message window is already
+  // exhausted by the tests above — a plain search from 4242 would be
+  // rate-limited here and the voice would never be sent.
+  await worker.fetch(updateRequest({ message: { text: "ⲫⲱⲥ", chat: { id: 4243 }, from: { id: 4243 } } }), kvEnv);
   assert.ok(calls.some((call) => call.url.endsWith("/sendVoice")), "plain ⲫⲱⲥ search must still send the voice");
   assert.ok(calls.some((call) => call.url.endsWith("/sendMessage")), "plain ⲫⲱⲥ search must still send the text");
 });

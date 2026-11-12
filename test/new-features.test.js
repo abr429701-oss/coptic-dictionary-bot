@@ -245,14 +245,18 @@ test("v2: /help shows sections and language buttons", async () => {
   assert.ok(JSON.stringify(msg.reply_markup).includes("nf|lang|en"));
 });
 
-test("v2: /lessons lists lessons and a lesson callback sends real lesson text", async () => {
-  const kvEnv = { ...env, USERS: fakeKv() };
-  const calls = await say(kvEnv, 34, "/lessons");
-  const msg = sent(calls)[0];
-  assert.match(msg.text, /الدروس/u);
-  assert.ok(JSON.stringify(msg.reply_markup).includes("nf|lesson|1"));
-  const cb = await sendCallback(kvEnv, 34, "nf|lesson|1");
-  assert.match(sent(cb)[0].text, /الدرس 1/u);
+// The /lessons command was removed (lessons now live in /menu); the lesson
+// builders themselves are still the source of real lesson content, so they
+// are unit-tested directly instead of through the deleted command.
+test("v2: lesson builders still list real lessons from dictionary records", async () => {
+  const { lessonList, lessonText } = await import("../src/new-features.js");
+  const lessons = lessonList();
+  assert.ok(lessons.length >= 6, "there must be an alphabet lesson plus 5 letter lessons");
+  assert.equal(lessons[0].title, "الحروف القبطية");
+  const first = lessonText(1);
+  assert.match(first, /الدرس 1/u);
+  assert.match(first, /ⲁ|ⲃ|ⲅ|ⲇ|ⲉ/u, "lesson text must use real Coptic letters");
+  assert.equal(lessonText(999), null, "an unknown lesson id must return null");
 });
 
 test("v2: /dailyquiz asks a question and the correct answer is accepted", async () => {

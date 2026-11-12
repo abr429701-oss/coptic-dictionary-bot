@@ -119,8 +119,10 @@ test("menu-fix: opening an empty menu (inline path) still delivers a message", a
 
 test("menu-fix: video menu with no lessons shows the empty text", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
-  // No video menu stored yet: /videolessons creates it lazily, with no buttons.
-  const calls = await say(kvEnv, USER, "/videolessons");
+  // An empty stored video menu, opened from its menu button — /videolessons
+  // used to create it lazily; the stored menu itself is the entry now.
+  seedMenus(kvEnv, [{ id: VIDEO_MENU_ID, title: "🎬 دروس فيديو", text: "🎬 <b>دروس فيديو</b>\n\nاختر درسًا لمشاهدته:", buttons: [] }]);
+  const calls = await tap(kvEnv, USER, "mb|open|m_video");
   assert.ok(anyText(calls, USER, /لا توجد دروس فيديو/), "the empty video-lessons text must reach the user");
   assert.ok(!attempted(calls).some((m) => Array.isArray(m.reply_markup?.inline_keyboard) && m.reply_markup.inline_keyboard.length === 0),
     "an empty inline keyboard must never be sent");
@@ -131,7 +133,7 @@ test("menu-fix: a menu whose buttons are all admin-only still answers a normal u
   seedMenus(kvEnv, [{ id: VIDEO_MENU_ID, title: "🎬 دروس فيديو", text: "🎬 <b>دروس فيديو</b>\n\nاختر درسًا لمشاهدته:", buttons: [
     { id: "b_1", label: "درس سري", kind: "video", fileId: "file-1", adminOnly: true },
   ] }]);
-  const calls = await say(kvEnv, USER, "/videolessons");
+  const calls = await tap(kvEnv, USER, "mb|open|m_video");
   assert.ok(anyText(calls, USER, /دروس فيديو/), "the menu must answer a normal user even when every button is admin-only");
   assert.ok(!attempted(calls).some((m) => Array.isArray(m.reply_markup?.inline_keyboard) && m.reply_markup.inline_keyboard.length === 0),
     "an empty inline keyboard must never be sent");
