@@ -393,7 +393,7 @@ async function sendMenuMessage(env, chatId, text, replyMarkup) {
 // The learning web app (public/learn-app/index.html) is served as a static
 // asset from this Worker, so opening it costs no Worker request; the lesson
 // content loads from lessons.json and the media from public Drive links.
-const LEARN_APP_URL = "https://coptic-dictionary-bot.abr429701.workers.dev/learn-app/index.html";
+const LEARN_APP_URL = "https://coptic-dictionary-bot.abr429701.workers.dev/learn-app/?v=2";
 async function sendRootMenus(env, chatId, userId = chatId) {
   // Going home leaves the certificate flow and the get-code flow: a later
   // text must search the dictionary again instead of being read as a code,

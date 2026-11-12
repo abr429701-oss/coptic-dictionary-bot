@@ -49,7 +49,7 @@ test("learn-app: index.html loads the data and plays video natively", () => {
   assert.ok(appHtml.includes('fetch("lessons.json")'), "loads the static lesson data");
   assert.ok(appHtml.includes("<video controls playsinline"), "native video element, no Drive player embed");
   assert.ok(appHtml.includes("drive.usercontent.google.com/download"), "videos stream straight from Google, zero Worker requests");
-  assert.ok(!appHtml.includes("/preview"), "no Drive preview player iframe");
+  assert.ok(appHtml.includes("drive.google.com/file/d/"), "Drive preview iframe as fallback when native video errors");
   assert.ok(appHtml.includes("الامتحان الإلكتروني"), "exam button label");
 });
 
@@ -77,5 +77,6 @@ test("learn-app: index.html renders the exam in-app and posts to Google", () => 
   assert.ok(appHtml.includes("إرسال الإجابات"), "exam submit button");
   assert.ok(appHtml.includes('mode: "no-cors"'), "answers POST straight to Google");
   assert.ok(appHtml.includes("هذا السؤال مطلوب."), "required validation like Google Forms");
-  assert.ok(appHtml.includes("^(?:"), "code regex anchored as a full-string match");
+  assert.ok(appHtml.includes("codeMatches"), "code check with a set fallback if the giant regex cannot compile");
+  assert.ok(appHtml.includes("fail closed"), "an unverifiable code blocks the submit instead of passing");
 });

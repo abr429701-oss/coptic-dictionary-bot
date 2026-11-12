@@ -208,5 +208,5 @@ test("user-menu: /app sends a web_app button opening the learning app", async ()
   assert.ok(appMsg, "the /app reply is sent");
   const button = appMsg.reply_markup?.inline_keyboard?.[0]?.[0];
   assert.ok(button?.web_app?.url, "the reply carries a web_app button");
-  assert.equal(button.web_app.url, "https://coptic-dictionary-bot.abr429701.workers.dev/learn-app/index.html");
+  assert.equal(button.web_app.url, "https://coptic-dictionary-bot.abr429701.workers.dev/learn-app/?v=2");
 });
