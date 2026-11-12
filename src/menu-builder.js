@@ -269,7 +269,13 @@ export function addMenu(menus, { title, text = "", parentId = null }) {
   if (list.length >= MAX_MENUS) return { menus: { menus: list }, menu: null };
   const parent = parentId ? list.find((m) => m.id === String(parentId)) : null;
   if (parentId && !parent) return { menus: { menus: list }, menu: null };
-  const menu = { id: makeMenuId(Date.now(), Math.floor(Math.random() * 1296).toString(36)), title: cleanTitle, text: cleanMenuText(text) || cleanTitle, parentId: parent ? parent.id : null, buttons: [] };
+  // The id salt is only 1296 values, so two menus created in the same
+  // millisecond can collide; normalizeMenus then drops the duplicate and the
+  // list comes up short (flaky cap test). Retry with a long salt until the
+  // id is unique in this list.
+  let id = makeMenuId(Date.now(), Math.floor(Math.random() * 1296).toString(36));
+  while (list.some((m) => m.id === id)) id = makeMenuId(Date.now(), Math.random().toString(36).slice(2));
+  const menu = { id, title: cleanTitle, text: cleanMenuText(text) || cleanTitle, parentId: parent ? parent.id : null, buttons: [] };
   return { menus: { menus: [...list, menu] }, menu };
 }
 export function deleteMenu(menus, target) {
@@ -292,7 +298,14 @@ export function addButton(menus, menuId, button) {
   const menu = list.find((m) => m.id === String(menuId));
   if (!menu) return { menus: { menus: list }, button: null };
   if (menu.buttons.length >= MAX_MENU_BUTTONS) return { menus: { menus: list }, button: null };
-  const clean = normalizeButton({ ...button, id: button?.id || makeButtonId(Date.now(), Math.floor(Math.random() * 1296).toString(36)) }, new Set(list.map((m) => m.id)));
+  // Same collision guard as addMenu: the short salt can repeat inside one
+  // millisecond, and normalizeMenus drops duplicate button ids.
+  let newButtonId = button?.id;
+  if (!newButtonId) {
+    newButtonId = makeButtonId(Date.now(), Math.floor(Math.random() * 1296).toString(36));
+    while (menu.buttons.some((b) => b.id === newButtonId)) newButtonId = makeButtonId(Date.now(), Math.random().toString(36).slice(2));
+  }
+  const clean = normalizeButton({ ...button, id: newButtonId }, new Set(list.map((m) => m.id)));
   if (!clean) return { menus: { menus: list }, button: null };
   const next = list.map((m) => (m.id === menu.id ? { ...m, buttons: [...m.buttons, clean] } : m));
   return { menus: { menus: next }, button: clean };

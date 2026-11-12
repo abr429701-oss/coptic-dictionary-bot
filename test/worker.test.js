@@ -99,9 +99,12 @@ test("/stats is not exposed to ordinary users", async () => {
   fakeTelegramApi(calls);
   const response = await worker.fetch(updateRequest({ message: { text: "/stats", chat: { id: 7 } } }), env);
   assert.equal(response.status, 200);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].payload.chat_id, 7);
-  assert.doesNotMatch(calls[0].payload.text, /عدد سجلات القاموس|إحصائيات القاموس/u);
+  // Only the reply to the user counts here: the first message in a fresh
+  // isolate also fires the weekly-digest tick, whose admin notification is
+  // sent from a fire-and-forget background task and may land in `calls` too.
+  const toUser = calls.filter((c) => c.payload?.chat_id === 7);
+  assert.equal(toUser.length, 1);
+  assert.doesNotMatch(toUser[0].payload.text, /عدد سجلات القاموس|إحصائيات القاموس/u);
 });
 
 test("admin dashboard shows statistics and management buttons", async () => {

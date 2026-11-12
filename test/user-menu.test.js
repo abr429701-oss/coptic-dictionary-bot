@@ -71,6 +71,20 @@ async function say(envWithKv, userId, text) {
   await worker.fetch(updateRequest({ message: { text, chat: { id: userId, type: "private" }, from: { id: userId, first_name: "Tester" } } }), envWithKv);
   return calls;
 }
+
+// setMyCommands is sent from a fire-and-forget inBackground() task on /start
+// (in production it rides ctx.waitUntil; in tests there is no ctx, so the
+// call races the assertion). Wait for it instead of assuming it already
+// happened — the assertion itself stays strict.
+async function waitForCall(calls, pred, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const found = calls.find(pred);
+    if (found) return found;
+    if (Date.now() >= deadline) return undefined;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
 const ADMIN = 813894692;
 const sent = (calls) => calls.filter((c) => c.url.endsWith("/sendMessage")).map((c) => c.payload);
 const nowIso = () => new Date().toISOString();
@@ -96,7 +110,7 @@ test("user-menu: hidden user commands are unhidden once, and the side menu lists
   // The admin had hidden /contact and /random before with /hidebutton.
   kvEnv.USERS.store.set("hidden_ui:v1", { command: ["contact", "random", "quiz"], text: [], callback: [] });
   const calls = await say(kvEnv, 61, "/start");
-  const setCommands = calls.find((c) => c.url.endsWith("/setMyCommands") && !c.payload?.scope);
+  const setCommands = await waitForCall(calls, (c) => c.url.endsWith("/setMyCommands") && !c.payload?.scope);
   assert.ok(setCommands, "user setMyCommands must be sent on /start");
   const commands = setCommands.payload?.commands ?? [];
   assert.deepEqual(commands.map((c) => c.command), SIX, "the user menu lists exactly the six chosen commands, in order");

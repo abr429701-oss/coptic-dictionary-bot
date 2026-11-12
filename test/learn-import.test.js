@@ -194,6 +194,20 @@ async function sendUpdateMsg(kvEnv, update, failDriveIds = new Set()) {
   return calls;
 }
 const sayMsg = (kvEnv, userId, text, failDriveIds) => sendUpdateMsg(kvEnv, { message: { text, chat: { id: userId, type: "private" }, from: { id: userId } } }, failDriveIds);
+
+// setMyCommands is sent from a fire-and-forget inBackground() task on /start
+// (in production it rides ctx.waitUntil; in tests there is no ctx, so the
+// call races the assertion). Wait for it instead of assuming it already
+// happened — the assertion itself stays strict.
+async function waitForCall(calls, pred, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const found = calls.find(pred);
+    if (found) return found;
+    if (Date.now() >= deadline) return undefined;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
 const tapCallback = (kvEnv, userId, data) => sendUpdateMsg(kvEnv, { callback_query: { id: "cb1", data, from: { id: userId }, message: { message_id: 5, chat: { id: userId, type: "private" }, text: "x" } } });
 const messageTexts = (calls) => calls.filter((c) => c.method === "sendMessage").map((c) => String(c.payload?.text ?? ""));
 const anyMessage = (calls, re) => messageTexts(calls).some((t) => re.test(t));
@@ -743,13 +757,13 @@ test("learn-import: 9 removed commands no longer respond or list", async () => {
   // The bot command list (setMyCommands on /start) must not contain them.
   const removed = ["theme", "transliterate", "copticnum", "deleteme", "largefont", "settings", "rate", "achievements", "etymology"];
   let calls = await sayMsg(kvEnv, 57, "/start");
-  let setCommands = calls.find((c) => c.method === "setMyCommands" && !c.payload?.scope);
+  let setCommands = await waitForCall(calls, (c) => c.method === "setMyCommands" && !c.payload?.scope);
   assert.ok(setCommands, "user setMyCommands must be sent on /start");
   let names = (setCommands.payload?.commands ?? []).map((c) => c.command);
   for (const name of removed) assert.ok(!names.includes(name), `${name} must not be listed`);
   assert.deepEqual(names, ["start", "keyboard", "learn", "menu", "contact", "random"], "the user menu lists exactly the six chosen commands");
   calls = await sayMsg(kvEnv, ADMIN, "/start");
-  setCommands = calls.find((c) => c.method === "setMyCommands" && c.payload?.scope);
+  setCommands = await waitForCall(calls, (c) => c.method === "setMyCommands" && c.payload?.scope);
   assert.ok(setCommands, "admin setMyCommands must be sent on /start");
   names = (setCommands.payload?.commands ?? []).map((c) => c.command);
   for (const name of removed) assert.ok(!names.includes(name), `${name} must not be listed for admins either`);
