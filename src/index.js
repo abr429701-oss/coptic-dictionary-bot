@@ -644,9 +644,10 @@ async function handleCertCode(env, chatId, code, level) {
 // "الحصول على الرقم الكودي": the in-bot version of the Apps Script web
 // form (see src/getcode.js). Two steps — name, then phone — kept in the
 // user record (getcodeStep/getcodeName) and read by the hook below. The
-// storage happens in the macro, exactly per the file's logic; the bot
-// only shows the returned code (plus a ready WhatsApp link, which is how
-// the admin verifies the student completed the step).
+// storage happens in apps-script/Code.gs (generateAndStoreCode, copied
+// verbatim from the registration project); the bot only shows the
+// returned code (plus a ready WhatsApp link, which is how the admin
+// verifies the student completed the step).
 async function beginGetCodeFlow(env, chatId, userId) {
   const user = await getUser(env, userId);
   await saveUser(env, userId, { ...(user ?? {}), certAwaiting: undefined, getcodeStep: "name", getcodeName: undefined });
@@ -672,16 +673,21 @@ async function handleGetCodeStep(env, chatId, userId, text, user) {
   }
   const name = String(user?.getcodeName ?? "").trim();
   await saveUser(env, userId, { ...(user ?? {}), getcodeStep: undefined, getcodeName: undefined });
-  const result = await getCodeFromMacro(name, phone);
+  // The code feature lives in apps-script/Code.gs (generateAndStoreCode);
+  // the bot calls the bot's own Apps Script web app URL (driveConfig —
+  // the /setdrive URL or the APPS_SCRIPT_URL secret). Without a linked
+  // URL there is nothing to call.
+  const drive = await driveConfig(env);
+  const result = await getCodeFromMacro(name, phone, drive?.url);
   if (result.code) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: buildGetCodeReply(name, result.code), disable_web_page_preview: true });
     return;
   }
-  // The macro did not return a usable code (verified live 2026-11-09:
-  // its doPost returns a plain object, which a web app cannot return, so
-  // the bot gets an error page and nothing is stored). Fall back to the
-  // registration instructions — the web form link — so the student is
-  // never stuck; the macro needs its one-line ContentService fix first.
+  // Apps Script did not return a usable code (no URL linked, or the
+  // deployment is outdated and answers HTML instead of JSON). Fall back
+  // to the registration instructions — the web form link — so the student
+  // is never stuck; deploy a new version of Code.gs (Deploy → Manage
+  // deployments → New version) and the direct flow works again.
   await telegram(env, "sendMessage", { chat_id: chatId, text: `⚠️ تعذّر إحضار الرقم الكودي مباشرة من البوت حاليًا.\n\n${LEARN_GET_CODE_TEXT}`, disable_web_page_preview: true });
 }
 async function runMenuCommand(env, chatId, userId, command) {

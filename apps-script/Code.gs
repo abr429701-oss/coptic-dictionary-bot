@@ -34,6 +34,12 @@ function doGet() { return json_({ ok: true, service: "coptic-voice-archive" }); 
 function doPost(e) {
   try {
     const body = JSON.parse((e && e.postData && e.postData.contents) || "{}");
+    // "الحصول على الرقم الكودي": a POST of {name, phone} with no action is
+    // the registration project's contract — see generateAndStoreCode below.
+    // It has no action field, so it never collides with the action-routed
+    // API; every other body keeps the routing below unchanged. (Both fields
+    // must be non-empty, so a stray body can never write a bad row.)
+    if (!body.action && body.name && body.phone) return json_(generateAndStoreCode(body.name, body.phone));
     if (body.action === "ping") return json_(ping_());
     if (body.action === "sync_github_audio") return json_(syncGithubAudio_(body));
     if (body.action === "dictionary_get" || body.action === "dictionary_update" || body.action === "dictionary_append" || body.action === "dictionary_delete" || body.action === "dictionary_append_batch") {
@@ -72,6 +78,67 @@ function doPost(e) {
 }
 function json_(value) { return ContentService.createTextOutput(JSON.stringify(value)).setMimeType(ContentService.MimeType.JSON); }
 
+// ---------------------------------------------------------------------------
+// "الحصول على الرقم الكودي" — the student registration code.
+//
+// generateAndStoreCode is copied VERBATIM from the final registration
+// project («المشروع النهائي للرقم الكودي», script
+// 1uv3D_D4ds5fyXf0SszGGHh9tMmXM_4WSfkPdbdkDq3NqFLZIXET5xb0I,
+// file «الرمز.gs»): same spreadsheet («تجميع الرقم الكودي»,
+// 1Cts5whXGJTaXTvjlbR7Mt31rQE5hPzkQavslHhYTxgI), same "code" sheet,
+// same phone lookup in column C, same code (1234567 + the last 8 digits
+// of the phone), same append of [code, name, phone] to columns A/B/C
+// when the phone is new, same return values and messages. Nothing about
+// the function or the storage was changed.
+//
+// (An earlier draft copied the same function from the standalone
+// registration project project-1SY1UlKu.zip instead — a different
+// spreadsheet, 1w9bJFNZjyDf6NHl5b20fEN3Gh72vA4ZoF48sdh6FYRk, with no
+// "code" tab, and a different code, 123456 + last 4 digits. That
+// variant was wrong and was never the live system; the final project
+// above is the live one — verified 2026-11-12: its "code" sheet holds
+// 1,997 rows.)
+//
+// The ONLY difference from that project's doPost is the reply: the
+// standalone doPost returned the plain object, which a web app cannot
+// return ("The script completed but the returned value is not a supported
+// return type" — verified live 2026-11-09, and nothing was stored). Here
+// the result goes through this file's own json_() helper, like every other
+// reply, so the bot's POST gets real JSON and the code is stored.
+// ---------------------------------------------------------------------------
+function generateAndStoreCode(userName, phoneNumber) {
+  // فتح الشيت بواسطة الرابط
+  const sheet = SpreadsheetApp.openById('1Cts5whXGJTaXTvjlbR7Mt31rQE5hPzkQavslHhYTxgI');
+  const worksheet = sheet.getSheetByName('code');
+  // التأكد من عدم وجود رقم الهاتف في العمود
+  const lastRow = worksheet.getLastRow();
+  const data = worksheet.getRange(2, 3, lastRow - 1, 1).getValues(); // الحصول على أرقام الهواتف
+  // التحقق إذا كان الرقم موجود بالفعل
+  for (let i = 0; i < data.length; i++) {
+    if (data[i][0] == phoneNumber) {
+      // الرقم بالفعل، قم بإنشاء الكود وإظهاره دون تخزينه
+      const lastEightDigits = phoneNumber.slice(-8);
+      const baseCode = 1234567;
+      const generatedCode = parseInt(lastEightDigits) + baseCode;
+      return {
+        success: true,
+        code: generatedCode, // أظهر الكود حتى لو كان موجودًا بالفعل
+        message: "تم العثور على الرقم الكودي الخاص بك."
+      };
+    }
+  }
+  // إنشاء الرقم الكودي وتخزين البيانات
+  const lastEightDigits = phoneNumber.slice(-8);
+  const baseCode = 1234567;
+  const generatedCode = parseInt(lastEightDigits) + baseCode;
+  // إضافة البيانات إلى الجدول
+  worksheet.appendRow([generatedCode, userName, phoneNumber]); // تخزين الرقم الكودي في العمود الأول، الاسم في العمود الثاني ورقم الهاتف في العمود الثالث
+  return {
+    success: true,
+    code: generatedCode,
+    message: "تم إنشاء الرقم الكودي وتخزين البيانات بنجاح"
+  };
+}
 function getFolder_() {
   if (CONFIG.FOLDER_ID) return DriveApp.getFolderById(CONFIG.FOLDER_ID);
   const props = PropertiesService.getScriptProperties();
