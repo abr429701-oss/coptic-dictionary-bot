@@ -126,6 +126,18 @@ test("learn-app: index.html renders the exam in-app and posts to Google", () => 
   // dedicated button under the video — not only from the play event.
   assert.ok(appHtml.includes("ملء الشاشة"), "fullscreen button under the lesson video");
   assert.ok(appHtml.includes("data-fs"), "fullscreen button is wired");
+  // The button sits UNDER the video frame (outside .videoWrap): the
+  // video is absolutely positioned and covers the whole wrap, so a
+  // button inside it is painted over and can never be tapped — after
+  // closing cinema there was no way back in (2026-11-13).
+  assert.ok(appHtml.includes("</video></div>"), "videoWrap closes before the fullscreen button");
+  // Cinema bottom bar (2026-11-13): the phone's own bottom buttons and
+  // the video's native bottom controls are unreachable while the
+  // overlay is open, so the bar — inside the overlay, above the
+  // phone's button area — carries back-to-lesson and play/pause.
+  assert.ok(appHtml.includes("cinemaBar"), "cinema bottom control bar");
+  assert.ok(appHtml.includes("رجوع للدرس"), "cinema bar back button");
+  assert.ok(!appHtml.includes("cinemaHint"), "the floating hint is gone — the bar replaces it");
   // Certificate in the app (2026-11-13): pick the level, type the code,
   // the Worker looks it up and returns the certificate image.
   assert.ok(appHtml.includes("showCert"), "certificate screen in the app");

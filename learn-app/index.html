@@ -191,21 +191,31 @@
      The overlay stops short of the bottom of the screen (48px + the
      safe-area inset): without the gap the video and its controls sit on
      top of the phone's bottom buttons and the user cannot reach them
-     (back / home / gestures) while the video is open. */
+     (back / home / gestures) while the video is open. The video takes
+     the free space and a control bar sits at the bottom of the overlay —
+     ABOVE the phone's button area — with big tappable buttons that
+     replace the unreachable bottom controls: back to the lesson and
+     play/pause. */
   .cinema {
     position: fixed; inset: 0 0 calc(env(safe-area-inset-bottom, 0px) + 48px) 0; z-index: 1000; background: #000;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
   }
-  .cinema video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+  .cinema video { width: 100%; flex: 1 1 auto; min-height: 0; object-fit: contain; background: #000; }
   .cinemaClose {
     position: absolute; top: 14px; inset-inline-end: 14px; z-index: 1001;
     width: 44px; height: 44px; border-radius: 50%; border: 0; cursor: pointer;
     background: rgba(255, 255, 255, .18); color: #fff; font-size: 22px; font-weight: 700;
   }
-  .cinemaHint {
-    position: absolute; bottom: 18px; left: 0; right: 0; z-index: 1001;
-    text-align: center; color: rgba(255, 255, 255, .75); font-size: 13px; pointer-events: none;
+  .cinemaBar {
+    flex: 0 0 auto; width: 100%; display: flex; gap: 10px; justify-content: center;
+    padding: 12px 16px; background: rgba(255, 255, 255, .06);
   }
+  .cinemaBar button {
+    flex: 1; max-width: 220px; padding: 13px 10px; font-size: 15px; font-weight: 700;
+    border-radius: 12px; border: 1px solid rgba(255, 255, 255, .35); cursor: pointer;
+    background: rgba(255, 255, 255, .14); color: #fff;
+  }
+  .cinemaBar button:active { transform: scale(.98); }
   .linkBtn {
     display: block; margin: 14px auto 0; padding: 0; border: 0; background: none;
     color: var(--teal); font-size: 14px; font-weight: 700; cursor: pointer; text-decoration: underline;
@@ -485,9 +495,13 @@
   function renderItem(item, idx) {
     var num = arabicNum(idx + 1) + " · ";
     if (item.kind === "video") {
+      // The fullscreen button sits BELOW the video frame, not inside it:
+      // the video is absolutely positioned and covers the whole wrap, so
+      // a button inside the wrap is painted over and can never be tapped
+      // (2026-11-13: after closing cinema there was no way back in).
       return "<div class='item'><div class='lbl'>" + num + esc(item.label || "فيديو الدرس") + "</div>" +
-        "<div class='videoWrap'><video controls preload='metadata' src='" + esc(driveVideo(item.driveId)) + "'></video>" +
-        "<button class='fsBtn' type='button' data-fs>⛶ ملء الشاشة</button></div></div>";
+        "<div class='videoWrap'><video controls preload='metadata' src='" + esc(driveVideo(item.driveId)) + "'></video></div>" +
+        "<button class='fsBtn' type='button' data-fs>⛶ ملء الشاشة</button></div>";
     }
     if (item.kind === "photo") {
       return "<div class='item'><div class='lbl'>" + num + esc(item.label || "صورة") + "</div>" +
@@ -524,6 +538,11 @@
   // taking the whole screen) is requested too when the API exists.
   var cinemaVideo = null;
   var cinemaHome = null; // {parent, next} — where the video goes back to
+  var cinemaPlayBtn = null; // the play/pause button in the current overlay
+  function syncCinemaPlayBtn() {
+    if (!cinemaPlayBtn || !cinemaVideo) return;
+    cinemaPlayBtn.textContent = cinemaVideo.paused ? "▶️ تشغيل" : "⏸ إيقاف";
+  }
   function openCinema(v) {
     if (!v || cinemaVideo === v) return;
     closeCinema(true); // close any other video's overlay first
@@ -539,10 +558,35 @@
     close.addEventListener("click", function () { closeCinema(); });
     overlay.appendChild(close);
     overlay.appendChild(v);
-    var hint = document.createElement("div");
-    hint.className = "cinemaHint";
-    hint.textContent = "للرجوع للدرس اضغط ✕ — ولفّ التليفون لو عايز الفيديو بالعرض";
-    overlay.appendChild(hint);
+    // Bottom control bar (2026-11-13): the phone's own bottom buttons
+    // and the video's native bottom controls are unreachable while the
+    // overlay is open, so the bar — inside the overlay, above the
+    // phone's button area — carries big tappable buttons instead: back
+    // to the lesson and play/pause. The play/pause label follows the
+    // video itself, so it stays right even when the native controls
+    // are used; the listeners attach once per video node.
+    var bar = document.createElement("div");
+    bar.className = "cinemaBar";
+    var back = document.createElement("button");
+    back.type = "button";
+    back.textContent = "🔙 رجوع للدرس";
+    back.addEventListener("click", function () { closeCinema(); });
+    bar.appendChild(back);
+    var play = document.createElement("button");
+    play.type = "button";
+    play.textContent = "⏸ إيقاف";
+    play.addEventListener("click", function () {
+      if (v.paused) { v.play(); } else { v.pause(); }
+      syncCinemaPlayBtn();
+    });
+    bar.appendChild(play);
+    overlay.appendChild(bar);
+    cinemaPlayBtn = play;
+    if (!v._cinemaSync) {
+      v._cinemaSync = true;
+      v.addEventListener("play", syncCinemaPlayBtn);
+      v.addEventListener("pause", syncCinemaPlayBtn);
+    }
     document.body.appendChild(overlay);
     if (tg && tg.requestFullscreen) { try { tg.requestFullscreen(); } catch (e) {} }
     try { var p = v.play(); if (p && p.catch) p.catch(function () {}); } catch (e) {}
@@ -555,6 +599,7 @@
     overlay.remove();
     cinemaVideo = null;
     cinemaHome = null;
+    cinemaPlayBtn = null;
     if (!silent && tg && tg.exitFullscreen) { try { tg.exitFullscreen(); } catch (e) {} }
   }
 
@@ -586,8 +631,10 @@
     });
     view.querySelectorAll("[data-fs]").forEach(function (btn) {
       btn.addEventListener("click", function () {
-        var wrap = btn.closest(".videoWrap");
-        var v = wrap ? wrap.querySelector("video") : null;
+        // The button sits under the video frame (outside .videoWrap),
+        // so the video is found through the shared .item ancestor.
+        var item = btn.closest(".item");
+        var v = item ? item.querySelector("video") : null;
         if (v) openCinema(v);
       });
     });
