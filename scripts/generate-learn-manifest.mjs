@@ -78,12 +78,20 @@ function checkDrive(meta, id, expectedMime, where) {
   }
 }
 
-// Build the LEARN_LEVELS structure from plain `values` rows (header row
-// first). Pure: the same rows always build the same levels.
+// Build the LEARN_LEVELS structure from plain `values` rows. Pure: the same
+// rows always build the same levels.
+// The header row exists in a Sheets `values` response but NOT in a gviz
+// response (gviz puts the labels in table.cols and returns data rows only).
+// Blindly skipping the first row once dropped the first LESSON (the intro
+// video, 2026-11-13): detect the header instead — it is the row whose level
+// cell is not 1 or 2 and whose title cell names the column.
 export function buildLearnLevels(rows, meta = null) {
+  const first = rows[0] ?? [];
+  const hasHeader = !["1", "2"].includes(cell(first, 0)) && /اسم/.test(cell(first, 1));
+  const dataRows = hasHeader ? rows.slice(1) : rows;
   const levels = [];
   for (const levelNum of ["1", "2"]) {
-    const levelRows = rows.slice(1).filter((row) => cell(row, 0) === levelNum);
+    const levelRows = dataRows.filter((row) => cell(row, 0) === levelNum);
     const lessons = levelRows.map((row, index) => {
       const n = index + 1;
       const levelTag = `l${levelNum}`;

@@ -17,6 +17,18 @@ export const LEARN_LEVELS = [
     "lessons": [
       {
         "id": "m_learn_l1_01",
+        "title": "فيديو تعريفي عن اللغة القبطية",
+        "items": [
+          {
+            "key": "video",
+            "kind": "video",
+            "driveId": "1ZrWw4d-UUBGcWZyFiqc-pRQcWvQH3fE8",
+            "label": "🎬 فيديو الدرس"
+          }
+        ]
+      },
+      {
+        "id": "m_learn_l1_02",
         "title": "مقدمة عن حروف اللغة القبطية",
         "items": [
           {
@@ -28,7 +40,7 @@ export const LEARN_LEVELS = [
         ]
       },
       {
-        "id": "m_learn_l1_02",
+        "id": "m_learn_l1_03",
         "title": "الدرس الاول",
         "items": [
           {
@@ -52,7 +64,7 @@ export const LEARN_LEVELS = [
         ]
       },
       {
-        "id": "m_learn_l1_03",
+        "id": "m_learn_l1_04",
         "title": "الدرس الثاني",
         "items": [
           {
@@ -76,7 +88,7 @@ export const LEARN_LEVELS = [
         ]
       },
       {
-        "id": "m_learn_l1_04",
+        "id": "m_learn_l1_05",
         "title": "فيديو المراجعة الاولى",
         "items": [
           {
@@ -94,7 +106,7 @@ export const LEARN_LEVELS = [
         ]
       },
       {
-        "id": "m_learn_l1_05",
+        "id": "m_learn_l1_06",
         "title": "الدرس الثالث",
         "items": [
           {
@@ -118,7 +130,7 @@ export const LEARN_LEVELS = [
         ]
       },
       {
-        "id": "m_learn_l1_06",
+        "id": "m_learn_l1_07",
         "title": "الدرس الرابع",
         "items": [
           {
@@ -142,7 +154,7 @@ export const LEARN_LEVELS = [
         ]
       },
       {
-        "id": "m_learn_l1_07",
+        "id": "m_learn_l1_08",
         "title": "فيديو المراجعة الثانية",
         "items": [
           {
@@ -160,7 +172,7 @@ export const LEARN_LEVELS = [
         ]
       },
       {
-        "id": "m_learn_l1_08",
+        "id": "m_learn_l1_09",
         "title": "الدرس الخامس",
         "items": [
           {
@@ -184,7 +196,7 @@ export const LEARN_LEVELS = [
         ]
       },
       {
-        "id": "m_learn_l1_09",
+        "id": "m_learn_l1_10",
         "title": "الدرس السادس",
         "items": [
           {
@@ -208,7 +220,7 @@ export const LEARN_LEVELS = [
         ]
       },
       {
-        "id": "m_learn_l1_10",
+        "id": "m_learn_l1_11",
         "title": "الدرس السابع",
         "items": [
           {
@@ -232,7 +244,7 @@ export const LEARN_LEVELS = [
         ]
       },
       {
-        "id": "m_learn_l1_11",
+        "id": "m_learn_l1_12",
         "title": "الدرس الثامن",
         "items": [
           {
@@ -256,7 +268,7 @@ export const LEARN_LEVELS = [
         ]
       },
       {
-        "id": "m_learn_l1_12",
+        "id": "m_learn_l1_13",
         "title": "الدرس التاسع",
         "items": [
           {
@@ -280,7 +292,7 @@ export const LEARN_LEVELS = [
         ]
       },
       {
-        "id": "m_learn_l1_13",
+        "id": "m_learn_l1_14",
         "title": "المراجعة النهائية الأولى",
         "items": [
           {
@@ -298,7 +310,7 @@ export const LEARN_LEVELS = [
         ]
       },
       {
-        "id": "m_learn_l1_14",
+        "id": "m_learn_l1_15",
         "title": "المراجعة النهائية الثانية",
         "items": [
           {
@@ -316,7 +328,7 @@ export const LEARN_LEVELS = [
         ]
       },
       {
-        "id": "m_learn_l1_15",
+        "id": "m_learn_l1_16",
         "title": "المراجعة النهائية الثالثة",
         "items": [
           {
@@ -334,7 +346,7 @@ export const LEARN_LEVELS = [
         ]
       },
       {
-        "id": "m_learn_l1_16",
+        "id": "m_learn_l1_17",
         "title": "المراجعة النهائية الرابعة",
         "items": [
           {

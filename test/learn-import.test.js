@@ -33,7 +33,7 @@ import {
 // ---------------------------------------------------------------------------
 // Bulk "learn" lessons importer (2026-11-06, v2).
 //
-// Frozen manifest (26 lessons from the learn tab) -> Drive download once ->
+// Frozen manifest (27 lessons from the learn tab) -> Drive download once ->
 // Telegram upload once (file_id stored) -> two level menus. ONE /importlearn
 // run imports EVERYTHING in the background and reports completion; each
 // lesson has ONE button (kind "lesson") and one tap sends the whole lesson,
@@ -223,16 +223,16 @@ const fullState = () => {
 // Manifest (frozen snapshot of the learn tab)
 // ---------------------------------------------------------------------------
 
-test("learn-import: manifest has 26 lessons with the right items, H ignored", () => {
+test("learn-import: manifest has 27 lessons with the right items, H ignored", () => {
   assert.equal(LEARN_MANIFEST_VERSION, 1);
   assert.equal(LEARN_LEVELS.length, 2);
   assert.equal(LEARN_LEVELS[0].id, "m_learn_l1");
   assert.equal(LEARN_LEVELS[0].title, "المستوى الأول");
-  assert.equal(LEARN_LEVELS[0].lessons.length, 16);
+  assert.equal(LEARN_LEVELS[0].lessons.length, 17);
   assert.equal(LEARN_LEVELS[1].id, "m_learn_l2");
   assert.equal(LEARN_LEVELS[1].lessons.length, 10);
   const items = LEARN_LEVELS.flatMap((level) => level.lessons.flatMap((lesson) => lesson.items));
-  assert.equal(items.filter((i) => i.kind === "video").length, 26);
+  assert.equal(items.filter((i) => i.kind === "video").length, 27);
   assert.equal(items.filter((i) => i.kind === "photo").length, 23);
   assert.equal(items.filter((i) => i.kind === "url").length, 12);
   assert.equal(items.filter((i) => i.kind === "text").length, 4);
@@ -268,10 +268,10 @@ test("learn-import: manifest has 26 lessons with the right items, H ignored", ()
 
 test("learn-import: upload items and deterministic ids", () => {
   const items = learnUploadItems();
-  assert.equal(items.length, 49);
-  assert.equal(items.filter((i) => i.kind === "video").length, 26);
+  assert.equal(items.length, 50);
+  assert.equal(items.filter((i) => i.kind === "video").length, 27);
   assert.equal(items.filter((i) => i.kind === "photo").length, 23);
-  assert.equal(new Set(items.map((i) => i.key)).size, 49);
+  assert.equal(new Set(items.map((i) => i.key)).size, 50);
   assert.equal(learnItemKey("m_learn_l1_03", "video"), "m_learn_l1_03:video");
   assert.equal(learnLessonButtonId("m_learn_l1_03"), "b_learn_l1_03");
   const allIds = [
@@ -309,18 +309,18 @@ test("learn-import: state normalizes garbage and pending returns everything not 
   // Pending is ALL not-done items (failed first, then the rest) — one run
   // imports everything, there is no small batch anymore.
   const pending = learnPendingItems(state, items);
-  assert.equal(pending.length, 48);
+  assert.equal(pending.length, 49);
   assert.equal(pending[0].key, items[1].key);
   assert.ok(pending.some((p) => p.key === items[2].key));
-  assert.ok(pending.some((p) => p.key === items[48].key));
+  assert.ok(pending.some((p) => p.key === items[49].key));
   const progress = importProgress(state, items);
-  assert.deepEqual(progress, { total: 49, done: 1, failed: 1, pending: 47, complete: false });
+  assert.deepEqual(progress, { total: 50, done: 1, failed: 1, pending: 48, complete: false });
   assert.equal(parseImportLearnArg("/importlearn"), "run");
   assert.equal(parseImportLearnArg("/importlearn status"), "status");
   assert.equal(parseImportLearnArg("/importlearn reset"), "reset");
   assert.equal(parseImportLearnArg("/importlearn blah"), "usage");
-  assert.match(learnProgressText(progress), /1\/49/);
-  assert.match(learnImportStartText(progress), /متبقٍ 48 ملف من 49/);
+  assert.match(learnProgressText(progress), /1\/50/);
+  assert.match(learnImportStartText(progress), /متبقٍ 49 ملف من 50/);
 });
 
 test("learn-import: reverify re-uploads only driveId mismatches", () => {
@@ -404,7 +404,7 @@ test("learn-import: scheduled tick does nothing when the manifest is unchanged",
 test("learn-import: scheduled tick with an untrusted state re-imports everything once", async () => {
   const calls = [];
   const kvEnv = { ...env, USERS: fakeKv() };
-  // The old production state: 49/49 done, but no driveIds, no hash and no
+  // The old production state: 50/50 done, but no driveIds, no hash and no
   // stateVersion — its file_ids cannot be matched to Drive files, and the
   // lesson ids may have shifted since the import (a deleted lesson
   // renumbers the ones after it). Trusting its keys would send the wrong
@@ -418,7 +418,7 @@ test("learn-import: scheduled tick with an untrusted state re-imports everything
     makeMessageStub(calls);
     await worker.scheduled({ cron: "*/5 * * * *", scheduledTime: Date.now() }, kvEnv);
     const drives = calls.filter((c) => c.kind === "drive");
-    assert.equal(drives.length, 49);
+    assert.equal(drives.length, 50);
     const stored = storedState(kvEnv);
     assert.equal(stored.stateVersion, 2);
     assert.equal(stored.manifestHash, learnManifestHash(LEARN_LEVELS));
@@ -478,7 +478,7 @@ test("learn-import: empty state builds no menus, partial state builds only compl
   assert.deepEqual(menus, []);
   assert.deepEqual(counts, { levels: 0, lessons: 0, buttons: 0 });
 
-  // Partial state: the first 10 upload items done (L1 lessons 01-05 complete,
+  // Partial state: the first 10 upload items done (L1 lessons 01-06 complete,
   // each with all its items ready). Every built lesson has exactly ONE
   // button (kind "lesson", label = lesson name); there are no lesson
   // submenus anymore.
@@ -486,7 +486,7 @@ test("learn-import: empty state builds no menus, partial state builds only compl
   const items = learnUploadItems();
   for (const item of items.slice(0, 10)) partial.items[item.key] = { status: "done", fileId: `FID_${item.key}` };
   ({ menus, counts } = buildLearnMenus(LEARN_LEVELS, partial));
-  assert.deepEqual(counts, { levels: 1, lessons: 5, buttons: 10 });
+  assert.deepEqual(counts, { levels: 1, lessons: 6, buttons: 11 });
   assert.equal(menus.length, 1);
   assert.equal(menus[0].id, "m_learn_l1");
   assert.equal(menus[0].parentId, null);
@@ -502,8 +502,8 @@ test("learn-import: empty state builds no menus, partial state builds only compl
     assert.equal(btn.label, lesson.title);
     assert.equal(btn.id, learnLessonButtonId(lesson.id));
   }
-  // Lesson 06 (L1 lesson 6) is not complete yet, so it must not appear.
-  assert.ok(!menus[0].buttons.some((b) => b.lessonId === "m_learn_l1_06"));
+  // Lesson 07 (L1 lesson 7) is not complete yet, so it must not appear.
+  assert.ok(!menus[0].buttons.some((b) => b.lessonId === "m_learn_l1_07"));
   // No submenu anywhere: level menus are the only learn menus.
   assert.ok(menus.every((m) => m.parentId === null));
 });
@@ -513,14 +513,14 @@ test("learn-import: full state builds exactly 2 menus, rebuild is identical (no 
   const second = buildLearnMenus(LEARN_LEVELS, fullState());
   assert.deepEqual(first, second);
   assert.equal(first.menus.length, 2);
-  assert.deepEqual(first.counts, { levels: 2, lessons: 26, buttons: 35 });
+  assert.deepEqual(first.counts, { levels: 2, lessons: 27, buttons: 36 });
   const l1 = first.menus.find((m) => m.id === "m_learn_l1");
   const l2 = first.menus.find((m) => m.id === "m_learn_l2");
-  assert.equal(l1.buttons.length, 21);
+  assert.equal(l1.buttons.length, 22);
   assert.equal(l2.buttons.length, 14);
   const buttons = first.menus.flatMap((m) => m.buttons);
   const lessonButtons = buttons.filter((b) => b.kind === "lesson");
-  assert.equal(lessonButtons.length, 26);
+  assert.equal(lessonButtons.length, 27);
   assert.ok(lessonButtons.every((b) => /^m_learn_l[12]_\d{2}$/u.test(b.lessonId)), "every lesson button names its lesson");
   assert.deepEqual(lessonButtons.map((b) => b.label), LEARN_LEVELS.flatMap((l) => l.lessons.map((x) => x.title)));
   // Level 1 only, at the very top of the menu (above every lesson
@@ -561,9 +561,9 @@ test("learn-import: full state builds exactly 2 menus, rebuild is identical (no 
     assert.equal(home.id, `b_${levelMenu.id}_home`);
   }
   // One lesson button, verbatim from the manifest.
-  const lesson3 = l1.buttons.find((b) => b.lessonId === "m_learn_l1_02");
+  const lesson3 = l1.buttons.find((b) => b.lessonId === "m_learn_l1_03");
   assert.equal(lesson3.label, "الدرس الاول");
-  assert.equal(lesson3.id, "b_learn_l1_02");
+  assert.equal(lesson3.id, "b_learn_l1_03");
   const lessonL2 = l2.buttons.find((b) => b.lessonId === "m_learn_l2_06");
   assert.equal(lessonL2.label, "الدرس السادس");
   // No lesson submenus: no menu id ends in _NN and no menu has a parent.
@@ -573,14 +573,14 @@ test("learn-import: full state builds exactly 2 menus, rebuild is identical (no 
 
 test("learn-import: send plan is the whole lesson in order, or null when not ready", () => {
   const state = fullState();
-  const l1 = findLearnLesson("m_learn_l1_02");
+  const l1 = findLearnLesson("m_learn_l1_03");
   assert.equal(l1.title, "الدرس الاول");
   // L1 order: video → oral photo → exam link.
   assert.deepEqual(learnLessonSendPlan(l1, state).map((s) => s.kind), ["video", "photo", "url"]);
   const [video, photo, exam] = learnLessonSendPlan(l1, state);
-  assert.equal(video.fileId, `F_${learnItemKey("m_learn_l1_02", "video")}`);
+  assert.equal(video.fileId, `F_${learnItemKey("m_learn_l1_03", "video")}`);
   assert.equal(video.caption, "الدرس الاول");
-  assert.equal(photo.fileId, `F_${learnItemKey("m_learn_l1_02", "oral")}`);
+  assert.equal(photo.fileId, `F_${learnItemKey("m_learn_l1_03", "oral")}`);
   assert.equal(exam.label, "📝 الامتحان الإلكتروني");
   assert.match(exam.url, /^https:\/\/docs\.google\.com\/forms\//u);
   // L2 order: video → summary photo → exercise text → exam link.
@@ -589,7 +589,7 @@ test("learn-import: send plan is the whole lesson in order, or null when not rea
   assert.match(learnLessonSendPlan(l2, state)[2].text, /التدريب الثالث/u);
   // A lesson with a missing file_id has no plan (button must not exist).
   const partial = emptyImportState();
-  partial.items[learnItemKey("m_learn_l1_02", "video")] = { status: "done", fileId: "F1" };
+  partial.items[learnItemKey("m_learn_l1_03", "video")] = { status: "done", fileId: "F1" };
   assert.equal(learnLessonSendPlan(l1, partial), null);
   assert.equal(findLearnLesson("m_learn_nope"), null);
   assert.equal(learnLessonSendPlan(null, state), null);
@@ -668,26 +668,26 @@ test("learn-import: /importlearn status, one run imports everything, non-admin r
   const kvEnv = { ...env, USERS: fakeKv() };
   seedMenus(kvEnv);
   let calls = await sayMsg(kvEnv, ADMIN, "/importlearn status");
-  assert.ok(anyMessage(calls, /0\/49/), "status must report 0/49 on a fresh import");
+  assert.ok(anyMessage(calls, /0\/50/), "status must report 0/50 on a fresh import");
   assert.equal(calls.filter((c) => c.method === "sendVideo").length, 0);
 
-  // One run imports ALL 49 files (no batching, no re-runs): the admin gets
+  // One run imports ALL 50 files (no batching, no re-runs): the admin gets
   // a "started" message first, then the completion message in the same run
   // (tests have no Workers ctx, so the run is awaited inline).
   calls = await sayMsg(kvEnv, ADMIN, "/importlearn");
   assert.ok(anyMessage(calls, /جارٍ استيراد كل الدروس/), "run must answer at once that the import started");
-  assert.ok(anyMessage(calls, /49\/49/), "one run must reach 49/49");
+  assert.ok(anyMessage(calls, /50\/50/), "one run must reach 50/50");
   assert.ok(anyMessage(calls, /اكتمل الاستيراد/), "completion line must be sent");
-  assert.equal(calls.filter((c) => c.method === "sendVideo").length, 26);
+  assert.equal(calls.filter((c) => c.method === "sendVideo").length, 27);
   assert.equal(calls.filter((c) => c.method === "sendPhoto").length, 23);
-  assert.equal(calls.filter((c) => c.method === "deleteMessage").length, 49);
+  assert.equal(calls.filter((c) => c.method === "deleteMessage").length, 50);
   const menus = storedMenus(kvEnv);
   assert.ok(menus.some((m) => m.id === VIDEO_MENU_ID), "m_video must be preserved");
   assert.ok(menus.some((m) => m.id === "m_custom"), "custom menus must be preserved");
   assert.equal(menus.filter((m) => String(m.id).startsWith("m_learn_")).length, 2, "exactly the two level menus");
   const l1 = menus.find((m) => m.id === "m_learn_l1");
   const l2 = menus.find((m) => m.id === "m_learn_l2");
-  assert.equal(l1.buttons.length, 21);
+  assert.equal(l1.buttons.length, 22);
   assert.equal(l2.buttons.length, 14);
   assert.ok(l1.buttons.filter((b) => b.kind === "lesson").every((b) => b.lessonId), "level buttons are single lesson buttons");
   assert.equal(l1.buttons.at(-4).command, "/cert1", "the certificate button sits above Search/Back/Home");
@@ -696,11 +696,11 @@ test("learn-import: /importlearn status, one run imports everything, non-admin r
   assert.equal(l1.buttons.at(-1).command, "/menu", "last row is Home");
   assert.ok(!menus.some((m) => /_\d{2}$/u.test(m.id)), "no lesson submenus");
   const state = storedState(kvEnv);
-  assert.equal(Object.values(state.items).filter((i) => i.status === "done").length, 49);
+  assert.equal(Object.values(state.items).filter((i) => i.status === "done").length, 50);
 
   // A second run on a complete import just reports completion, no uploads.
   calls = await sayMsg(kvEnv, ADMIN, "/importlearn");
-  assert.ok(anyMessage(calls, /49\/49/));
+  assert.ok(anyMessage(calls, /50\/50/));
   assert.equal(calls.filter((c) => c.method === "sendVideo").length, 0);
 
   calls = await sayMsg(kvEnv, 57, "/importlearn");
@@ -713,21 +713,21 @@ test("learn-import: failed upload is reported and retried on the next run", asyn
   seedMenus(kvEnv);
   const items = learnUploadItems();
   let calls = await sayMsg(kvEnv, ADMIN, "/importlearn", new Set([items[1].driveId]));
-  assert.ok(anyMessage(calls, /48\/49/), "48 of 49 must succeed on the first run");
+  assert.ok(anyMessage(calls, /49\/50/), "49 of 50 must succeed on the first run");
   assert.ok(anyMessage(calls, /فشل 1/), "one failure must be reported");
   let state = storedState(kvEnv);
   assert.equal(state.items[items[1].key].status, "failed");
-  // Only the failed lesson is missing its button; the other 25 are there.
-  assert.equal(storedMenus(kvEnv).find((m) => m.id === "m_learn_l1").buttons.length, 20);
+  // Only the failed lesson is missing its button; the other 26 are there.
+  assert.equal(storedMenus(kvEnv).find((m) => m.id === "m_learn_l1").buttons.length, 21);
 
   // The next run retries ONLY the failed item (done items are not re-uploaded).
   calls = await sayMsg(kvEnv, ADMIN, "/importlearn");
-  assert.ok(anyMessage(calls, /49\/49/), "retry run must reach 49/49");
+  assert.ok(anyMessage(calls, /50\/50/), "retry run must reach 50/50");
   assert.equal(calls.filter((c) => c.method === "sendVideo").length, 1, "only the one failed file is re-uploaded");
   state = storedState(kvEnv);
   assert.equal(state.items[items[1].key].status, "done");
   assert.equal(Object.values(state.items).filter((i) => i.status === "failed").length, 0);
-  assert.equal(storedMenus(kvEnv).find((m) => m.id === "m_learn_l1").buttons.length, 21);
+  assert.equal(storedMenus(kvEnv).find((m) => m.id === "m_learn_l1").buttons.length, 22);
 });
 
 test("learn-import: rebuild drops old per-lesson submenus left by the previous version", async () => {
@@ -752,7 +752,7 @@ test("learn-import: rebuild drops old per-lesson submenus left by the previous v
 test("learn-import: /importlearn on an already-complete import still rebuilds menus (drops v1 submenus)", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   seedMenus(kvEnv);
-  // State as the previous importer left it: 49/49 done, trusted (current
+  // State as the previous importer left it: 50/50 done, trusted (current
   // manifest hash recorded). Menus as the previous importer left them:
   // level menus plus per-lesson submenus with one button per item. Before
   // the fix, /importlearn short-circuited on "complete" and never rebuilt,
@@ -767,7 +767,7 @@ test("learn-import: /importlearn on an already-complete import still rebuilds me
     { id: "m_learn_l2_06", title: "الدرس السادس", text: "الدرس السادس", parentId: "m_learn_l2", buttons: [] },
   ] });
   const calls = await sayMsg(kvEnv, ADMIN, "/importlearn");
-  assert.ok(anyMessage(calls, /49\/49/), "complete import must still report 49/49");
+  assert.ok(anyMessage(calls, /50\/50/), "complete import must still report 50/50");
   assert.ok(anyMessage(calls, /تم حذف القوائم المخزنة القديمة/), "the reply must say the old stored menus were deleted");
   assert.equal(calls.filter((c) => c.method === "sendVideo").length, 0, "nothing left to upload");
   const menus = storedMenus(kvEnv);
@@ -775,7 +775,7 @@ test("learn-import: /importlearn on an already-complete import still rebuilds me
   assert.ok(!menus.some((m) => m.id === "m_learn_l1_01"), "old lesson submenu must be gone");
   assert.ok(!menus.some((m) => m.id === "m_learn_l2_06"), "old lesson submenu must be gone");
   const l1 = menus.find((m) => m.id === "m_learn_l1");
-  assert.equal(l1.buttons.length, 21);
+  assert.equal(l1.buttons.length, 22);
   assert.ok(l1.buttons.filter((b) => b.kind === "lesson").every((b) => b.lessonId), "level buttons are single lesson buttons");
   assert.ok(!menus.flatMap((m) => m.buttons ?? []).some((b) => b.kind === "submenu" && String(b.targetMenuId ?? "").startsWith("m_learn_l1_")), "no old submenu buttons remain");
 });
@@ -791,7 +791,7 @@ test("learn-import: /importlearn reset clears state and learn menus only", async
   assert.ok(storedMenus(kvEnv).some((m) => m.id === VIDEO_MENU_ID));
   assert.ok(storedMenus(kvEnv).some((m) => m.id === "m_custom"));
   const status = await sayMsg(kvEnv, ADMIN, "/importlearn status");
-  assert.ok(anyMessage(status, /0\/49/));
+  assert.ok(anyMessage(status, /0\/50/));
 });
 
 test("learn-import: /__learn-import merges instead of replacing all menus", async () => {

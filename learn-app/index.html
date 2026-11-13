@@ -187,9 +187,13 @@
   /* Cinema mode — the definitive fullscreen (2026-11-13). The browser
      fullscreen API does not work inside Telegram's webview at all, so
      fullscreen here is a fixed overlay that fills the whole webview:
-     pure DOM and CSS, no gesture and no browser permission can block it. */
+     pure DOM and CSS, no gesture and no browser permission can block it.
+     The overlay stops short of the bottom of the screen (48px + the
+     safe-area inset): without the gap the video and its controls sit on
+     top of the phone's bottom buttons and the user cannot reach them
+     (back / home / gestures) while the video is open. */
   .cinema {
-    position: fixed; inset: 0; z-index: 1000; background: #000;
+    position: fixed; inset: 0 0 calc(env(safe-area-inset-bottom, 0px) + 48px) 0; z-index: 1000; background: #000;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
   }
   .cinema video { width: 100%; height: 100%; object-fit: contain; background: #000; }

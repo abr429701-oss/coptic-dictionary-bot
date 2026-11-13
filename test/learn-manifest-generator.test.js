@@ -74,6 +74,25 @@ test("learn-manifest-generator: parses gviz rows and builds levels in user order
   assert.deepEqual(countLearnItems(levels), { lessons: 2, videos: 2, photos: 2, forms: 2, texts: 1 });
 });
 
+test("learn-manifest-generator: gviz rows have no header — the first lesson is kept", () => {
+  // Regression test for 2026-11-13: gviz returns data rows only (the labels
+  // live in table.cols), so a blind slice(1) dropped the first lesson —
+  // the L1 intro video "فيديو تعريفي عن اللغة القبطية" — and the manifest
+  // shipped with 26 lessons instead of 27. buildLearnLevels must detect
+  // the header instead of assuming it is there.
+  const levels = buildLearnLevels([
+    [1, "فيديو تعريفي عن اللغة القبطية", "فيديو تعريفي عن اللغة القبطية", "https://drive.google.com/file/d/VID0/view", "", "", "", ""],
+    [1, "مقدمة عن حروف اللغة القبطية", "مقدمة عن حروف اللغة القبطية", "https://drive.google.com/file/d/VID1/view", "", "", "", ""],
+    [2, "الدرس الاول", "الدرس الاول", "https://drive.google.com/file/d/VID2/view", "", "", "", ""],
+  ]);
+  assert.equal(levels[0].lessons.length, 2);
+  assert.equal(levels[0].lessons[0].id, "m_learn_l1_01");
+  assert.equal(levels[0].lessons[0].title, "فيديو تعريفي عن اللغة القبطية");
+  assert.equal(levels[0].lessons[1].id, "m_learn_l1_02");
+  assert.equal(levels[1].lessons.length, 1);
+  assert.equal(levels[1].lessons[0].id, "m_learn_l2_01");
+});
+
 test("learn-manifest-generator: rejects bad rows instead of writing a broken manifest", () => {
   const header = ["المستوى", "الاسم", "الوصف", "الفيديو", "الشفوي", "الامتحان", "الملخص", "H"];
   assert.throws(() => buildLearnLevels([header, [1, "", "", "https://drive.google.com/file/d/V/view", "", "", "", ""]]), /no lesson name/);
