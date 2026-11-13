@@ -47,15 +47,22 @@ test("learn-app: every lesson is complete and every item is well formed", () => 
 test("learn-app: index.html loads the data and plays video natively", () => {
   assert.ok(appHtml.includes("https://telegram.org/js/telegram-web-app.js"), "Telegram WebApp SDK");
   assert.ok(appHtml.includes('fetch("lessons.json")'), "loads the static lesson data");
-  assert.ok(appHtml.includes("<video controls playsinline"), "native video element, no Drive player embed");
-  // Video goes through the Worker's /video/<id> proxy (user-approved small
-  // request cost, 2026-11-13): clean media headers, native playback, no
-  // player. The direct usercontent URL is gone — Drive's attachment header
-  // breaks inline playback on the user's phone.
-  assert.ok(appHtml.includes('"/video/"'), "videos play through the Worker proxy");
-  assert.ok(!appHtml.includes("drive.usercontent.google.com/download"), "no direct usercontent video URL");
+  // Native <video>, no playsinline: the video opens fullscreen automatically
+  // (iPhone does it natively on play; other phones via requestFullscreen).
+  assert.ok(appHtml.includes("<video controls"), "native video element, no Drive player embed");
+  assert.ok(!appHtml.includes("playsinline"), "no playsinline — the video is allowed to go fullscreen");
+  assert.ok(appHtml.includes("webkitEnterFullscreen") || appHtml.includes("requestFullscreen"), "fullscreen on play");
+  // Video and photos go through the Worker's /media/<id> proxy
+  // (user-approved small request cost, 2026-11-13): clean media headers,
+  // native playback, no player. The direct Drive links are gone — Drive's
+  // attachment header breaks inline playback and <img> rendering on the
+  // user's phone.
+  assert.ok(appHtml.includes('"/media/"'), "videos and photos go through the Worker proxy");
+  assert.ok(!appHtml.includes("drive.usercontent.google.com/download"), "no direct usercontent media URL");
+  assert.ok(!appHtml.includes("uc?export=download"), "no direct Drive download URL");
   assert.ok(!appHtml.includes("/preview"), "no Drive preview player iframe");
-  assert.ok(appHtml.includes("drive.google.com/file/d/"), "Drive link stays as a fallback");
+  assert.ok(!appHtml.includes("الفيديو ما اشتغلش"), "no video fallback phrase (removed 2026-11-13)");
+  assert.ok(!appHtml.includes("أو افتح الامتحان في Google Forms"), "no Google Forms fallback phrase (removed 2026-11-13)");
   assert.ok(appHtml.includes("الامتحان الإلكتروني"), "exam button label");
 });
 
@@ -85,4 +92,47 @@ test("learn-app: index.html renders the exam in-app and posts to Google", () => 
   assert.ok(appHtml.includes("هذا السؤال مطلوب."), "required validation like Google Forms");
   assert.ok(appHtml.includes("codeMatches"), "code check with a set fallback if the giant regex cannot compile");
   assert.ok(appHtml.includes("fail closed"), "an unverifiable code blocks the submit instead of passing");
+  // Code gate (2026-11-13): the exam does not open until the correct code
+  // is typed — the gate screen, its entry button, and the verified code
+  // submitted as the code question's answer.
+  assert.ok(appHtml.includes("showCodeGate"), "code gate before the exam");
+  assert.ok(appHtml.includes("أدخل الرقم الكودي"), "gate title");
+  assert.ok(appHtml.includes("دخول الامتحان"), "gate entry button");
+  assert.ok(appHtml.includes("examCodeEntryId"), "verified code submitted as its answer");
+  // Name greeting (2026-11-13): after a correct code the student is
+  // greeted by the name attached to that code, then headed into the exam.
+  assert.ok(appHtml.includes("enterWithGreeting"), "greeting step after a correct code");
+  assert.ok(appHtml.includes("جاري توجيهك للامتحان"), "greeting message");
+  assert.ok(appHtml.includes('fetch("codes.json")'), "code -> name map loads lazily at the gate");
+  // Get-code inside the app (2026-11-13): name + phone -> the Worker asks
+  // the registration macro and returns the code.
+  assert.ok(appHtml.includes("showGetCode"), "get-code screen in the app");
+  assert.ok(appHtml.includes("الحصول على الرقم الكودي"), "get-code entry point");
+  assert.ok(appHtml.includes('fetch("/getcode"'), "code lookup goes through the Worker");
+});
+
+test("learn-app: media allow-list covers every lesson photo/video and exam image", () => {
+  const mediaJson = JSON.parse(readFileSync(resolve(testRoot, "src", "lesson-media.json"), "utf8"));
+  const ids = new Set(mediaJson.ids);
+  const lessonIds = appJson.levels.flatMap((l) => l.lessons).flatMap((lesson) => lesson.items)
+    .filter((i) => (i.kind === "video" || i.kind === "photo") && i.driveId)
+    .map((i) => i.driveId);
+  const examImageIds = examJson.forms.flatMap((f) => f.questions).filter((q) => q.imageId).map((q) => q.imageId);
+  assert.equal(ids.size, 86, "27 videos + 23 photos + 36 exam images");
+  for (const id of [...lessonIds, ...examImageIds]) {
+    assert.ok(ids.has(id), `${id} is in the media allow-list`);
+  }
+});
+
+test("learn-app: codes.json maps codes to real student names", () => {
+  const codesJson = JSON.parse(readFileSync(resolve(testRoot, "public", "learn-app", "codes.json"), "utf8"));
+  const names = codesJson.names;
+  const keys = Object.keys(names);
+  assert.ok(keys.length > 1900, `${keys.length} codes with names`);
+  assert.equal(names["3442935"].trim(), "هيلانة ادورد حنا");
+  assert.ok(!("1" in names), "junk code 1 has no name");
+  for (const key of keys) {
+    assert.ok(/[\p{L}]/u.test(names[key]), `${key} maps to a real name, not a number`);
+  }
+  assert.ok(!("phone" in codesJson) && !JSON.stringify(codesJson).includes("1202208368"), "no phone numbers in the app data");
 });
