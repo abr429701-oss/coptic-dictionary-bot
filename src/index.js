@@ -468,26 +468,84 @@ async function runLearnImportAll(env, chatId) {
   const state = await loadImportState(env);
   const items = learnUploadItems(LEARN_LEVELS);
   if (!state.startedAt) state.startedAt = new Date().toISOString();
+  // Whether the manifest changed since this state was written — decided
+  // BEFORE adoption (adoption records the current hash when none is stored).
+  const currentHash = learnManifestHash(LEARN_LEVELS);
+  const hashChanged = Boolean(state.manifestHash) && state.manifestHash !== currentHash;
+  // Adopt pre-hash states (backfill driveIds) and take the Durable Object
+  // lock so a cron tick and a manual /importlearn never upload twice.
+  adoptImportState(state, items, currentHash);
+  state.importRunningSince = new Date().toISOString();
+  await saveImportState(env, state);
   const errors = [];
-  for (const item of learnPendingItems(state, items)) {
-    try {
-      const uploaded = await uploadLearnFile(env, chatId, item);
-      state.items[item.key] = { status: "done", fileId: uploaded.fileId, fileUniqueId: uploaded.fileUniqueId, error: "", at: new Date().toISOString() };
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : "unknown error";
-      state.items[item.key] = { status: "failed", fileId: "", fileUniqueId: "", error: reason.slice(0, 300), at: new Date().toISOString() };
-      errors.push(`${item.title} (${item.kind}): ${reason.slice(0, 200)}`);
+  try {
+    // A manifest change re-uploads only the items whose Drive file actually
+    // changed (driveId mismatch); everything else is skipped as done.
+    for (const item of learnPendingItems(state, items, hashChanged)) {
+      try {
+        const uploaded = await uploadLearnFile(env, chatId, item);
+        state.items[item.key] = { status: "done", fileId: uploaded.fileId, fileUniqueId: uploaded.fileUniqueId, driveId: item.driveId, error: "", at: new Date().toISOString() };
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "unknown error";
+        state.items[item.key] = { status: "failed", fileId: "", fileUniqueId: "", driveId: item.driveId, error: reason.slice(0, 300), at: new Date().toISOString() };
+        errors.push(`${item.title} (${item.kind}): ${reason.slice(0, 200)}`);
+      }
+      // Save after every item: if the platform interrupts the run, the next
+      // /importlearn resumes instead of re-uploading the same files.
+      await saveImportState(env, state);
     }
-    // Save after every item: if the platform interrupts the run, the next
-    // /importlearn resumes instead of re-uploading the same files.
+    state.manifestHash = currentHash;
+    await saveImportState(env, state);
+    await rebuildLearnMenus(env, state);
+    const progress = importProgress(state, items);
+    const failedErrors = items
+      .filter((item) => state.items[item.key]?.status === "failed")
+      .map((item) => `${item.title} (${item.kind}): ${String(state.items[item.key]?.error ?? "").slice(0, 200)}`);
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `${learnProgressText(progress, errors.length ? errors : failedErrors)}\n\n🔄 تم حذف القوائم المخزنة القديمة وبناء قوائم الدروس الجديدة (كل درس زر واحد).`, parse_mode: "HTML" });
+  } finally {
+    state.importRunningSince = "";
     await saveImportState(env, state);
   }
-  await rebuildLearnMenus(env, state);
+}
+// Scheduled learn auto-sync (2026-11-13): the deploy workflow's sync job
+// regenerates src/learn-manifest.js from the Sheet every 30 minutes and
+// commits it when it changed; the deploy that follows carries the new
+// manifest. This tick (every 5 minutes) notices the new manifest hash and
+// re-imports ONLY the media whose Drive file actually changed, then rebuilds
+// the stored level menus. No-op when nothing changed (one DO read per tick);
+// the first tick after this ships adopts the old import state (backfills
+// driveIds) instead of re-uploading everything.
+const LEARN_AUTO_IMPORT_LOCK_MS = 30 * 60 * 1000;
+async function maybeAutoImportLearn(env, ctx) {
+  if (!env.USERS) return;
+  const state = await loadImportState(env);
+  const items = learnUploadItems(LEARN_LEVELS);
+  const currentHash = learnManifestHash(LEARN_LEVELS);
+  const hashChanged = Boolean(state.manifestHash) && state.manifestHash !== currentHash;
+  const adopted = adoptImportState(state, items, currentHash);
+  const pending = learnPendingItems(state, items, hashChanged);
+  if (!pending.length && !hashChanged) {
+    if (adopted) await saveImportState(env, state);
+    return;
+  }
+  if (state.importRunningSince && Date.now() - Date.parse(state.importRunningSince) < LEARN_AUTO_IMPORT_LOCK_MS) return;
+  const adminId = DEFAULT_ADMIN_IDS;
+  if (learnImportRuns.has(adminId)) return;
   const progress = importProgress(state, items);
-  const failedErrors = items
-    .filter((item) => state.items[item.key]?.status === "failed")
-    .map((item) => `${item.title} (${item.kind}): ${String(state.items[item.key]?.error ?? "").slice(0, 200)}`);
-  await telegram(env, "sendMessage", { chat_id: chatId, text: `${learnProgressText(progress, errors.length ? errors : failedErrors)}\n\n🔄 تم حذف القوائم المخزنة القديمة وبناء قوائم الدروس الجديدة (كل درس زر واحد).`, parse_mode: "HTML" });
+  await telegram(env, "sendMessage", {
+    chat_id: adminId,
+    text: hashChanged
+      ? `🔄 <b>تحديث تلقائي للدروس</b>\n\nالشيت اتغير — جارٍ رفع ${pending.length} ملف جديد وتحديث القوائم…`
+      : learnImportStartText(progress),
+    parse_mode: "HTML",
+  });
+  learnImportRuns.add(adminId);
+  const run = runLearnImportAll(env, adminId).catch((error) => {
+    console.error("Learn auto-import run failed", error instanceof Error ? error.message : "unknown error");
+  }).finally(() => learnImportRuns.delete(adminId));
+  // Tests call scheduled without a Workers ctx: await inline to stay deterministic.
+  if (ctx?.waitUntil) ctx.waitUntil(run);
+  else await run;
 }
 async function handleImportLearn(env, chatId, userId, text, ctx) {
   if (!isAdmin(env, userId)) {
@@ -515,7 +573,11 @@ async function handleImportLearn(env, chatId, userId, text, ctx) {
     return;
   }
   const progress = importProgress(state, items);
-  if (progress.complete) {
+  // A manifest change (a Drive file replaced in the Sheet) leaves every
+  // status "done" but makes some driveIds stale — that is NOT complete:
+  // fall through to the run, which re-uploads only the changed files.
+  const manifestChanged = Boolean(state.manifestHash) && state.manifestHash !== learnManifestHash(LEARN_LEVELS);
+  if (progress.complete && !manifestChanged) {
     // The stored menus may still be the old importer's (one button per
     // item): delete them entirely and write the new one-button-per-lesson
     // menus, even though nothing is left to upload.
@@ -1155,7 +1217,7 @@ import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VI
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 import { getHiddenUi, setHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
 import { LEARN_LEVELS } from "./learn-manifest.js";
-import { LEARN_IMPORT_KEY, LEARN_GET_CODE_TEXT, learnUploadItems, emptyImportState, normalizeImportState, importProgress, learnPendingItems, findLearnLesson, learnLessonSendPlan, buildLearnMenus, mergeMenus, uploadLearnFile, parseImportLearnArg, learnImportStartText, learnProgressText } from "./learn-import.js";
+import { LEARN_IMPORT_KEY, LEARN_GET_CODE_TEXT, learnUploadItems, emptyImportState, normalizeImportState, importProgress, learnPendingItems, learnManifestHash, adoptImportState, findLearnLesson, learnLessonSendPlan, buildLearnMenus, mergeMenus, uploadLearnFile, parseImportLearnArg, learnImportStartText, learnProgressText } from "./learn-import.js";
 
 // ---- reply-keyboard menus (real buttons under the field, no inline) --------
 // The position of a user inside the menus is remembered so a plain-text tap can
@@ -8534,12 +8596,12 @@ export default {
   // Keep-warm cron (2026-11-12): the first message after idle pays a cold
   // start (fresh isolate + module evaluation incl. the dictionary JSON), so
   // text and voice arrive together late. A scheduled tick every 5 minutes
-  // keeps an isolate warm. It deliberately does NO storage or Telegram work:
-  // 1 Worker request per tick, 0 DO calls (288 requests/day, 0.3% of the
-  // free 100k/day limit). It does not make cold starts literally impossible
-  // (Cloudflare may still start a fresh isolate in another region), it makes
-  // them rare.
+  // keeps an isolate warm. Since 2026-11-13 the tick also runs the learn
+  // auto-sync check (maybeAutoImportLearn): one DO read per tick, and
+  // Telegram work only when the Sheet actually changed. It does not make
+  // cold starts literally impossible (Cloudflare may still start a fresh
+  // isolate in another region), it makes them rare.
   async scheduled(event, env, ctx) {
-    return;
+    await maybeAutoImportLearn(env, ctx);
   },
 };

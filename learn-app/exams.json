@@ -1,5 +1,5 @@
 {
- "generatedAt": "2026-11-13T10:38:43.572Z",
+ "generatedAt": "2026-11-13T11:13:52.819Z",
  "forms": [
   {
    "formId": "1Gts_xgdk3-g7elOTmSXtpouZMvFVLwdQ4fleO3usLYg",
@@ -44,9 +44,9 @@
      "entryId": 1691594610,
      "required": true,
      "options": [
-      "8",
       "7",
-      "32"
+      "32",
+      "8"
      ],
      "validation": null
     },
@@ -88,9 +88,9 @@
      "entryId": 757360773,
      "required": true,
      "options": [
+      "Ⲥⲁⲛ",
       "Ⲛⲁⲥ",
-      "Ⲛⲁⲛ",
-      "Ⲥⲁⲛ"
+      "Ⲛⲁⲛ"
      ],
      "validation": null
     },

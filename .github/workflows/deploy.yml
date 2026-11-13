@@ -32,19 +32,35 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Build dictionary.json from the Google Sheet
         run: python3 scripts/sheet_to_json.py
+
+      # The learn manifest is a frozen snapshot of the "learn" tab; when the
+      # teacher edits the Sheet, this regenerates it. A changed manifest is
+      # committed below, the deploy follows, and the Worker's scheduled tick
+      # re-imports the changed media (see maybeAutoImportLearn in
+      # src/index.js). The Sheet is public-readable (gviz), so no secret is
+      # needed. A failed regeneration must not block the dictionary sync —
+      # the next 30-minute tick retries it.
+      - name: Regenerate learn manifest from the Google Sheet
+        continue-on-error: true
+        run: node scripts/generate-learn-manifest.mjs
 
       - name: Commit data if they changed
         id: commit
         run: |
-          git add -A data
+          git add -A data src/learn-manifest.js
           if git diff --cached --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "Sync dictionary from Google Sheet"
+            git commit -m "Sync data from Google Sheet"
             git push
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi

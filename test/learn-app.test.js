@@ -22,7 +22,7 @@ test("learn-app: lessons.json matches the frozen manifest exactly", () => {
 test("learn-app: every lesson is complete and every item is well formed", () => {
   assert.equal(appJson.levels.length, 2, "two levels");
   const lessons = appJson.levels.flatMap((l) => l.lessons);
-  assert.equal(lessons.length, 27, "17 level-1 + 10 level-2 lessons");
+  assert.equal(lessons.length, 26, "16 level-1 + 10 level-2 lessons");
   for (const lesson of lessons) {
     assert.ok(lesson.items.length >= 1, `${lesson.id} has items`);
     for (const item of lesson.items) {
@@ -38,7 +38,7 @@ test("learn-app: every lesson is complete and every item is well formed", () => 
     }
   }
   const kinds = lessons.flatMap((l) => l.items.map((i) => i.kind));
-  assert.equal(kinds.filter((k) => k === "video").length, 27);
+  assert.equal(kinds.filter((k) => k === "video").length, 26);
   assert.equal(kinds.filter((k) => k === "photo").length, 23);
   assert.equal(kinds.filter((k) => k === "url").length, 12);
   assert.equal(kinds.filter((k) => k === "text").length, 4);
@@ -159,7 +159,7 @@ test("learn-app: media allow-list covers every lesson photo/video and exam image
     .filter((i) => (i.kind === "video" || i.kind === "photo") && i.driveId)
     .map((i) => i.driveId);
   const examImageIds = examJson.forms.flatMap((f) => f.questions).filter((q) => q.imageId).map((q) => q.imageId);
-  assert.equal(ids.size, 86, "27 videos + 23 photos + 36 exam images");
+  assert.equal(ids.size, 85, "26 videos + 23 photos + 36 exam images");
   for (const id of [...lessonIds, ...examImageIds]) {
     assert.ok(ids.has(id), `${id} is in the media allow-list`);
   }

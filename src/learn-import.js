@@ -93,7 +93,7 @@ export function learnUploadItems(levels = LEARN_LEVELS) {
 // ---------------------------------------------------------------------------
 
 export function emptyImportState() {
-  return { version: 1, startedAt: null, updatedAt: null, items: {} };
+  return { version: 1, startedAt: null, updatedAt: null, items: {}, manifestHash: "", importRunningSince: "" };
 }
 
 // Coerce any stored value into a valid state; entries for items that are not
@@ -103,6 +103,8 @@ export function normalizeImportState(value, levels = LEARN_LEVELS) {
   if (!value || typeof value !== "object") return state;
   if (typeof value.startedAt === "string") state.startedAt = value.startedAt;
   if (typeof value.updatedAt === "string") state.updatedAt = value.updatedAt;
+  if (typeof value.manifestHash === "string") state.manifestHash = value.manifestHash;
+  if (typeof value.importRunningSince === "string") state.importRunningSince = value.importRunningSince;
   const known = new Set(learnUploadItems(levels).map((item) => item.key));
   const raw = value.items && typeof value.items === "object" ? value.items : {};
   for (const [key, entry] of Object.entries(raw)) {
@@ -112,6 +114,7 @@ export function normalizeImportState(value, levels = LEARN_LEVELS) {
       status,
       fileId: typeof entry.fileId === "string" ? entry.fileId : "",
       fileUniqueId: typeof entry.fileUniqueId === "string" ? entry.fileUniqueId : "",
+      driveId: typeof entry.driveId === "string" ? entry.driveId : "",
       error: typeof entry.error === "string" ? entry.error.slice(0, 300) : "",
       at: typeof entry.at === "string" ? entry.at : "",
     };
@@ -128,8 +131,64 @@ export function importProgress(state, items) {
 
 // All pending/failed uploads, in manifest order (failed items are retried).
 // One /importlearn run processes ALL of them, not a small batch.
-export function learnPendingItems(state, items) {
-  return items.filter((item) => state.items[item.key]?.status !== "done");
+// With reverify=true (a manifest change), an item whose stored driveId no
+// longer matches the manifest is pending too — its Drive file was replaced
+// in the Sheet, so the bot must re-upload it. Items whose driveId matches
+// are skipped even under reverify.
+export function learnPendingItems(state, items, reverify = false) {
+  return items.filter((item) => {
+    const entry = state.items[item.key];
+    if (entry?.status !== "done") return true;
+    return reverify && entry.driveId !== item.driveId;
+  });
+}
+
+// Stable hash of the manifest content that decides the import: lesson ids,
+// titles, and every item's driveId/url/text. The Worker stores it with the
+// import state; when a deploy carries a different hash, the scheduled
+// auto-import knows the Sheet changed (see maybeAutoImportLearn).
+export function learnManifestHash(levels = LEARN_LEVELS) {
+  const projection = levels.map((level) => ({
+    id: level.id,
+    title: level.title,
+    lessons: (level.lessons ?? []).map((lesson) => ({
+      id: lesson.id,
+      title: lesson.title,
+      items: (lesson.items ?? []).map((item) => ({
+        key: item.key,
+        kind: item.kind,
+        driveId: item.driveId ?? "",
+        url: item.url ?? "",
+        text: item.text ?? "",
+      })),
+    })),
+  }));
+  const text = JSON.stringify(projection);
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+// One-time adoption for import states written before driveIds and the
+// manifest hash were stored: fill each done entry's driveId from the current
+// manifest (what was actually uploaded) and record the hash. After this, a
+// later manifest change is detected precisely — only the items whose driveId
+// actually changed are re-uploaded. Returns true when it set the hash (the
+// caller saves the state); false when the hash was already recorded.
+export function adoptImportState(state, items, hash) {
+  if (!state || typeof state !== "object") return false;
+  if (typeof state.manifestHash === "string" && state.manifestHash) return false;
+  const byKey = new Map(items.map((item) => [item.key, item]));
+  for (const [key, entry] of Object.entries(state.items ?? {})) {
+    if (entry?.status === "done" && !entry.driveId && byKey.get(key)) {
+      entry.driveId = byKey.get(key).driveId;
+    }
+  }
+  state.manifestHash = hash;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
