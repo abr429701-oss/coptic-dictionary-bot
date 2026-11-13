@@ -789,6 +789,30 @@ test("learn-import: failed upload is reported and retried on the next run", asyn
   assert.equal(storedMenus(kvEnv).find((m) => m.id === "m_learn_l1").buttons.length, 22);
 });
 
+test("learn-import: a manual /importlearn refuses while another run holds the lock", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedMenus(kvEnv);
+  // A run started 1 minute ago (by the 5-minute tick) is still uploading:
+  // the manual command must not start a second one over it — two runs
+  // uploading the same files trip Telegram's flood control together and
+  // both crawl. (2026-11-13: the manual command never checked the lock
+  // the tick checks, so a manual retry could race the tick's run.)
+  const state = emptyImportState();
+  state.importRunningSince = new Date(Date.now() - 60 * 1000).toISOString();
+  kvEnv.USERS.store.set(LEARN_IMPORT_KEY, state);
+  const calls = await sayMsg(kvEnv, ADMIN, "/importlearn");
+  assert.ok(anyMessage(calls, /جارٍ بالفعل/), "must refuse while the lock is held");
+  assert.equal(calls.filter((c) => c.method === "sendVideo").length, 0, "no file is uploaded");
+  assert.equal(calls.filter((c) => c.kind === "drive").length, 0, "no Drive download starts");
+
+  // A stale lock (31 minutes old, a run that died without clearing it)
+  // does not block: the import proceeds.
+  state.importRunningSince = new Date(Date.now() - 31 * 60 * 1000).toISOString();
+  kvEnv.USERS.store.set(LEARN_IMPORT_KEY, state);
+  const calls2 = await sayMsg(kvEnv, ADMIN, "/importlearn");
+  assert.ok(anyMessage(calls2, /50\/50/), "a stale lock must not block the import");
+});
+
 test("learn-import: rebuild drops old per-lesson submenus left by the previous version", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   seedMenus(kvEnv);

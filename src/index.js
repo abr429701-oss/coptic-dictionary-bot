@@ -608,6 +608,17 @@ async function handleImportLearn(env, chatId, userId, text, ctx) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: "⏳ الاستيراد جارٍ بالفعل — سأرسل لك رسالة عند الانتهاء." });
     return;
   }
+  // The Durable Object lock: a run started by the 5-minute tick (or by
+  // another /importlearn) is already uploading. Starting a second one
+  // would upload the same files twice and both runs would trip Telegram's
+  // flood control — that is what made the retry crawl. The tick checks
+  // this same lock; the manual command did not, until now. A lock older
+  // than 30 minutes is stale (a run that died without clearing it) and
+  // does not block.
+  if (state.importRunningSince && Date.now() - Date.parse(state.importRunningSince) < LEARN_AUTO_IMPORT_LOCK_MS) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "⏳ الاستيراد جارٍ بالفعل — سأرسل لك رسالة عند الانتهاء." });
+    return;
+  }
   await telegram(env, "sendMessage", { chat_id: chatId, text: learnImportStartText(progress), parse_mode: "HTML" });
   learnImportRuns.add(chatId);
   const run = runLearnImportAll(env, chatId).catch((error) => {
