@@ -155,6 +155,12 @@
     box-shadow: var(--shadow); transition: transform .15s ease;
   }
   .getCodeBtn:active { transform: scale(.98); }
+  .fsBtn {
+    display: block; width: 100%; margin-top: 10px; padding: 11px; font-size: 15px; font-weight: 700;
+    background: var(--teal-soft); color: var(--teal); border: 1.5px solid var(--teal);
+    border-radius: 12px; cursor: pointer;
+  }
+  .fsBtn:active { transform: scale(.98); }
   .linkBtn {
     display: block; margin: 14px auto 0; padding: 0; border: 0; background: none;
     color: var(--teal); font-size: 14px; font-weight: 700; cursor: pointer; text-decoration: underline;
@@ -363,7 +369,8 @@
         "<div><b>" + totalExams + "</b><span>امتحان</span></div>" +
         "<div><b>" + data.levels.length + "</b><span>مستويات</span></div>" +
         "</div></div>" +
-        "<button class='getCodeBtn' type='button' id='homeGetCode'>🔑 الحصول على الرقم الكودي</button>";
+        "<button class='getCodeBtn' type='button' id='homeGetCode'>🔑 الحصول على الرقم الكودي</button>" +
+        "<button class='getCodeBtn' type='button' id='homeCert'>🎓 الحصول على الشهادة</button>";
       data.levels.forEach(function (level, li) {
         html += "<section><div class='levelHead'><h2>" + esc(level.title) + "</h2>" +
           "<span class='countPill'>" + level.lessons.length + " دروس</span></div>";
@@ -378,6 +385,7 @@
       });
       view.innerHTML = html;
       document.getElementById("homeGetCode").addEventListener("click", function () { showGetCode("home"); });
+      document.getElementById("homeCert").addEventListener("click", function () { showCert(); });
       view.querySelectorAll("[data-lesson]").forEach(function (btn) {
         btn.addEventListener("click", function () { showLesson(btn.getAttribute("data-lesson")); });
       });
@@ -401,7 +409,8 @@
     var num = arabicNum(idx + 1) + " · ";
     if (item.kind === "video") {
       return "<div class='item'><div class='lbl'>" + num + esc(item.label || "فيديو الدرس") + "</div>" +
-        "<div class='videoWrap'><video controls preload='metadata' src='" + esc(driveVideo(item.driveId)) + "'></video></div></div>";
+        "<div class='videoWrap'><video controls preload='metadata' src='" + esc(driveVideo(item.driveId)) + "'></video>" +
+        "<button class='fsBtn' type='button' data-fs>⛶ ملء الشاشة</button></div></div>";
     }
     if (item.kind === "photo") {
       return "<div class='item'><div class='lbl'>" + num + esc(item.label || "صورة") + "</div>" +
@@ -456,21 +465,32 @@
       btn.addEventListener("click", function () { openExam(btn.getAttribute("data-exam"), id); });
     });
     view.querySelectorAll("video").forEach(function (v) {
-      // Without the inline-playback attribute, on iPhone the video goes
-      // fullscreen natively when it starts, and everywhere else the first
-      // play requests fullscreen — the lesson video opens fullscreen.
+      // Fullscreen must be requested from a real tap: Telegram's webview
+      // plays videos inline (its inline-playback setting is on), so the
+      // no-inline-attribute trick alone does not fullscreen here, and a
+      // fullscreen request from the play event is rejected (not a gesture).
+      // So the lesson-card tap itself tries it right away, and the
+      // "ملء الشاشة" button under the video does it on the student's tap.
       v.addEventListener("play", function () { enterFullscreen(v); }, { once: true });
-      // Best effort: the lesson was opened by a tap (a user gesture), so
-      // try to start the video fullscreen right away. Browsers that block
-      // autoplay with sound simply wait for the student's own tap on play.
       var p = null;
       try { p = v.play(); } catch (e) {}
       if (p && p.catch) p.catch(function () {});
+      enterFullscreen(v); // same tap that opened the lesson — best effort
+    });
+    view.querySelectorAll("[data-fs]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var wrap = btn.closest(".videoWrap");
+        var v = wrap ? wrap.querySelector("video") : null;
+        if (!v) return;
+        try { var p = v.play(); if (p && p.catch) p.catch(function () {}); } catch (e) {}
+        enterFullscreen(v);
+      });
     });
     window.scrollTo(0, 0);
   }
 
   function goBack() {
+    if (current === "cert") { showHome(); return; }
     if (current === "getcode") {
       if (getCodeFrom === "gate" && lastGate) { showCodeGate(lastGate.form, lastGate.codeQ, lastGate.lessonId); return; }
       showHome();
@@ -611,6 +631,84 @@
     window.scrollTo(0, 0);
   }
 
+  // "الحصول على الشهادة" inside the app: pick the level, type the code,
+  // the Worker looks it up in the certificate sheets (the same lookup the
+  // bot's /cert1 and /cert2 use) and returns the certificate image, or the
+  // message (wrong code / missing exams). One Worker request per lookup.
+  function showCert() {
+    current = "cert";
+    titleEl.textContent = "الحصول على الشهادة";
+    backBtn.style.display = "";
+    if (tg && tg.BackButton) { try { tg.BackButton.show(); } catch (e) {} }
+    var certLevel = null;
+    function render() {
+      if (!certLevel) {
+        view.innerHTML = "<div class='gateCard'><div class='gateIcon'>🎓</div>" +
+          "<h2>الحصول على الشهادة</h2>" +
+          "<p class='muted'>اختار المستوى اللي عايز شهادته.</p>" +
+          "<button class='examBtn' type='button' data-cert-level='1'>شهادة المستوى الأول</button>" +
+          "<button class='examBtn' type='button' data-cert-level='2'>شهادة المستوى الثاني</button></div>";
+        view.querySelectorAll("[data-cert-level]").forEach(function (btn) {
+          btn.addEventListener("click", function () { certLevel = btn.getAttribute("data-cert-level"); render(); });
+        });
+        return;
+      }
+      view.innerHTML = "<div class='gateCard'><div class='gateIcon'>🎓</div>" +
+        "<h2>شهادة المستوى " + (certLevel === "1" ? "الأول" : "الثاني") + "</h2>" +
+        "<p class='muted'>اكتب الرقم الكودي اللي خدت بيه الشهادة.</p>" +
+        "<input class='qText' id='certCode' type='text' autocomplete='off' inputmode='numeric' placeholder='الرقم الكودي'>" +
+        "<div class='qErr' id='certErr'></div>" +
+        "<button class='examBtn' type='button' id='certGo'>عرض الشهادة</button>" +
+        "<button class='linkBtn' type='button' id='certBack'>تغيير المستوى</button></div>";
+      var input = document.getElementById("certCode");
+      var errEl = document.getElementById("certErr");
+      var btn = document.getElementById("certGo");
+      document.getElementById("certBack").addEventListener("click", function () { certLevel = null; render(); });
+      btn.addEventListener("click", function () {
+        var code = input.value.trim();
+        if (!/^\d{6,10}$/u.test(code)) { errEl.textContent = "اكتب رقم كودي صحيح."; errEl.style.display = "block"; return; }
+        errEl.style.display = "none";
+        btn.disabled = true;
+        btn.textContent = "جارٍ البحث عن الشهادة…";
+        fetch("/cert?code=" + encodeURIComponent(code) + "&level=" + certLevel)
+          .then(function (r) {
+            var type = r.headers.get("content-type") || "";
+            if (type.indexOf("image/") === 0) return r.blob().then(function (b) { return { image: b }; });
+            return r.json().then(function (j) { return { json: j }; });
+          })
+          .then(function (res) {
+            if (res.image) {
+              var url = URL.createObjectURL(res.image);
+              view.innerHTML = "<div class='gateCard'><div class='gateIcon'>🎓</div>" +
+                "<h2>شهادتك</h2>" +
+                "<img class='photo' src='" + url + "' alt='الشهادة'>" +
+                "<a class='examBtn' href='" + url + "' download='certificate.jpg'>⬇ تحميل الشهادة</a>" +
+                "<button class='linkBtn' type='button' id='certDone'>رجوع</button></div>";
+              document.getElementById("certDone").addEventListener("click", goBack);
+              window.scrollTo(0, 0);
+              return;
+            }
+            var j = res.json || {};
+            var msg = document.createElement("div");
+            msg.id = "error";
+            msg.textContent = j.text || "الرقم الكودي غير صحيح.";
+            view.insertBefore(msg, view.firstChild);
+            btn.disabled = false;
+            btn.textContent = "عرض الشهادة";
+            window.scrollTo(0, 0);
+          })
+          .catch(function () {
+            btn.disabled = false;
+            btn.textContent = "عرض الشهادة";
+            errEl.textContent = "تعذّر الوصول لشيت النتائج حاليًا. جرّب لاحقًا.";
+            errEl.style.display = "block";
+          });
+      });
+      window.scrollTo(0, 0);
+    }
+    render();
+  }
+
   // The exam does not open until the student types the correct code: the
   // tap on "ابدأ الامتحان" first shows a code gate, and only a matching
   // code lets the exam itself open.
@@ -656,12 +754,33 @@
     document.getElementById("gateGetCode").addEventListener("click", function () { showGetCode("gate"); });
     // Live check while typing: a wrong code shows the error immediately,
     // a matching code clears it, turns the field green and unlocks entry.
+    // The local pattern only knows the codes that existed when the teacher
+    // last edited the form, so a code the local check rejects gets one
+    // live check against the registration sheet (debounced, 7+ digits):
+    // a student who just got a code is in the sheet even though the form
+    // is not updated yet. The live check also returns the student's name,
+    // so the greeting works for new users too.
+    var gateVerified = null; // {code, name} once the current value is verified
+    var gateTimer = null;
+    var gateSeq = 0;
+    function gateFail(msg) {
+      errEl.textContent = msg || codeQ.validation.errorText || "الرقم الكودي غير صحيح";
+      errEl.style.display = "block";
+      errEl.style.color = "";
+      input.classList.remove("valid");
+      input.classList.add("invalid");
+      btn.disabled = true;
+      gateVerified = null;
+    }
     input.addEventListener("input", function () {
       var v = input.value.trim();
+      gateSeq++;
+      if (gateTimer) { clearTimeout(gateTimer); gateTimer = null; }
       if (!v) {
         errEl.style.display = "none";
         input.classList.remove("invalid", "valid");
         btn.disabled = true;
+        gateVerified = null;
         return;
       }
       if (codeMatches(codeQ.validation.pattern, v)) {
@@ -669,26 +788,52 @@
         input.classList.remove("invalid");
         input.classList.add("valid");
         btn.disabled = false;
-      } else {
-        errEl.textContent = codeQ.validation.errorText || "الرقم الكودي غير صحيح";
-        errEl.style.display = "block";
-        input.classList.remove("valid");
-        input.classList.add("invalid");
-        btn.disabled = true;
+        gateVerified = { code: v, name: null };
+        return;
       }
+      if (!/^\d{7,}$/u.test(v)) { gateFail(); return; }
+      // Looks like a full code but not in the baked list — check it live.
+      errEl.textContent = "جارٍ التحقق من الرقم الكودي…";
+      errEl.style.display = "block";
+      errEl.style.color = "var(--muted)";
+      input.classList.remove("invalid", "valid");
+      btn.disabled = true;
+      gateVerified = null;
+      var seq = gateSeq;
+      gateTimer = setTimeout(function () {
+        fetch("/checkcode?code=" + encodeURIComponent(v))
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            if (seq !== gateSeq || input.value.trim() !== v) return; // typed on meanwhile
+            if (data && data.ok) {
+              errEl.style.display = "none";
+              input.classList.remove("invalid");
+              input.classList.add("valid");
+              btn.disabled = false;
+              gateVerified = { code: v, name: data.name || null };
+            } else {
+              gateFail();
+            }
+          })
+          .catch(function () {
+            if (seq !== gateSeq || input.value.trim() !== v) return;
+            gateFail(); // fail closed: an unchecked code never opens the exam
+          });
+      }, 500);
     });
     btn.addEventListener("click", function () {
-      var v = input.value.trim();
-      if (codeMatches(codeQ.validation.pattern, v)) enterWithGreeting(form, codeQ, lessonId, v);
+      if (gateVerified) enterWithGreeting(form, codeQ, lessonId, gateVerified.code, gateVerified.name);
     });
     window.scrollTo(0, 0);
   }
 
   // After a correct code, greet the student by the name attached to that
-  // code in the code sheet, then head into the exam.
-  function enterWithGreeting(form, codeQ, lessonId, code) {
+  // code in the code sheet, then head into the exam. `liveName` is the
+  // name the live check returned (new users); otherwise the name comes
+  // from the baked codes.json (old codes).
+  function enterWithGreeting(form, codeQ, lessonId, code, liveName) {
     loadCodeNames().then(function (names) {
-      var name = names[code] || null;
+      var name = liveName || names[code] || null;
       current = "greeting";
       titleEl.textContent = form.title;
       view.innerHTML = "<div class='gateCard'><div class='gateIcon'>✓</div>" +

@@ -1126,8 +1126,8 @@ function lazy(build) {
 import { audioUrl, audioVersion, fetchHumanSpeech, fetchPrebuiltSpeech, isSingleWordOgg, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 import { copticDateNow, alphabetText, letterStatsText, longestText, originsText, wordCountText, startsWithText, similarText, translateText, vocabText, startGuess, handleGuessReply } from "./features.js";
 import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, suggestSimilar, helpText, retentionText, opsText, recordById, levenshtein } from "./new-features.js";
-import { lookupCertificate } from "./certificates.js";
-import { getCodeFromMacro, buildGetCodeReply, buildGetCodeWhatsAppUrl, normalizeGetCodePhone, getCodePhoneValid } from "./getcode.js";
+import { lookupCertificate, parseCertCsv } from "./certificates.js";
+import { getCodeFromMacro, buildGetCodeReply, buildGetCodeWhatsAppUrl, normalizeGetCodePhone, getCodePhoneValid, GET_CODE_SHEET_ID } from "./getcode.js";
 import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VIDEO_MENU_ID, cleanMenuTitle, cleanMenuText, cleanButtonLabel, cleanUrl, cleanCommand, normalizeMenus, findMenu, findButton, rootMenus, descendantMenuIds, buildMenuKeyboard, buildRootKeyboard, menuOpenText, menuAdminListText, menuAdminDetailText, parseMenuTarget, parseButtonTarget, addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton, ensureVideoMenu } from "./menu-builder.js";
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 import { getHiddenUi, setHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
@@ -8177,6 +8177,56 @@ const LESSON_MEDIA_IDS = new Set(lessonMedia.ids);
 // keep their state order.
 let updateChain = Promise.resolve();
 
+// Live code lookup (2026-11-13): the exam gate's local check is the code
+// pattern baked from the Forms at build time, so it only knows the codes
+// that existed when the teacher last edited the form — a student who just
+// got a code (from the web app or the bot) is NOT in it, and the gate
+// wrongly rejects them. The registration sheet («تجميع الرقم الكودي»,
+// tab `code`, A=code, B=name) is the source of truth, so the gate falls
+// back to GET /checkcode when the local check fails. The sheet is read
+// via gviz CSV and cached 60s in the isolate (a stale cache is used when
+// the sheet cannot be reached, so a transient Google failure does not
+// lock students out of codes that were already looked up).
+const CODE_SHEET_CACHE_TTL_MS = 60 * 1000;
+let codeSheetCache = null; // { fetchedAt, names: Map<code, name> }
+
+export function resetCodeSheetCache() {
+  codeSheetCache = null;
+}
+
+async function lookupCodeName(code) {
+  const now = Date.now();
+  if (codeSheetCache && now - codeSheetCache.fetchedAt < CODE_SHEET_CACHE_TTL_MS) {
+    return codeSheetCache.names.get(code) ?? null;
+  }
+  let resp;
+  try {
+    resp = await fetch(`https://docs.google.com/spreadsheets/d/${GET_CODE_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=code`, {
+      headers: { "user-agent": "Mozilla/5.0" },
+      signal: AbortSignal.timeout(30000),
+    });
+  } catch {
+    if (codeSheetCache) return codeSheetCache.names.get(code) ?? null;
+    throw new Error("sheet-unreachable");
+  }
+  if (!resp.ok) {
+    if (codeSheetCache) return codeSheetCache.names.get(code) ?? null;
+    throw new Error("sheet-unreachable");
+  }
+  const rows = parseCertCsv(await resp.text());
+  const names = new Map();
+  for (const row of rows) {
+    const c = String(row[0] ?? "").trim();
+    const n = String(row[1] ?? "").trim();
+    if (!c || !n) continue;
+    if (c === "الرقم الكودي" || n === "الاسم ثلاثي") continue; // header row
+    if (!/[A-Za-z\u0600-\u06FF]/u.test(n)) continue; // junk row (no letter in the name)
+    names.set(c, n);
+  }
+  codeSheetCache = { fetchedAt: now, names };
+  return names.get(code) ?? null;
+}
+
 export default {
   async fetch(request, env, ctx) {
     countRequest(env, ctx);
@@ -8243,6 +8293,43 @@ export default {
       const result = await getCodeFromMacro(name, phone, cfg?.url ?? null);
       if (!result.code) return Response.json({ ok: false, error: result.error || "macro-unreadable" }, { status: 502 });
       return Response.json({ ok: true, code: result.code, whatsapp: buildGetCodeWhatsAppUrl(result.code, name) });
+    }
+    // Live code check for the exam gate (see lookupCodeName): the local
+    // pattern only knows old codes, so the gate asks here when it fails.
+    if (request.method === "GET" && url.pathname === "/checkcode") {
+      const code = String(url.searchParams.get("code") ?? "").trim();
+      if (!/^\d{6,10}$/u.test(code)) return Response.json({ ok: false, error: "bad-input" }, { status: 400 });
+      let name = null;
+      try { name = await lookupCodeName(code); } catch { return Response.json({ ok: false, error: "sheet-unreachable" }, { status: 502 }); }
+      if (name === null) return Response.json({ ok: false });
+      return Response.json({ ok: true, name });
+    }
+    // Certificate in the web app (2026-11-13): GET /cert?code=<code>&level=1|2
+    // reuses the bot's lookupCertificate (same sheets, same logic) and
+    // returns the certificate image bytes with clean headers, or JSON
+    // {ok:false, text} when the code is not found or the exams are
+    // incomplete. One Worker request per lookup; the image download is a
+    // subrequest inside it.
+    if (request.method === "GET" && url.pathname === "/cert") {
+      const code = String(url.searchParams.get("code") ?? "").trim();
+      const level = url.searchParams.get("level");
+      if (!/^\d{6,10}$/u.test(code) || (level !== "1" && level !== "2")) return Response.json({ ok: false, error: "bad-input" }, { status: 400 });
+      const result = await lookupCertificate(code, level === "1" ? "0" : "1");
+      if (result.kind === "photo" && result.bytes) {
+        const headers = new Headers();
+        headers.set("content-type", result.contentType || "image/jpeg");
+        headers.set("content-disposition", `inline; filename="${result.fileName || "certificate"}"`);
+        headers.set("cache-control", "public, max-age=86400");
+        return new Response(result.bytes, { headers });
+      }
+      // A found student who has not finished the exams comes back as a
+      // photo-by-URL (an icon) with a caption — the app shows the caption
+      // as plain text (tags and line breaks flattened).
+      const plainText = (s) => String(s ?? "").replace(/<[^>]*>/gu, "").replace(/\s*\n\s*/gu, " ").trim();
+      if (result.kind === "photo" && result.url) return Response.json({ ok: false, kind: "text", text: plainText(result.caption) });
+      if (result.kind === "text") return Response.json({ ok: false, kind: "text", text: plainText(result.text) });
+      if (result.kind === "error") return Response.json({ ok: false, kind: "error", text: result.text });
+      return Response.json({ ok: false, kind: "not-found", text: "الرقم الكودي غير صحيح." });
     }
     // Public read-only API for external consumers (admin-issued keys, 120 req/min per key).
     if (request.method === "GET" && url.pathname === "/api/dictionary") {

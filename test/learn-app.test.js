@@ -104,6 +104,21 @@ test("learn-app: index.html renders the exam in-app and posts to Google", () => 
   assert.ok(appHtml.includes("enterWithGreeting"), "greeting step after a correct code");
   assert.ok(appHtml.includes("جاري توجيهك للامتحان"), "greeting message");
   assert.ok(appHtml.includes('fetch("codes.json")'), "code -> name map loads lazily at the gate");
+  // Fullscreen (2026-11-13): Telegram's webview plays videos inline, so
+  // fullscreen is requested from a real tap — the lesson-open tap and a
+  // dedicated button under the video — not only from the play event.
+  assert.ok(appHtml.includes("ملء الشاشة"), "fullscreen button under the lesson video");
+  assert.ok(appHtml.includes("data-fs"), "fullscreen button is wired");
+  // Certificate in the app (2026-11-13): pick the level, type the code,
+  // the Worker looks it up and returns the certificate image.
+  assert.ok(appHtml.includes("showCert"), "certificate screen in the app");
+  assert.ok(appHtml.includes("الحصول على الشهادة"), "certificate entry point");
+  assert.ok(appHtml.includes('"/cert?code="'), "certificate lookup goes through the Worker");
+  // Live code check (2026-11-13): a code the baked form pattern does not
+  // know (a student who just registered) is checked against the live
+  // registration sheet instead of being rejected outright.
+  assert.ok(appHtml.includes('"/checkcode?code="'), "gate falls back to a live sheet check");
+  assert.ok(appHtml.includes("جارٍ التحقق من الرقم الكودي"), "checking state while the live check runs");
   // Get-code inside the app (2026-11-13): name + phone -> the Worker asks
   // the registration macro and returns the code.
   assert.ok(appHtml.includes("showGetCode"), "get-code screen in the app");

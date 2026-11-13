@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import worker, { UserStore, resetVoiceFileIdCache } from "../src/index.js";
+import worker, { UserStore, resetVoiceFileIdCache, resetCodeSheetCache } from "../src/index.js";
 import { LEARN_LEVELS } from "../src/learn-manifest.js";
 import { translateFieldValue, VALUE_TRANSLATIONS } from "../src/field-translations.js";
 import { resetAudioCaches, HUMAN_AUDIO_VERSION } from "../src/neural-voice.js";
@@ -165,6 +165,79 @@ test("lesson media proxy rejects non-image/video upstreams", async () => {
   try {
     const response = await worker.fetch(new Request(`https://bot.test/media/${videoId}`), env);
     assert.equal(response.status, 502);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+// A small «تجميع الرقم الكودي» sheet: header row, two real codes, one junk row.
+const CODE_SHEET_CSV = [
+  '"الرقم الكودي","الاسم ثلاثي","رقم الموبايل"',
+  '"54917515","هيلانة ادورد حنا","1202208368"',
+  '"3442935","هيلانة ادورد حنا","1202208368"',
+  '"1","2"',
+].join("\n");
+
+test("checkcode returns the name for a code in the live registration sheet", async () => {
+  resetCodeSheetCache();
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(CODE_SHEET_CSV, { status: 200, headers: { "content-type": "text/csv" } });
+  try {
+    const response = await worker.fetch(new Request("https://bot.test/checkcode?code=54917515"), env);
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    assert.equal(data.ok, true);
+    assert.equal(data.name, "هيلانة ادورد حنا");
+    const missing = await worker.fetch(new Request("https://bot.test/checkcode?code=99999999"), env);
+    assert.equal((await missing.json()).ok, false);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("checkcode rejects a malformed code without reading the sheet", async () => {
+  const response = await worker.fetch(new Request("https://bot.test/checkcode?code=abc"), env);
+  assert.equal(response.status, 400);
+});
+
+test("checkcode reads the sheet once and caches it", async () => {
+  resetCodeSheetCache();
+  let calls = 0;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => { calls++; return new Response(CODE_SHEET_CSV, { status: 200 }); };
+  try {
+    await worker.fetch(new Request("https://bot.test/checkcode?code=54917515"), env);
+    await worker.fetch(new Request("https://bot.test/checkcode?code=3442935"), env);
+    assert.equal(calls, 1);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("cert rejects a malformed code or level without reading the sheets", async () => {
+  const badCode = await worker.fetch(new Request("https://bot.test/cert?code=abc&level=1"), env);
+  assert.equal(badCode.status, 400);
+  const badLevel = await worker.fetch(new Request("https://bot.test/cert?code=54917515&level=3"), env);
+  assert.equal(badLevel.status, 400);
+});
+
+test("cert returns not-found JSON for a code nowhere in the sheets", async () => {
+  const realFetch = globalThis.fetch;
+  const settingsCsv = [
+    '"h1","h2","h3","h4","h5","h6","h7"',
+    '"Sheet1","y","CX","G","CY","CZ","AE,W,J,AA,Da,DB,DC"',
+    '"LEVEL2","C","F","E","H","G","cd,ca,cb,cf,ce,bz"',
+  ].join("\n");
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("gid=36067296")) return new Response(settingsCsv, { status: 200 });
+    return new Response('"x"\n', { status: 200 });
+  };
+  try {
+    const response = await worker.fetch(new Request("https://bot.test/cert?code=99999999&level=1"), env);
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    assert.equal(data.ok, false);
+    assert.equal(data.kind, "not-found");
   } finally {
     globalThis.fetch = realFetch;
   }
