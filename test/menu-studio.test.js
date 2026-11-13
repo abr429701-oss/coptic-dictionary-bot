@@ -89,7 +89,7 @@ test("menu-studio: the reply keyboard is a real bottom keyboard with no callback
   const kb = buildReplyMenuKeyboard(menus, menus.menus[0], { isAdmin: true });
   assert.ok(Array.isArray(kb.keyboard));
   assert.equal(kb.resize_keyboard, true);
-  assert.equal(kb.is_persistent, true);
+  assert.equal(kb.is_persistent, undefined, "menu keyboards are NOT persistent — a persistent keyboard ignores remove_keyboard, so the lesson view could not hide it");
   assert.equal(kb.inline_keyboard, undefined);
   assert.ok(!JSON.stringify(kb).includes("callback_data"));
   assert.ok(JSON.stringify(kb).includes("أول"));

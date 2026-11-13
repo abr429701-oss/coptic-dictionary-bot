@@ -68,7 +68,12 @@ function kb(rows) {
     .map((row) => (Array.isArray(row) ? row : [row]).filter(Boolean).map((label) => ({ text: String(label).slice(0, 64) })))
     .filter((row) => row.length);
   if (!keyboard.length) keyboard.push([{ text: S.MENUS }]);
-  return { keyboard, resize_keyboard: true, is_persistent: true };
+  // NOT persistent (user 2026-11-13): a persistent keyboard tells Telegram
+  // to always show it, so ReplyKeyboardRemove on the lesson's first message
+  // was ignored and the keyboard kept shrinking the lesson view. Without
+  // is_persistent the menu keyboard still shows when a menu opens, the
+  // lesson can hide it, and the user can hide it with the keyboard icon.
+  return { keyboard, resize_keyboard: true };
 }
 
 function chunk(list, size) {
