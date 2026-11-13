@@ -100,6 +100,29 @@
   }
   .lessonArrow { flex: 0 0 auto; align-self: center; font-size: 26px; color: #c3c8b6; line-height: 1; padding-inline-end: 14px; }
 
+  /* ---- level cards on the home screen (2026-11-13): both levels sit on
+     the home screen as two big cards, so the student taps a level instead
+     of scrolling past all 17 level-1 lessons to reach level 2 ---- */
+  .levelCard {
+    display: flex; align-items: stretch; gap: 0; width: 100%; text-align: right; overflow: hidden;
+    background: linear-gradient(150deg, var(--teal-deep), var(--teal));
+    border: 1px solid rgba(230, 198, 92, .55);
+    border-radius: var(--radius); padding: 0; margin: 0 0 14px; cursor: pointer;
+    box-shadow: var(--shadow-lg); color: #fff;
+    transition: transform .15s ease, box-shadow .15s ease;
+  }
+  .levelCard:active { transform: scale(.985); box-shadow: var(--shadow-lg); }
+  .levelCard.lvl2 { background: linear-gradient(150deg, #6b5316, #a5822a); }
+  .levelCardNum {
+    flex: 0 0 72px; display: flex; align-items: center; justify-content: center;
+    font-size: 30px; font-weight: 800; color: var(--gold-bright);
+    border-inline-end: 1px solid rgba(255, 255, 255, .22);
+  }
+  .levelCardBody { flex: 1; min-width: 0; padding: 18px 16px; }
+  .levelCardTitle { display: block; font-size: 19px; font-weight: 800; line-height: 1.5; }
+  .levelCardSub { display: block; font-size: 13px; color: #d5e9e6; margin-top: 4px; }
+  .levelCardArrow { flex: 0 0 auto; align-self: center; font-size: 26px; color: var(--gold-bright); line-height: 1; padding-inline-end: 14px; }
+
   /* ---- lesson view ---- */
   .lessonHead { margin: 24px 2px 18px; }
   .levelTag {
@@ -288,7 +311,8 @@
   var view = document.getElementById("view");
   var titleEl = document.getElementById("title");
   var backBtn = document.getElementById("backBtn");
-  var current = null; // lesson id, "exam", "gate", "greeting", or null = home
+  var current = null; // lesson id, "level:0"/"level:1", "exam", "gate", "greeting", or null = home
+  var currentLevel = null; // index of the level the open lesson belongs to (for Back)
   var lessons = null;
   var examCache = null;
   var examForm = null;
@@ -364,6 +388,7 @@
 
   function showHome() {
     current = null;
+    currentLevel = null;
     examLesson = null;
     examCode = null;
     examCodeEntryId = null;
@@ -390,22 +415,21 @@
         "<button class='getCodeBtn' type='button' id='homeGetCode'>🔑 الحصول على الرقم الكودي</button>" +
         "<button class='getCodeBtn' type='button' id='homeCert'>🎓 الحصول على الشهادة</button>";
       data.levels.forEach(function (level, li) {
-        html += "<section><div class='levelHead'><h2>" + esc(level.title) + "</h2>" +
-          "<span class='countPill'>" + level.lessons.length + " دروس</span></div>";
-        level.lessons.forEach(function (lesson, i) {
-          html += "<button class='lessonCard lvl" + (li + 1) + "' type='button' data-lesson='" + esc(lesson.id) + "'>" +
-            "<span class='lessonThumb'>" + (i + 1) + "</span>" +
-            "<span class='lessonBody'><span class='lessonTitle'>" + esc(lesson.title) + "</span>" +
-            "<span class='lessonChips'>" + lessonChips(lesson) + "</span></span>" +
-            "<span class='lessonArrow'>‹</span></button>";
+        var exams = 0;
+        level.lessons.forEach(function (lesson) {
+          if (lesson.items.some(function (i) { return i.kind === "url"; })) exams++;
         });
-        html += "</section>";
+        html += "<button class='levelCard lvl" + (li + 1) + "' type='button' data-level='" + li + "'>" +
+          "<span class='levelCardNum'>" + arabicNum(li + 1) + "</span>" +
+          "<span class='levelCardBody'><span class='levelCardTitle'>" + esc(level.title) + "</span>" +
+          "<span class='levelCardSub'>" + level.lessons.length + " دروس · " + exams + " امتحانات — اضغط لعرض الدروس</span></span>" +
+          "<span class='levelCardArrow'>‹</span></button>";
       });
       view.innerHTML = html;
       document.getElementById("homeGetCode").addEventListener("click", function () { showGetCode("home"); });
       document.getElementById("homeCert").addEventListener("click", function () { showCert(); });
-      view.querySelectorAll("[data-lesson]").forEach(function (btn) {
-        btn.addEventListener("click", function () { showLesson(btn.getAttribute("data-lesson")); });
+      view.querySelectorAll("[data-level]").forEach(function (btn) {
+        btn.addEventListener("click", function () { showLevel(parseInt(btn.getAttribute("data-level"), 10)); });
       });
       window.scrollTo(0, 0);
     }).catch(function () {
@@ -413,11 +437,42 @@
     });
   }
 
+  // One level's lesson list (2026-11-13): the home screen shows only the
+  // two level cards; tapping a card opens that level's lessons here, so
+  // level 2 is one tap away instead of a long scroll past level 1.
+  function showLevel(li) {
+    var level = (lessons.levels || [])[li];
+    if (!level) return;
+    current = "level:" + li;
+    currentLevel = li;
+    examLesson = null;
+    examCode = null;
+    examCodeEntryId = null;
+    examQuestions = null;
+    titleEl.textContent = level.title;
+    backBtn.style.display = "";
+    if (tg && tg.BackButton) { try { tg.BackButton.show(); } catch (e) {} }
+    var html = "<div class='levelHead'><h2>" + esc(level.title) + "</h2>" +
+      "<span class='countPill'>" + level.lessons.length + " دروس</span></div>";
+    level.lessons.forEach(function (lesson, i) {
+      html += "<button class='lessonCard lvl" + (li + 1) + "' type='button' data-lesson='" + esc(lesson.id) + "'>" +
+        "<span class='lessonThumb'>" + (i + 1) + "</span>" +
+        "<span class='lessonBody'><span class='lessonTitle'>" + esc(lesson.title) + "</span>" +
+        "<span class='lessonChips'>" + lessonChips(lesson) + "</span></span>" +
+        "<span class='lessonArrow'>‹</span></button>";
+    });
+    view.innerHTML = html;
+    view.querySelectorAll("[data-lesson]").forEach(function (btn) {
+      btn.addEventListener("click", function () { showLesson(btn.getAttribute("data-lesson")); });
+    });
+    window.scrollTo(0, 0);
+  }
+
   function findLesson(id) {
     var found = null;
-    (lessons.levels || []).forEach(function (level) {
+    (lessons.levels || []).forEach(function (level, li) {
       (level.lessons || []).forEach(function (lesson) {
-        if (lesson.id === id) found = { lesson: lesson, levelTitle: level.title };
+        if (lesson.id === id) found = { lesson: lesson, levelTitle: level.title, levelIndex: li };
       });
     });
     return found;
@@ -504,6 +559,7 @@
     if (!found) return;
     var lesson = found.lesson;
     current = id;
+    currentLevel = found.levelIndex;
     examLesson = null;
     examCode = null;
     examCodeEntryId = null;
@@ -543,7 +599,10 @@
       return;
     }
     if (examLesson) { showLesson(examLesson); return; }
-    if (current) showHome();
+    // Back from a lesson returns to its level list, not to the home
+    // screen; back from a level list returns home.
+    if (current && String(current).indexOf("level:") === 0) { showHome(); return; }
+    if (current) { showLevel(currentLevel); return; }
   }
   backBtn.addEventListener("click", goBack);
   if (tg && tg.BackButton) { try { tg.BackButton.onClick(goBack); } catch (e) {} }

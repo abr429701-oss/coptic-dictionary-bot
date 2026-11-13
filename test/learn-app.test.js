@@ -68,6 +68,21 @@ test("learn-app: index.html loads the data and plays video natively", () => {
   assert.ok(appHtml.includes("الامتحان الإلكتروني"), "exam button label");
 });
 
+test("learn-app: home shows both levels as cards, lessons open per level", () => {
+  // Home (2026-11-13): the two levels sit on the home screen as big cards
+  // (one tap to a level's lessons) instead of both full lesson lists
+  // stacked — reaching level 2 used to mean scrolling past all 17
+  // level-1 lessons.
+  assert.ok(appHtml.includes("showLevel"), "level view function");
+  assert.ok(appHtml.includes("levelCard"), "level cards on the home screen");
+  assert.ok(appHtml.includes("data-level"), "level cards are wired by level index");
+  assert.ok(appHtml.includes("اضغط لعرض الدروس"), "level card invites the tap");
+  // Back from a lesson returns to its level list; back from a level
+  // returns home.
+  assert.ok(appHtml.includes("currentLevel"), "the lesson remembers its level for Back");
+  assert.ok(appHtml.includes("showLevel(currentLevel)"), "Back from a lesson opens its level list");
+});
+
 test("learn-app: exams.json covers all 12 forms with submit URLs and code validation", () => {
   assert.equal(examJson.forms.length, 12, "one form per exam link");
   const answerable = examJson.forms.flatMap((f) => f.questions.filter((q) => q.entryId !== null));
