@@ -349,7 +349,7 @@ export function driveDownloadUrl(driveId) {
 export async function downloadDriveFile(driveId, fetchFn = globalThis.fetch) {
   const response = await fetchFn(driveDownloadUrl(driveId), {
     redirect: "follow",
-    signal: AbortSignal.timeout(30000),
+    signal: AbortSignal.timeout(120000),
   });
   const type = response.headers?.get?.("content-type") ?? "";
   if (!response.ok || type.includes("text/html")) {
@@ -379,7 +379,7 @@ export async function uploadLearnFile(env, chatId, item, fetchFn = globalThis.fe
   const response = await fetchFn(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
     method: "POST",
     body: form,
-    signal: AbortSignal.timeout(60000),
+    signal: AbortSignal.timeout(120000),
   });
   const parsed = await response.json().catch(() => null);
   if (!response.ok || !parsed?.ok) {
@@ -399,6 +399,77 @@ export async function uploadLearnFile(env, chatId, item, fetchFn = globalThis.fe
     }).catch(() => null);
   }
   return { fileId, fileUniqueId: media?.file_unique_id ?? "" };
+}
+
+// ---------------------------------------------------------------------------
+// Fast import (2026-11-13): the old loop uploaded one file at a time — a
+// Drive download plus a Telegram upload per file, 20-40s each, so 50 files
+// took 20+ minutes, and 30 of them failed on the slow run (flood control /
+// slow downloads, with no retry at all). The new loop uploads
+// LEARN_IMPORT_CONCURRENCY files at once and retries transient failures.
+// ---------------------------------------------------------------------------
+
+export const LEARN_IMPORT_CONCURRENCY = 5;
+export const LEARN_IMPORT_ATTEMPTS = 3;
+
+// Telegram flood control names the wait in the error ("Too Many Requests:
+// retry after 35"). Returns the seconds to wait (capped at 60), or null
+// when the error carries no wait.
+export function parseRetryAfter(error) {
+  const text = error instanceof Error ? error.message : String(error ?? "");
+  const match = /retry after (\d+)/i.exec(text);
+  if (!match) return null;
+  return Math.min(Math.max(parseInt(match[1], 10) || 0, 0), 60);
+}
+
+export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Upload one item, retrying transient failures: a flood-control wait is
+// honoured exactly; anything else waits 2s, then 5s. Permanent failures
+// (a bad Drive id, a file over the cap) still fail after all attempts.
+export async function uploadWithRetry(item, uploadFn, { attempts = LEARN_IMPORT_ATTEMPTS, sleepFn = sleep } = {}) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await uploadFn(item);
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts) break;
+      const retryAfter = parseRetryAfter(error);
+      await sleepFn(retryAfter != null ? retryAfter * 1000 : attempt === 1 ? 2000 : 5000);
+    }
+  }
+  throw lastError;
+}
+
+// Upload items in batches of `concurrency` at a time; onSettled(item,
+// result) runs for every item as it settles (result is { ok: true,
+// uploaded } or { ok: false, error }). Item failures never throw here —
+// they are reported through onSettled, and a throwing onSettled cannot
+// abort the batch. Returns { done, failed }.
+export async function runImportUploads(items, uploadFn, onSettled, { concurrency = LEARN_IMPORT_CONCURRENCY, attempts = LEARN_IMPORT_ATTEMPTS, sleepFn = sleep } = {}) {
+  let done = 0;
+  let failed = 0;
+  for (let i = 0; i < items.length; i += concurrency) {
+    const batch = items.slice(i, i + concurrency);
+    await Promise.all(batch.map(async (item) => {
+      let result;
+      try {
+        const uploaded = await uploadWithRetry(item, uploadFn, { attempts, sleepFn });
+        done += 1;
+        result = { ok: true, uploaded };
+      } catch (error) {
+        failed += 1;
+        result = { ok: false, error };
+      }
+      try {
+        await onSettled(item, result);
+      } catch (error) {
+        console.error("Learn import onSettled failed", error instanceof Error ? error.message : "unknown error");
+      }
+    }));
+  }
+  return { done, failed };
 }
 
 // ---------------------------------------------------------------------------

@@ -24,6 +24,9 @@ import {
   mergeMenus,
   downloadDriveFile,
   uploadLearnFile,
+  parseRetryAfter,
+  uploadWithRetry,
+  runImportUploads,
   parseImportLearnArg,
   learnImportStartText,
   learnProgressText,
@@ -658,6 +661,62 @@ test("learn-import: download rejects HTML/empty, upload captures file_id and del
     if (String(url).includes("drive.usercontent")) return new Response(new Uint8Array([1]).buffer, { status: 200, headers: { "content-type": "video/mp4" } });
     return Response.json({ ok: false, error_code: 400, description: "Bad Request: file is too big" });
   }), /file is too big/);
+});
+
+test("learn-import: fast import honours retry_after, retries floods, uploads 5 at a time", async () => {
+  assert.equal(parseRetryAfter(new Error("Telegram sendVideo failed: Too Many Requests: retry after 35")), 35);
+  assert.equal(parseRetryAfter(new Error("Too Many Requests: retry after 120")), 60, "the retry wait is capped at 60s");
+  assert.equal(parseRetryAfter(new Error("Drive download failed: HTTP 404")), null);
+  assert.equal(parseRetryAfter("retry after 7"), 7);
+
+  // uploadWithRetry: two flood failures, then success — three attempts, and
+  // the waits honour the retry_after values.
+  const waits = [];
+  let attempts = 0;
+  const uploaded = await uploadWithRetry({ key: "x" }, async () => {
+    attempts += 1;
+    if (attempts < 3) throw new Error("Telegram sendVideo failed: Too Many Requests: retry after 2");
+    return { fileId: "VID_1", fileUniqueId: "UVID_1" };
+  }, { sleepFn: async (ms) => { waits.push(ms); } });
+  assert.equal(uploaded.fileId, "VID_1");
+  assert.equal(attempts, 3);
+  assert.deepEqual(waits, [2000, 2000]);
+
+  // A permanent failure still fails after all three attempts.
+  let tries = 0;
+  await assert.rejects(() => uploadWithRetry({ key: "y" }, async () => {
+    tries += 1;
+    throw new Error("Drive download failed: HTTP 404");
+  }, { sleepFn: async () => {} }), /HTTP 404/);
+  assert.equal(tries, 3);
+
+  // runImportUploads: 10 items, 15ms each — at most 5 in flight at once,
+  // all finish, onSettled sees every item.
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const settledKeys = [];
+  const fakeUpload = async (item) => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    inFlight -= 1;
+    return { fileId: `VID_${item.key}`, fileUniqueId: `UVID_${item.key}` };
+  };
+  const items10 = learnUploadItems().slice(0, 10);
+  const counts = await runImportUploads(items10, fakeUpload, async (item, result) => {
+    assert.equal(result.ok, true);
+    settledKeys.push(item.key);
+  }, { sleepFn: async () => {} });
+  assert.deepEqual(counts, { done: 10, failed: 0 });
+  assert.equal(maxInFlight, 5, "five uploads run at once");
+  assert.equal(settledKeys.length, 10);
+
+  // One permanently failing item does not stop the rest.
+  const counts2 = await runImportUploads(items10, async (item) => {
+    if (item.key === items10[3].key) throw new Error("boom");
+    return { fileId: "VID", fileUniqueId: "UVID" };
+  }, async () => {}, { sleepFn: async () => {} });
+  assert.deepEqual(counts2, { done: 9, failed: 1 });
 });
 
 // ---------------------------------------------------------------------------

@@ -486,19 +486,33 @@ async function runLearnImportAll(env, chatId) {
     // lesson renumbers the ones after it), so trusting its keys would send
     // the wrong videos.
     const pending = isImportStateTrusted(state) ? learnPendingItems(state, items, hashChanged) : items;
-    for (const item of pending) {
-      try {
-        const uploaded = await uploadLearnFile(env, chatId, item);
-        state.items[item.key] = { status: "done", fileId: uploaded.fileId, fileUniqueId: uploaded.fileUniqueId, driveId: item.driveId, error: "", at: new Date().toISOString() };
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : "unknown error";
+    // Fast import (2026-11-13): LEARN_IMPORT_CONCURRENCY files at once —
+    // each file is a Drive download plus a Telegram upload, both I/O, so
+    // one-at-a-time wasted most of the run waiting — with a retry on
+    // flood-control and transient errors (see uploadWithRetry in
+    // learn-import.js). State saves are chained through one promise so
+    // concurrent completions cannot clobber each other's full-state put;
+    // the in-memory state is the union, and the final save below writes
+    // it all. The old sequential loop took 20+ minutes for 50 files and
+    // failed 30 of them with no retry.
+    let saveQueue = Promise.resolve();
+    const saveState = () => {
+      saveQueue = saveQueue.then(() => saveImportState(env, state));
+      return saveQueue;
+    };
+    await runImportUploads(pending, (item) => uploadLearnFile(env, chatId, item), async (item, result) => {
+      if (result.ok) {
+        state.items[item.key] = { status: "done", fileId: result.uploaded.fileId, fileUniqueId: result.uploaded.fileUniqueId, driveId: item.driveId, error: "", at: new Date().toISOString() };
+      } else {
+        const reason = result.error instanceof Error ? result.error.message : "unknown error";
         state.items[item.key] = { status: "failed", fileId: "", fileUniqueId: "", driveId: item.driveId, error: reason.slice(0, 300), at: new Date().toISOString() };
         errors.push(`${item.title} (${item.kind}): ${reason.slice(0, 200)}`);
       }
       // Save after every item: if the platform interrupts the run, the next
       // /importlearn resumes instead of re-uploading the same files.
-      await saveImportState(env, state);
-    }
+      await saveState();
+    });
+    await saveQueue;
     state.manifestHash = currentHash;
     state.stateVersion = 2;
     await saveImportState(env, state);
@@ -1222,7 +1236,7 @@ import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VI
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 import { getHiddenUi, setHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
 import { LEARN_LEVELS } from "./learn-manifest.js";
-import { LEARN_IMPORT_KEY, LEARN_GET_CODE_TEXT, learnUploadItems, emptyImportState, normalizeImportState, importProgress, learnPendingItems, learnManifestHash, isImportStateTrusted, findLearnLesson, learnLessonSendPlan, buildLearnMenus, mergeMenus, uploadLearnFile, parseImportLearnArg, learnImportStartText, learnProgressText } from "./learn-import.js";
+import { LEARN_IMPORT_KEY, LEARN_GET_CODE_TEXT, learnUploadItems, emptyImportState, normalizeImportState, importProgress, learnPendingItems, learnManifestHash, isImportStateTrusted, findLearnLesson, learnLessonSendPlan, buildLearnMenus, mergeMenus, uploadLearnFile, runImportUploads, parseImportLearnArg, learnImportStartText, learnProgressText } from "./learn-import.js";
 
 // ---- reply-keyboard menus (real buttons under the field, no inline) --------
 // The position of a user inside the menus is remembered so a plain-text tap can
