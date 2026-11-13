@@ -130,6 +130,46 @@ test("lesson video proxy rejects ids outside the lesson manifest", async () => {
   assert.equal(response.status, 404);
 });
 
+test("lesson media proxy serves lesson photos with clean headers", async () => {
+  const photoId = LEARN_LEVELS.flatMap((level) => level.lessons)
+    .flatMap((lesson) => lesson.items)
+    .find((item) => item.kind === "photo").driveId;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(new Uint8Array([255, 216, 255, 224]), {
+    status: 200,
+    headers: {
+      "content-type": "image/jpeg",
+      "content-length": "40450",
+      "content-disposition": "attachment; filename=\"x.jpg\"",
+    },
+  });
+  try {
+    const response = await worker.fetch(new Request(`https://bot.test/media/${photoId}`), env);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "image/jpeg");
+    assert.equal(response.headers.get("content-disposition"), null);
+    assert.equal((await response.arrayBuffer()).byteLength, 4);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("lesson media proxy rejects non-image/video upstreams", async () => {
+  const videoId = LEARN_LEVELS.flatMap((level) => level.lessons)
+    .flatMap((lesson) => lesson.items)
+    .find((item) => item.kind === "video").driveId;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("<html>quota exceeded</html>", {
+    status: 200, headers: { "content-type": "text/html" },
+  });
+  try {
+    const response = await worker.fetch(new Request(`https://bot.test/media/${videoId}`), env);
+    assert.equal(response.status, 502);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test("scheduled keep-warm tick runs without storage or Telegram work", async () => {
   const calls = [];
   fakeTelegramApi(calls);

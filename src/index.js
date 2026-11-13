@@ -1,4 +1,5 @@
 import records from "../data/dictionary.json" with { type: "json" };
+import lessonMedia from "./lesson-media.json" with { type: "json" };
 import { translateFieldValue } from "./field-translations.js";
 import welcomeImageBase64 from "./welcome-image.js";
 import { createAdminExtras } from "./admin-extra.js";
@@ -1126,7 +1127,7 @@ import { audioUrl, audioVersion, fetchHumanSpeech, fetchPrebuiltSpeech, isSingle
 import { copticDateNow, alphabetText, letterStatsText, longestText, originsText, wordCountText, startsWithText, similarText, translateText, vocabText, startGuess, handleGuessReply } from "./features.js";
 import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, suggestSimilar, helpText, retentionText, opsText, recordById, levenshtein } from "./new-features.js";
 import { lookupCertificate } from "./certificates.js";
-import { getCodeFromMacro, buildGetCodeReply, normalizeGetCodePhone, getCodePhoneValid } from "./getcode.js";
+import { getCodeFromMacro, buildGetCodeReply, buildGetCodeWhatsAppUrl, normalizeGetCodePhone, getCodePhoneValid } from "./getcode.js";
 import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VIDEO_MENU_ID, cleanMenuTitle, cleanMenuText, cleanButtonLabel, cleanUrl, cleanCommand, normalizeMenus, findMenu, findButton, rootMenus, descendantMenuIds, buildMenuKeyboard, buildRootKeyboard, menuOpenText, menuAdminListText, menuAdminDetailText, parseMenuTarget, parseButtonTarget, addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton, ensureVideoMenu } from "./menu-builder.js";
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 import { getHiddenUi, setHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
@@ -8155,25 +8156,21 @@ async function handleHiddenUiCallback({ env, callback }) {
   }).catch(() => null);
 }
 
-// Lesson videos, served through the Worker (2026-11-13): the Drive download
-// URL answers a video Range request with a 303 redirect to another host, and
+// Lesson media, served through the Worker (2026-11-13): the Drive download
+// URL answers a Range request with a 303 redirect to another host, and
 // media players in Telegram's webview fail on that — the direct usercontent
 // URL works, but Drive also sends Content-Disposition: attachment, which
-// some webviews refuse to play inline. So the app points its <video> tags
-// here instead: the Worker forwards the client's Range header to Drive and
-// streams the 200/206 back with clean headers (no redirect, no attachment
-// disposition for the player to choke on). Only the 27 video file ids from
-// the frozen lesson manifest are served — a closed set, not an open proxy.
-// Cost (user-approved 2026-11-13, "بطلب صغير"): one Worker request per Range
-// fetch (initial load + buffering/seeks) — a handful per view, far below the
-// 100k/day free limit. The user explicitly rejected the Drive preview iframe
-// player, so there is no in-app player fallback — only a plain Drive link.
-const LESSON_VIDEO_IDS = new Set(
-  LEARN_LEVELS.flatMap((level) => level.lessons)
-    .flatMap((lesson) => lesson.items)
-    .filter((item) => item.kind === "video" && item.driveId)
-    .map((item) => item.driveId),
-);
+// some webviews refuse to play inline (video) or to render at all (images).
+// So the app points its <video> and <img> tags here instead: the Worker
+// forwards the client's Range header to Drive and streams the 200/206 back
+// with clean headers (no redirect, no attachment disposition). Only the
+// lesson media ids from src/lesson-media.json are served — a closed set,
+// not an open proxy (videos + lesson photos + exam question images).
+// Cost (user-approved 2026-11-13, "بطلب صغير"): one Worker request per
+// Range fetch for video (initial load + buffering/seeks) — a handful per
+// view; one per photo/image load. The user explicitly rejected the Drive
+// preview iframe player, so there is no in-app player fallback.
+const LESSON_MEDIA_IDS = new Set(lessonMedia.ids);
 
 // Serialized background chain: fast-ack hands each update to ctx.waitUntil, but updates
 // still execute one after another so message sequences (e.g. /record then a voice note)
@@ -8202,25 +8199,24 @@ export default {
         driveConfigured: Boolean(await driveConfig(env).catch(() => null)),
       });
     }
-    // Lesson video proxy (see LESSON_VIDEO_IDS): stream a lesson video from
-    // Drive with clean media headers. A video view costs one Worker request
-    // per Range fetch (initial load + buffering/seeks) — a handful per view,
-    // far below the 100k/day free limit.
-    const video = /^\/video\/([A-Za-z0-9_-]+)$/u.exec(url.pathname);
-    if (video && request.method === "GET") {
-      if (!LESSON_VIDEO_IDS.has(video[1])) return new Response("Not found", { status: 404 });
+    // Lesson media proxy (see LESSON_MEDIA_IDS): stream a lesson video or
+    // photo from Drive with clean media headers. /video/<id> is kept for
+    // older cached app builds; the app now uses /media/<id> for both.
+    const media = /^\/(?:video|media)\/([A-Za-z0-9_-]+)$/u.exec(url.pathname);
+    if (media && request.method === "GET") {
+      if (!LESSON_MEDIA_IDS.has(media[1])) return new Response("Not found", { status: 404 });
       const upstreamHeaders = {};
       const range = request.headers.get("range");
       if (range) upstreamHeaders.range = range;
       let upstream;
       try {
-        upstream = await fetch(`https://drive.google.com/uc?export=download&id=${video[1]}`, { headers: upstreamHeaders });
+        upstream = await fetch(`https://drive.google.com/uc?export=download&id=${media[1]}`, { headers: upstreamHeaders });
       } catch {
-        return new Response("Video unavailable", { status: 502 });
+        return new Response("Media unavailable", { status: 502 });
       }
       const type = upstream.headers.get("content-type") ?? "";
-      if (!upstream.ok || !type.startsWith("video/")) {
-        return new Response("Video unavailable", { status: 502 });
+      if (!upstream.ok || !(type.startsWith("video/") || type.startsWith("image/"))) {
+        return new Response("Media unavailable", { status: 502 });
       }
       const out = new Headers();
       out.set("content-type", type);
@@ -8230,6 +8226,23 @@ export default {
       }
       out.set("cache-control", "public, max-age=86400");
       return new Response(upstream.body, { status: upstream.status, headers: out });
+    }
+    // Get-code inside the web app (2026-11-13): the app POSTs {name, phone}
+    // and the Worker forwards it to the bot's Apps Script web app (the same
+    // generateAndStoreCode the bot's /getcode uses) and returns the code.
+    // The browser cannot call the macro directly and read the answer (Apps
+    // Script sends no CORS headers), so the Worker is the bridge. One
+    // Worker request per lookup.
+    if (request.method === "POST" && url.pathname === "/getcode") {
+      let body = {};
+      try { body = await request.json(); } catch { return Response.json({ ok: false, error: "bad-request" }, { status: 400 }); }
+      const name = String(body.name ?? "").trim();
+      const phone = String(body.phone ?? "");
+      if (!name || !getCodePhoneValid(phone)) return Response.json({ ok: false, error: "bad-input" }, { status: 400 });
+      const cfg = await driveConfig(env).catch(() => null);
+      const result = await getCodeFromMacro(name, phone, cfg?.url ?? null);
+      if (!result.code) return Response.json({ ok: false, error: result.error || "macro-unreadable" }, { status: 502 });
+      return Response.json({ ok: true, code: result.code, whatsapp: buildGetCodeWhatsAppUrl(result.code, name) });
     }
     // Public read-only API for external consumers (admin-issued keys, 120 req/min per key).
     if (request.method === "GET" && url.pathname === "/api/dictionary") {
