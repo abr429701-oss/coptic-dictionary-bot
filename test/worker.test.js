@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import worker, { UserStore, resetVoiceFileIdCache, resetCodeSheetCache } from "../src/index.js";
+import worker, { UserStore, resetVoiceFileIdCache, resetCodeSheetCache, resetExamPatternCache } from "../src/index.js";
 import { LEARN_LEVELS } from "../src/learn-manifest.js";
 import { translateFieldValue, VALUE_TRANSLATIONS } from "../src/field-translations.js";
 import { resetAudioCaches, HUMAN_AUDIO_VERSION } from "../src/neural-voice.js";
@@ -238,6 +238,59 @@ test("cert returns not-found JSON for a code nowhere in the sheets", async () =>
     const data = await response.json();
     assert.equal(data.ok, false);
     assert.equal(data.kind, "not-found");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+// A minimal viewform page: one code question with a regex validation.
+const EXAM_PATTERN_PAGE = (() => {
+  const codeQ = [1, "الرقم الكودي", "", 0, [[123, null, 1, null, [[4, 301, ["(54917515|6043415)"], "الرقم الكودي غير صحيح"]]]], null, null, null, null, null, null, [null, ""]];
+  return `<html><head><script>FB_PUBLIC_LOAD_DATA_ = ${JSON.stringify([null, ["label", [codeQ], [], null, null, null, null, [0, ""], "title"]])};</script></head></html>`;
+})();
+
+test("exam-pattern returns the live code pattern for a lesson exam form", async () => {
+  resetExamPatternCache();
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(EXAM_PATTERN_PAGE, { status: 200 });
+  try {
+    const response = await worker.fetch(new Request("https://bot.test/exam-pattern?formId=1Gts_xgdk3-g7elOTmSXtpouZMvFVLwdQ4fleO3usLYg"), env);
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    assert.equal(data.ok, true);
+    assert.equal(data.pattern, "(54917515|6043415)");
+    assert.equal(data.errorText, "الرقم الكودي غير صحيح");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("exam-pattern rejects a form id outside the lesson exams", async () => {
+  const response = await worker.fetch(new Request("https://bot.test/exam-pattern?formId=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), env);
+  assert.equal(response.status, 400);
+});
+
+test("exam-pattern reads the form once and caches it", async () => {
+  resetExamPatternCache();
+  let calls = 0;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => { calls++; return new Response(EXAM_PATTERN_PAGE, { status: 200 }); };
+  try {
+    await worker.fetch(new Request("https://bot.test/exam-pattern?formId=1Gts_xgdk3-g7elOTmSXtpouZMvFVLwdQ4fleO3usLYg"), env);
+    await worker.fetch(new Request("https://bot.test/exam-pattern?formId=1Gts_xgdk3-g7elOTmSXtpouZMvFVLwdQ4fleO3usLYg"), env);
+    assert.equal(calls, 1);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("exam-pattern returns 502 when the form cannot be read", async () => {
+  resetExamPatternCache();
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("nope", { status: 500 });
+  try {
+    const response = await worker.fetch(new Request("https://bot.test/exam-pattern?formId=1Gts_xgdk3-g7elOTmSXtpouZMvFVLwdQ4fleO3usLYg"), env);
+    assert.equal(response.status, 502);
   } finally {
     globalThis.fetch = realFetch;
   }

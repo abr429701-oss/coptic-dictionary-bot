@@ -161,6 +161,24 @@
     border-radius: 12px; cursor: pointer;
   }
   .fsBtn:active { transform: scale(.98); }
+  /* Cinema mode — the definitive fullscreen (2026-11-13). The browser
+     fullscreen API does not work inside Telegram's webview at all, so
+     fullscreen here is a fixed overlay that fills the whole webview:
+     pure DOM and CSS, no gesture and no browser permission can block it. */
+  .cinema {
+    position: fixed; inset: 0; z-index: 1000; background: #000;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+  }
+  .cinema video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+  .cinemaClose {
+    position: absolute; top: 14px; inset-inline-end: 14px; z-index: 1001;
+    width: 44px; height: 44px; border-radius: 50%; border: 0; cursor: pointer;
+    background: rgba(255, 255, 255, .18); color: #fff; font-size: 22px; font-weight: 700;
+  }
+  .cinemaHint {
+    position: absolute; bottom: 18px; left: 0; right: 0; z-index: 1001;
+    text-align: center; color: rgba(255, 255, 255, .75); font-size: 13px; pointer-events: none;
+  }
   .linkBtn {
     display: block; margin: 14px auto 0; padding: 0; border: 0; background: none;
     color: var(--teal); font-size: 14px; font-weight: 700; cursor: pointer; text-decoration: underline;
@@ -436,14 +454,49 @@
     return "";
   }
 
-  function enterFullscreen(v) {
-    try {
-      if (v.webkitEnterFullscreen) { v.webkitEnterFullscreen(); return; }
-      if (v.requestFullscreen) {
-        var p = v.requestFullscreen();
-        if (p && p.catch) p.catch(function () {});
-      }
-    } catch (e) {}
+  // Cinema mode — the definitive fullscreen (2026-11-13). The browser
+  // fullscreen API does not work inside Telegram's webview at all: its
+  // inline playback is forced on, and fullscreen requests are rejected
+  // even from a real tap. So fullscreen is a fixed overlay that fills
+  // the whole webview — pure DOM and CSS, no gesture and no browser
+  // permission can block it. The video node itself is moved into the
+  // overlay (playback keeps its position) and moved back to its place
+  // when the overlay closes. Telegram's own fullscreen (the web app
+  // taking the whole screen) is requested too when the API exists.
+  var cinemaVideo = null;
+  var cinemaHome = null; // {parent, next} — where the video goes back to
+  function openCinema(v) {
+    if (!v || cinemaVideo === v) return;
+    closeCinema(true); // close any other video's overlay first
+    cinemaVideo = v;
+    cinemaHome = { parent: v.parentNode, next: v.nextSibling };
+    var overlay = document.createElement("div");
+    overlay.className = "cinema";
+    overlay.id = "cinemaOverlay";
+    var close = document.createElement("button");
+    close.className = "cinemaClose";
+    close.type = "button";
+    close.textContent = "✕";
+    close.addEventListener("click", function () { closeCinema(); });
+    overlay.appendChild(close);
+    overlay.appendChild(v);
+    var hint = document.createElement("div");
+    hint.className = "cinemaHint";
+    hint.textContent = "للرجوع للدرس اضغط ✕ — ولفّ التليفون لو عايز الفيديو بالعرض";
+    overlay.appendChild(hint);
+    document.body.appendChild(overlay);
+    if (tg && tg.requestFullscreen) { try { tg.requestFullscreen(); } catch (e) {} }
+    try { var p = v.play(); if (p && p.catch) p.catch(function () {}); } catch (e) {}
+  }
+  function closeCinema(silent) {
+    var overlay = document.getElementById("cinemaOverlay");
+    if (!overlay || !cinemaVideo) return;
+    var v = cinemaVideo;
+    if (cinemaHome && cinemaHome.parent) cinemaHome.parent.insertBefore(v, cinemaHome.next);
+    overlay.remove();
+    cinemaVideo = null;
+    cinemaHome = null;
+    if (!silent && tg && tg.exitFullscreen) { try { tg.exitFullscreen(); } catch (e) {} }
   }
 
   function showLesson(id) {
@@ -465,31 +518,24 @@
       btn.addEventListener("click", function () { openExam(btn.getAttribute("data-exam"), id); });
     });
     view.querySelectorAll("video").forEach(function (v) {
-      // Fullscreen must be requested from a real tap: Telegram's webview
-      // plays videos inline (its inline-playback setting is on), so the
-      // no-inline-attribute trick alone does not fullscreen here, and a
-      // fullscreen request from the play event is rejected (not a gesture).
-      // So the lesson-card tap itself tries it right away, and the
-      // "ملء الشاشة" button under the video does it on the student's tap.
-      v.addEventListener("play", function () { enterFullscreen(v); }, { once: true });
-      var p = null;
-      try { p = v.play(); } catch (e) {}
-      if (p && p.catch) p.catch(function () {});
-      enterFullscreen(v); // same tap that opened the lesson — best effort
+      // The lesson video opens fullscreen automatically: cinema mode is a
+      // fixed overlay (pure DOM/CSS), so it needs no gesture and no browser
+      // permission — it works in Telegram's webview where the browser
+      // fullscreen API is blocked outright.
+      openCinema(v);
     });
     view.querySelectorAll("[data-fs]").forEach(function (btn) {
       btn.addEventListener("click", function () {
         var wrap = btn.closest(".videoWrap");
         var v = wrap ? wrap.querySelector("video") : null;
-        if (!v) return;
-        try { var p = v.play(); if (p && p.catch) p.catch(function () {}); } catch (e) {}
-        enterFullscreen(v);
+        if (v) openCinema(v);
       });
     });
     window.scrollTo(0, 0);
   }
 
   function goBack() {
+    if (cinemaVideo) { closeCinema(); return; }
     if (current === "cert") { showHome(); return; }
     if (current === "getcode") {
       if (getCodeFrom === "gate" && lastGate) { showCodeGate(lastGate.form, lastGate.codeQ, lastGate.lessonId); return; }
@@ -679,11 +725,27 @@
           .then(function (res) {
             if (res.image) {
               var url = URL.createObjectURL(res.image);
+              // Downloading from Telegram's webview: the `download`
+              // attribute on a blob link does nothing there (the webview
+              // has no download handler), so the primary path is the
+              // native share sheet — it always offers Save to Files /
+              // Save Image — and the direct link to /cert (attachment
+              // disposition) is the fallback for browsers that download.
+              var certUrl = "/cert?code=" + encodeURIComponent(code) + "&level=" + certLevel;
               view.innerHTML = "<div class='gateCard'><div class='gateIcon'>🎓</div>" +
                 "<h2>شهادتك</h2>" +
                 "<img class='photo' src='" + url + "' alt='الشهادة'>" +
-                "<a class='examBtn' href='" + url + "' download='certificate.jpg'>⬇ تحميل الشهادة</a>" +
+                "<button class='examBtn' type='button' id='certShare'>📤 مشاركة / حفظ الشهادة</button>" +
+                "<a class='examBtn' href='" + certUrl + "' download='certificate.jpg' target='_blank' rel='noopener'>⬇ تحميل الشهادة</a>" +
                 "<button class='linkBtn' type='button' id='certDone'>رجوع</button></div>";
+              document.getElementById("certShare").addEventListener("click", function () {
+                var file = new File([res.image], "certificate.jpg", { type: res.image.type || "image/jpeg" });
+                if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+                  navigator.share({ files: [file] }).catch(function () {});
+                } else {
+                  window.open(certUrl, "_blank");
+                }
+              });
               document.getElementById("certDone").addEventListener("click", goBack);
               window.scrollTo(0, 0);
               return;
@@ -754,13 +816,16 @@
     document.getElementById("gateGetCode").addEventListener("click", function () { showGetCode("gate"); });
     // Live check while typing: a wrong code shows the error immediately,
     // a matching code clears it, turns the field green and unlocks entry.
-    // The local pattern only knows the codes that existed when the teacher
-    // last edited the form, so a code the local check rejects gets one
-    // live check against the registration sheet (debounced, 7+ digits):
-    // a student who just got a code is in the sheet even though the form
-    // is not updated yet. The live check also returns the student's name,
-    // so the greeting works for new users too.
-    var gateVerified = null; // {code, name} once the current value is verified
+    // The local pattern is baked from the form at build time, so it goes
+    // stale when the teacher updates the form's code list — a code the
+    // local check rejects gets one live check against THIS form's current
+    // pattern (debounced, 7+ digits). The form's own list decides who
+    // may enter THIS exam (the teacher's sequencing: exam 2 only opens
+    // for codes that finished exam 1) — the registration sheet must not
+    // decide eligibility, it holds every student and would let anyone
+    // skip ahead. The name for the greeting comes from codes.json, or
+    // from the sheet when the name is not baked yet (see enterWithGreeting).
+    var gateVerified = null; // {code} once the current value is verified
     var gateTimer = null;
     var gateSeq = 0;
     function gateFail(msg) {
@@ -788,11 +853,12 @@
         input.classList.remove("invalid");
         input.classList.add("valid");
         btn.disabled = false;
-        gateVerified = { code: v, name: null };
+        gateVerified = { code: v };
         return;
       }
       if (!/^\d{7,}$/u.test(v)) { gateFail(); return; }
-      // Looks like a full code but not in the baked list — check it live.
+      // Looks like a full code but not in the baked list — check it
+      // against the form's live pattern.
       errEl.textContent = "جارٍ التحقق من الرقم الكودي…";
       errEl.style.display = "block";
       errEl.style.color = "var(--muted)";
@@ -801,16 +867,16 @@
       gateVerified = null;
       var seq = gateSeq;
       gateTimer = setTimeout(function () {
-        fetch("/checkcode?code=" + encodeURIComponent(v))
+        fetch("/exam-pattern?formId=" + encodeURIComponent(form.formId))
           .then(function (r) { return r.json(); })
           .then(function (data) {
             if (seq !== gateSeq || input.value.trim() !== v) return; // typed on meanwhile
-            if (data && data.ok) {
+            if (data && data.ok && codeMatches(data.pattern, v)) {
               errEl.style.display = "none";
               input.classList.remove("invalid");
               input.classList.add("valid");
               btn.disabled = false;
-              gateVerified = { code: v, name: data.name || null };
+              gateVerified = { code: v };
             } else {
               gateFail();
             }
@@ -822,18 +888,26 @@
       }, 500);
     });
     btn.addEventListener("click", function () {
-      if (gateVerified) enterWithGreeting(form, codeQ, lessonId, gateVerified.code, gateVerified.name);
+      if (gateVerified) enterWithGreeting(form, codeQ, lessonId, gateVerified.code, null);
     });
     window.scrollTo(0, 0);
   }
 
   // After a correct code, greet the student by the name attached to that
-  // code in the code sheet, then head into the exam. `liveName` is the
-  // name the live check returned (new users); otherwise the name comes
-  // from the baked codes.json (old codes).
+  // code, then head into the exam. The name comes from the baked
+  // codes.json; when it is not baked yet (a student who just registered),
+  // it is read live from the registration sheet — the name lookup never
+  // decides eligibility, only the greeting.
   function enterWithGreeting(form, codeQ, lessonId, code, liveName) {
-    loadCodeNames().then(function (names) {
-      var name = liveName || names[code] || null;
+    var nameP = loadCodeNames().then(function (names) {
+      if (liveName) return liveName;
+      if (names[code]) return names[code];
+      return fetch("/checkcode?code=" + encodeURIComponent(code))
+        .then(function (r) { return r.json(); })
+        .then(function (d) { return (d && d.ok && d.name) || null; })
+        .catch(function () { return null; });
+    });
+    nameP.then(function (name) {
       current = "greeting";
       titleEl.textContent = form.title;
       view.innerHTML = "<div class='gateCard'><div class='gateIcon'>✓</div>" +

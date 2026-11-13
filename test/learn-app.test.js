@@ -51,7 +51,9 @@ test("learn-app: index.html loads the data and plays video natively", () => {
   // (iPhone does it natively on play; other phones via requestFullscreen).
   assert.ok(appHtml.includes("<video controls"), "native video element, no Drive player embed");
   assert.ok(!appHtml.includes("playsinline"), "no playsinline — the video is allowed to go fullscreen");
-  assert.ok(appHtml.includes("webkitEnterFullscreen") || appHtml.includes("requestFullscreen"), "fullscreen on play");
+  assert.ok(appHtml.includes("openCinema"), "cinema-mode fullscreen");
+  assert.ok(appHtml.includes("cinemaOverlay"), "cinema overlay element");
+  assert.ok(appHtml.includes("tg.requestFullscreen"), "Telegram fullscreen for the web app itself");
   // Video and photos go through the Worker's /media/<id> proxy
   // (user-approved small request cost, 2026-11-13): clean media headers,
   // native playback, no player. The direct Drive links are gone — Drive's
@@ -114,11 +116,20 @@ test("learn-app: index.html renders the exam in-app and posts to Google", () => 
   assert.ok(appHtml.includes("showCert"), "certificate screen in the app");
   assert.ok(appHtml.includes("الحصول على الشهادة"), "certificate entry point");
   assert.ok(appHtml.includes('"/cert?code="'), "certificate lookup goes through the Worker");
-  // Live code check (2026-11-13): a code the baked form pattern does not
-  // know (a student who just registered) is checked against the live
-  // registration sheet instead of being rejected outright.
-  assert.ok(appHtml.includes('"/checkcode?code="'), "gate falls back to a live sheet check");
+  // Downloading from Telegram's webview (2026-11-13): the download
+  // attribute on a blob link does nothing there, so the share sheet is
+  // the primary save path and the direct /cert link is the fallback.
+  assert.ok(appHtml.includes("navigator.share"), "certificate is saved through the native share sheet");
+  assert.ok(appHtml.includes("مشاركة / حفظ الشهادة"), "share/save button");
+  // Live exam pattern (2026-11-13): the teacher's sequencing lives in the
+  // Forms themselves — each form's code question only allows the codes of
+  // students eligible for THAT exam — so a code the baked pattern does
+  // not know is checked against the form's CURRENT pattern, not against
+  // the registration sheet (which would let a student skip ahead). The
+  // sheet only supplies the name for the greeting.
+  assert.ok(appHtml.includes('"/exam-pattern?formId="'), "gate falls back to the form's live pattern");
   assert.ok(appHtml.includes("جارٍ التحقق من الرقم الكودي"), "checking state while the live check runs");
+  assert.ok(appHtml.includes('"/checkcode?code="'), "name for the greeting comes from the live sheet when not baked");
   // Get-code inside the app (2026-11-13): name + phone -> the Worker asks
   // the registration macro and returns the code.
   assert.ok(appHtml.includes("showGetCode"), "get-code screen in the app");

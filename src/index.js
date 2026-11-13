@@ -1127,6 +1127,7 @@ import { audioUrl, audioVersion, fetchHumanSpeech, fetchPrebuiltSpeech, isSingle
 import { copticDateNow, alphabetText, letterStatsText, longestText, originsText, wordCountText, startsWithText, similarText, translateText, vocabText, startGuess, handleGuessReply } from "./features.js";
 import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, suggestSimilar, helpText, retentionText, opsText, recordById, levenshtein } from "./new-features.js";
 import { lookupCertificate, parseCertCsv } from "./certificates.js";
+import { extractCodePattern } from "./exam-pattern.js";
 import { getCodeFromMacro, buildGetCodeReply, buildGetCodeWhatsAppUrl, normalizeGetCodePhone, getCodePhoneValid, GET_CODE_SHEET_ID } from "./getcode.js";
 import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VIDEO_MENU_ID, cleanMenuTitle, cleanMenuText, cleanButtonLabel, cleanUrl, cleanCommand, normalizeMenus, findMenu, findButton, rootMenus, descendantMenuIds, buildMenuKeyboard, buildRootKeyboard, menuOpenText, menuAdminListText, menuAdminDetailText, parseMenuTarget, parseButtonTarget, addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton, ensureVideoMenu } from "./menu-builder.js";
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
@@ -8177,16 +8178,12 @@ const LESSON_MEDIA_IDS = new Set(lessonMedia.ids);
 // keep their state order.
 let updateChain = Promise.resolve();
 
-// Live code lookup (2026-11-13): the exam gate's local check is the code
-// pattern baked from the Forms at build time, so it only knows the codes
-// that existed when the teacher last edited the form — a student who just
-// got a code (from the web app or the bot) is NOT in it, and the gate
-// wrongly rejects them. The registration sheet («تجميع الرقم الكودي»,
-// tab `code`, A=code, B=name) is the source of truth, so the gate falls
-// back to GET /checkcode when the local check fails. The sheet is read
-// via gviz CSV and cached 60s in the isolate (a stale cache is used when
-// the sheet cannot be reached, so a transient Google failure does not
-// lock students out of codes that were already looked up).
+// Live code lookup (2026-11-13): the NAME attached to a code, read from the
+// live «تجميع الرقم الكودي» sheet (gviz CSV, cached 60s in the isolate).
+// This is only the name source for the greeting — it must NEVER decide
+// exam eligibility (the sheet holds every registered student, so it would
+// let a student skip ahead to an exam they have not earned; the form's
+// own code list decides that — see /exam-pattern below).
 const CODE_SHEET_CACHE_TTL_MS = 60 * 1000;
 let codeSheetCache = null; // { fetchedAt, names: Map<code, name> }
 
@@ -8225,6 +8222,46 @@ async function lookupCodeName(code) {
   }
   codeSheetCache = { fetchedAt: now, names };
   return names.get(code) ?? null;
+}
+
+// The 12 lesson exam forms (from learn-app/exams.json). Only these may be
+// fetched by /exam-pattern — the endpoint never fetches an arbitrary form.
+const EXAM_FORM_IDS = new Set([
+  "1Gts_xgdk3-g7elOTmSXtpouZMvFVLwdQ4fleO3usLYg",
+  "1CFJ443YBu6a7oSBHV3vYQtkhJ8whTmKdTTWnf4fybkw",
+  "12Sdfv6FQe7Lr7LcXI3PLrxsp1g6ieeZuS94cvEUIgJo",
+  "1DAYdD2pdtifeChZP9ChBGo4UV9fdJMkX7cRkwQ7zA7Q",
+  "1V8g6OpY12ewvSm2WEbJi2NFs1xu9bUg6AEaBSG0UYjU",
+  "1Ag4v_pX0xzh7BlBGFbzeBeAfFe2fo2oh__RkAQw6DUg",
+  "1bqoBpekkfa2_6oc-nwCdbOui5LDpRuVDCo7DaC1oi9o",
+  "1MiFcNOZwsIAptfRrSjl29Cpccf7SHoaSFBtZCfC1mLc",
+  "1ST9Nk2pWFjC_Sf_XfpW3wWgEaEq4gbT6r2fXN8mHqPc",
+  "1hU9u45-62silHgZiehAneS0W7Ud6v-kpdEn9KkYYG78",
+  "1ZABUJwB07YtSWAWwpbMFWKfAc8krqlomf3bP-MNFDyY",
+  "1TF4YmrO2jIgdageOz-YOo9CAWMxheVd1MDnnFkp3vLU",
+]);
+
+const EXAM_PATTERN_CACHE_TTL_MS = 5 * 60 * 1000;
+const examPatternCache = new Map(); // formId -> { fetchedAt, pattern, errorText }
+
+export function resetExamPatternCache() {
+  examPatternCache.clear();
+}
+
+async function fetchLiveExamPattern(formId) {
+  const now = Date.now();
+  const hit = examPatternCache.get(formId);
+  if (hit && now - hit.fetchedAt < EXAM_PATTERN_CACHE_TTL_MS) return hit;
+  const resp = await fetch(`https://docs.google.com/forms/d/${formId}/viewform`, {
+    headers: { "user-agent": "Mozilla/5.0" },
+    signal: AbortSignal.timeout(30000),
+  });
+  if (!resp.ok) throw new Error("form-unreachable");
+  const found = extractCodePattern(await resp.text());
+  if (!found) throw new Error("no-code-question");
+  const entry = { fetchedAt: now, ...found };
+  examPatternCache.set(formId, entry);
+  return entry;
 }
 
 export default {
@@ -8294,8 +8331,8 @@ export default {
       if (!result.code) return Response.json({ ok: false, error: result.error || "macro-unreadable" }, { status: 502 });
       return Response.json({ ok: true, code: result.code, whatsapp: buildGetCodeWhatsAppUrl(result.code, name) });
     }
-    // Live code check for the exam gate (see lookupCodeName): the local
-    // pattern only knows old codes, so the gate asks here when it fails.
+    // Live code check for the greeting's name (see lookupCodeName): the
+    // sheet only supplies the name — eligibility is the form's own list.
     if (request.method === "GET" && url.pathname === "/checkcode") {
       const code = String(url.searchParams.get("code") ?? "").trim();
       if (!/^\d{6,10}$/u.test(code)) return Response.json({ ok: false, error: "bad-input" }, { status: 400 });
@@ -8303,6 +8340,21 @@ export default {
       try { name = await lookupCodeName(code); } catch { return Response.json({ ok: false, error: "sheet-unreachable" }, { status: 502 }); }
       if (name === null) return Response.json({ ok: false });
       return Response.json({ ok: true, name });
+    }
+    // Live exam pattern (2026-11-13): the teacher's sequencing lives in
+    // the Google Forms themselves — each form's code question only allows
+    // the codes of students eligible for THAT exam (a student cannot enter
+    // exam 2 before exam 1), and the teacher updates those lists. The
+    // app's baked exams.json goes stale between deploys, so when the
+    // local check fails the gate asks here for the form's CURRENT pattern
+    // and checks against it. One Worker request per live check, cached
+    // 5 min per form in the isolate. Only the 12 lesson exam forms.
+    if (request.method === "GET" && url.pathname === "/exam-pattern") {
+      const formId = String(url.searchParams.get("formId") ?? "");
+      if (!EXAM_FORM_IDS.has(formId)) return Response.json({ ok: false, error: "bad-input" }, { status: 400 });
+      let entry;
+      try { entry = await fetchLiveExamPattern(formId); } catch { return Response.json({ ok: false, error: "form-unreachable" }, { status: 502 }); }
+      return Response.json({ ok: true, pattern: entry.pattern, errorText: entry.errorText });
     }
     // Certificate in the web app (2026-11-13): GET /cert?code=<code>&level=1|2
     // reuses the bot's lookupCertificate (same sheets, same logic) and
@@ -8318,7 +8370,10 @@ export default {
       if (result.kind === "photo" && result.bytes) {
         const headers = new Headers();
         headers.set("content-type", result.contentType || "image/jpeg");
-        headers.set("content-disposition", `inline; filename="${result.fileName || "certificate"}"`);
+        // attachment, not inline: this URL is the download link, and the
+        // webview ignores the download attribute on a blob link (see the
+        // app's share button) — the file must arrive as a download.
+        headers.set("content-disposition", `attachment; filename="${result.fileName || "certificate"}"`);
         headers.set("cache-control", "public, max-age=86400");
         return new Response(result.bytes, { headers });
       }
