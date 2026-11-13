@@ -689,12 +689,28 @@ async function sendLearnLesson(env, chatId, userId, lessonId) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: "⚠️ هذا الدرس ليس جاهزًا بعد — جرّب لاحقًا أو أبلغ الإدارة." });
     return;
   }
-  for (const step of plan) {
+  const levelMenuId = (LEARN_LEVELS.find((l) => l.lessons.some((x) => x.id === lessonId)) ?? {}).id ?? "m_learn_l1";
+  for (let i = 0; i < plan.length; i++) {
+    const step = plan[i];
+    const isLast = i === plan.length - 1;
+    // The lesson opens full-screen (user 2026-11-13): the level menu's
+    // reply keyboard stays on screen while the lesson content arrives,
+    // shrinking the view — so the FIRST lesson message removes it.
+    // Navigation survives as inline buttons under the LAST lesson message
+    // (Back to the level, Home to the root), which take no screen space.
+    // A single remove_keyboard and the inline nav cannot share one
+    // message, so when a plan has only one step the nav is skipped and
+    // the keyboard is still removed (the user types /menu to go back).
+    const hideKeyboard = i === 0 ? { remove_keyboard: true } : undefined;
+    const navKeyboard = isLast && !hideKeyboard ? { inline_keyboard: [[
+      { text: "🔙 رجوع", callback_data: `mb|open|${levelMenuId}` },
+      { text: "🏠 الرئيسية", callback_data: "mb|root" },
+    ]] } : undefined;
     if (step.kind === "video" || step.kind === "photo") {
       const method = step.kind === "video" ? "sendVideo" : "sendPhoto";
-      const res = await telegram(env, method, { chat_id: chatId, [step.kind]: step.fileId, caption: step.caption });
+      const res = await telegram(env, method, { chat_id: chatId, [step.kind]: step.fileId, caption: step.caption, ...(hideKeyboard ? { reply_markup: hideKeyboard } : {}), ...(navKeyboard ? { reply_markup: navKeyboard } : {}) });
       if (!res?.ok) {
-        await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تعذّر إرسال هذا المحتوى حاليًا. جرّب لاحقًا أو أبلغ الإدارة." });
+        await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تعذّر إرسال هذا المحتوى حاليًا. جرّب لاحقًا أو أبلغ الإدارة.", ...(hideKeyboard ? { reply_markup: hideKeyboard } : {}) });
         if (isAdmin(env, userId)) {
           await telegram(env, "sendMessage", { chat_id: chatId, text: `🛠 سبب الرفض من تيليجرام: ${res?.description ?? `خطأ ${res?.error_code ?? "غير معروف"}`}` });
         }
@@ -702,14 +718,17 @@ async function sendLearnLesson(env, chatId, userId, lessonId) {
       continue;
     }
     if (step.kind === "text") {
-      await sendMenuMessage(env, chatId, step.text);
+      // sendMenuMessage drops a remove_keyboard markup (it only keeps
+      // markups with rows), so the first text step goes direct.
+      if (hideKeyboard) await telegram(env, "sendMessage", { chat_id: chatId, text: step.text, reply_markup: hideKeyboard });
+      else await sendMenuMessage(env, chatId, step.text, navKeyboard);
       continue;
     }
     if (step.kind === "url") {
       // The exam link goes as plain text (phrase + link in one message) so
       // the user taps it freely — not as an inline button. No link preview,
       // so the message stays exactly the phrase and the link.
-      await telegram(env, "sendMessage", { chat_id: chatId, text: `${step.label}: ${step.url}`, disable_web_page_preview: true });
+      await telegram(env, "sendMessage", { chat_id: chatId, text: `${step.label}: ${step.url}`, disable_web_page_preview: true, ...(hideKeyboard ? { reply_markup: hideKeyboard } : {}), ...(navKeyboard ? { reply_markup: navKeyboard } : {}) });
     }
   }
 }
@@ -6663,6 +6682,7 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     // menu builder: "mba|" is the admin panel, "mb|open|" opens a menu,
+    // "mb|root" opens the root menu list (Home under a lesson),
     // "mb|btn|" presses a button on a menu.
     // Legacy inline admin panels are retired. Any old message still carrying an
     // "mba|" button opens the bottom-button editor instead of an inline keyboard.
@@ -6676,6 +6696,9 @@ async function handleUpdate(update, env, ctx) {
       if (mbParts[1] === "open") {
         await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
         await openMenu(env, callback.message?.chat?.id, mbParts[2] ?? "", callback.from?.id);
+      } else if (mbParts[1] === "root") {
+        await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
+        await sendRootMenus(env, callback.message?.chat?.id, callback.from?.id);
       } else {
         await handleMenuButton(env, callback);
       }

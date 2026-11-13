@@ -686,9 +686,33 @@ test("learn-import: plain tap on a lesson sends video, photo, then the exam link
   assert.deepEqual(calls.map((c) => c.method), ["sendVideo", "sendPhoto", "sendMessage"]);
   assert.match(String(calls[0].payload?.caption ?? ""), /الدرس الاول/u);
   assert.match(String(calls[1].payload?.caption ?? ""), /الدرس الاول/u);
+  // The lesson opens full-screen (user 2026-11-13): the first message
+  // removes the level menu's reply keyboard, so it stops shrinking the
+  // view while the lesson content arrives.
+  assert.deepEqual(calls[0].payload?.reply_markup, { remove_keyboard: true }, "first lesson message removes the reply keyboard");
+  assert.equal(calls[1].payload?.reply_markup, undefined, "only the first message carries the removal");
   const exam = calls[2].payload;
   assert.match(exam.text, /^📝 الامتحان الإلكتروني: https:\/\/docs\.google\.com\/forms\//u);
-  assert.equal(exam.reply_markup, undefined, "exam link is plain text, not an inline button");
+  // Navigation survives as inline buttons under the last lesson message
+  // (Back to the level, Home to the root) — they take no screen space.
+  assert.deepEqual(exam.reply_markup, { inline_keyboard: [[
+    { text: "🔙 رجوع", callback_data: "mb|open|m_learn_l1" },
+    { text: "🏠 الرئيسية", callback_data: "mb|root" },
+  ]] }, "exam message carries Back/Home inline navigation");
+});
+
+test("learn-import: inline 🏠 الرئيسية under a lesson returns to the main menu", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedMenus(kvEnv);
+  await sayMsg(kvEnv, ADMIN, "/importlearn");
+  await sayMsg(kvEnv, 57, "/menu");
+  await sayMsg(kvEnv, 57, "المستوى الأول");
+  await sayMsg(kvEnv, 57, "الدرس الاول");
+  // The new "mb|root" callback (Home under the lesson's last message)
+  // must open the root menu list, like the old reply-keyboard button did.
+  const calls = await tapCallback(kvEnv, 57, "mb|root");
+  assert.ok(anyMessage(calls, /أختر المستوى لبدء تعلم اللغة القبطية/u), "tapping home must open the main menu list");
+  assert.ok(!calls.some((c) => c.method === "sendVideo" || c.method === "sendPhoto"), "no lesson must be sent");
 });
 
 test("learn-import: tapping 🏠 الرئيسية inside a level returns to the main menu", async () => {
@@ -711,10 +735,14 @@ test("learn-import: inline tap on an L2 lesson sends video, photo, exercise text
   const calls = await tapCallback(kvEnv, 57, "mb|btn|m_learn_l2|b_learn_l2_06");
   assert.deepEqual(calls.map((c) => c.method), ["answerCallbackQuery", "sendVideo", "sendPhoto", "sendMessage", "sendMessage"]);
   assert.match(String(calls[1].payload?.caption ?? ""), /الدرس السادس/u);
+  assert.deepEqual(calls[1].payload?.reply_markup, { remove_keyboard: true }, "first lesson message removes the reply keyboard");
   assert.match(messageTexts(calls).find((t) => /التدريب الثالث/u.test(t)) ?? "", /التدريب الثالث/u);
   const exam = calls[4].payload;
   assert.match(exam.text, /^📝 الامتحان الإلكتروني: https:\/\/docs\.google\.com\/forms\//u);
-  assert.equal(exam.reply_markup, undefined, "exam link is plain text, not an inline button");
+  assert.deepEqual(exam.reply_markup, { inline_keyboard: [[
+    { text: "🔙 رجوع", callback_data: "mb|open|m_learn_l2" },
+    { text: "🏠 الرئيسية", callback_data: "mb|root" },
+  ]] }, "exam message carries Back/Home inline navigation");
 });
 
 test("learn-import: one failed lesson item does not abort the rest of the lesson", async () => {
@@ -747,7 +775,10 @@ test("learn-import: one failed lesson item does not abort the rest of the lesson
   assert.ok(messageTexts(calls).some((t) => /wrong file identifier/u.test(t)), "admin sees the real reason");
   const exam = calls.at(-1).payload;
   assert.match(exam.text, /^📝 الامتحان الإلكتروني: https:\/\/docs\.google\.com\/forms\//u);
-  assert.equal(exam.reply_markup, undefined, "exam link is plain text, not an inline button");
+  assert.deepEqual(exam.reply_markup, { inline_keyboard: [[
+    { text: "🔙 رجوع", callback_data: "mb|open|m_learn_l1" },
+    { text: "🏠 الرئيسية", callback_data: "mb|root" },
+  ]] }, "exam message carries Back/Home inline navigation even after a failed item");
 });
 
 // ---------------------------------------------------------------------------

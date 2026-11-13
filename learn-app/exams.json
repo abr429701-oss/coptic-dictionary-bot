@@ -1,5 +1,5 @@
 {
- "generatedAt": "2026-11-13T01:22:59.821Z",
+ "generatedAt": "2026-11-13T01:37:02.363Z",
  "forms": [
   {
    "formId": "1Gts_xgdk3-g7elOTmSXtpouZMvFVLwdQ4fleO3usLYg",
@@ -88,9 +88,9 @@
      "entryId": 757360773,
      "required": true,
      "options": [
-      "Ⲛⲁⲛ",
+      "Ⲛⲁⲥ",
       "Ⲥⲁⲛ",
-      "Ⲛⲁⲥ"
+      "Ⲛⲁⲛ"
      ],
      "validation": null
     },
