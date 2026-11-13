@@ -391,11 +391,35 @@ async function sendMenuMessage(env, chatId, text, replyMarkup) {
   if (res?.ok) return res;
   return telegram(env, "sendMessage", { chat_id: chatId, text });
 }
+// Menu Builder logic (user 2026-11-13): the learn menus are INLINE
+// keyboards on ONE message that the bot edits in place — no reply keyboard
+// ever covers the lesson, and going to another lesson is one tap
+// (Previous/Next under the lesson; Back edits the message into the list).
+// A message carries only one reply_markup, so the send-new path first sends
+// the text with remove_keyboard (clearing any old reply keyboard), then
+// attaches the inline keyboard with editMessageReplyMarkup. An edit that
+// fails with "message is not modified" (double tap) is left alone instead
+// of duplicating the menu with a new message.
+async function sendOrEditInlineMenu(env, chatId, text, inlineKeyboard, messageId) {
+  if (messageId) {
+    const edited = await telegram(env, "editMessageText", { chat_id: chatId, message_id: messageId, text, parse_mode: "HTML", ...(inlineKeyboard ? { reply_markup: inlineKeyboard } : {}) });
+    if (edited?.ok) return edited;
+    if (String(edited?.description ?? "").includes("message is not modified")) return edited;
+  }
+  const sent = await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", reply_markup: { remove_keyboard: true } });
+  const sentId = sent?.result?.message_id;
+  if (inlineKeyboard && sentId) {
+    const attached = await telegram(env, "editMessageReplyMarkup", { chat_id: chatId, message_id: sentId, reply_markup: inlineKeyboard });
+    if (attached?.ok) return attached;
+    return telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", reply_markup: inlineKeyboard });
+  }
+  return sent;
+}
 // The learning web app (public/learn-app/index.html) is served as a static
 // asset from this Worker, so opening it costs no Worker request; the lesson
 // content loads from lessons.json and the media from public Drive links.
 const LEARN_APP_URL = "https://coptic-dictionary-bot.abr429701.workers.dev/learn-app/?v=2";
-async function sendRootMenus(env, chatId, userId = chatId) {
+async function sendRootMenus(env, chatId, userId = chatId, messageId) {
   // Going home leaves the certificate flow and the get-code flow: a later
   // text must search the dictionary again instead of being read as a code,
   // a name or a phone number.
@@ -408,7 +432,9 @@ async function sendRootMenus(env, chatId, userId = chatId) {
     return;
   }
   await setMenuNav(env, userId, null);
-  await sendMenuMessage(env, chatId, "أختر المستوى لبدء تعلم اللغة القبطية", buildRootReplyKeyboard(stored, { isAdmin: isAdmin(env, userId) }));
+  // Menu Builder logic: the root list is an inline keyboard on one message
+  // (buildRootKeyboard), not a reply keyboard — nothing covers the screen.
+  await sendOrEditInlineMenu(env, chatId, "أختر المستوى لبدء تعلم اللغة القبطية", buildRootKeyboard(stored), messageId);
 }
 
 // Back to dictionary search: leaves any menu (and any cert/get-code flow,
@@ -420,7 +446,7 @@ async function beginSearchMode(env, chatId, userId) {
   await setMenuNav(env, userId, null);
   await telegram(env, "sendMessage", { chat_id: chatId, text: "🔍 اكتب الكلمة للبحث في القاموس.", reply_markup: { remove_keyboard: true } });
 }
-async function openMenu(env, chatId, menuId, userId) {
+async function openMenu(env, chatId, menuId, userId, messageId) {
   if (!chatId) return;
   const stored = await loadMenus(env);
   const menu = findMenu(stored, menuId);
@@ -438,8 +464,12 @@ async function openMenu(env, chatId, menuId, userId) {
     text += menu.id === VIDEO_MENU_ID
       ? `\n\n🎬 لا توجد دروس فيديو بعد.${admin ? "\nأضف أول درس من /menuadmin." : ""}`
       : `\n\n🔘 لا توجد أزرار في هذه القائمة بعد.${admin ? "\nأضف أول زر من /menuadmin." : ""}`;
+    await sendOrEditInlineMenu(env, chatId, text, null, messageId);
+    return;
   }
-  await sendMenuMessage(env, chatId, text, keyboard);
+  // Menu Builder logic: a menu opens by editing the same message in place
+  // (messageId from the callback), not by stacking a new message.
+  await sendOrEditInlineMenu(env, chatId, text, keyboard, messageId);
 }
 // ---- bulk "learn" lessons import (/importlearn, admin only) -----------------
 // The frozen manifest (src/learn-manifest.js) holds the lessons; each Drive
@@ -690,6 +720,26 @@ async function sendLearnLesson(env, chatId, userId, lessonId) {
     return;
   }
   const levelMenuId = (LEARN_LEVELS.find((l) => l.lessons.some((x) => x.id === lessonId)) ?? {}).id ?? "m_learn_l1";
+  // Menu Builder logic: Previous/Next lesson buttons under the last lesson
+  // message, so going to another lesson is one tap — no scrolling back to
+  // the list. Siblings come from the stored level menu's lesson buttons,
+  // in order; if the menu is not stored yet, the nav falls back to
+  // Back/Home only.
+  const storedMenus = await loadMenus(env);
+  const levelMenu = findMenu(storedMenus, levelMenuId);
+  const lessonButtons = (levelMenu?.buttons ?? []).filter((b) => b.kind === "lesson");
+  const currentIndex = lessonButtons.findIndex((b) => b.lessonId === lessonId);
+  const prevButton = currentIndex > 0 ? lessonButtons[currentIndex - 1] : null;
+  const nextButton = currentIndex >= 0 && currentIndex < lessonButtons.length - 1 ? lessonButtons[currentIndex + 1] : null;
+  const navRows = [];
+  const stepRow = [];
+  if (prevButton) stepRow.push({ text: "⏮ السابق", callback_data: `mb|btn|${levelMenuId}|${prevButton.id}` });
+  if (nextButton) stepRow.push({ text: "التالي ⏭", callback_data: `mb|btn|${levelMenuId}|${nextButton.id}` });
+  if (stepRow.length) navRows.push(stepRow);
+  navRows.push([
+    { text: "🔙 رجوع", callback_data: `mb|open|${levelMenuId}` },
+    { text: "🏠 الرئيسية", callback_data: "mb|root" },
+  ]);
   for (let i = 0; i < plan.length; i++) {
     const step = plan[i];
     const isLast = i === plan.length - 1;
@@ -697,15 +747,13 @@ async function sendLearnLesson(env, chatId, userId, lessonId) {
     // reply keyboard stays on screen while the lesson content arrives,
     // shrinking the view — so the FIRST lesson message removes it.
     // Navigation survives as inline buttons under the LAST lesson message
-    // (Back to the level, Home to the root), which take no screen space.
-    // A single remove_keyboard and the inline nav cannot share one
-    // message, so when a plan has only one step the nav is skipped and
-    // the keyboard is still removed (the user types /menu to go back).
+    // (Previous/Next lesson, Back to the level, Home to the root), which
+    // take no screen space. A single remove_keyboard and the inline nav
+    // cannot share one message, so when a plan has only one step the nav
+    // is skipped and the keyboard is still removed (the user types /menu
+    // to go back).
     const hideKeyboard = i === 0 ? { remove_keyboard: true } : undefined;
-    const navKeyboard = isLast && !hideKeyboard ? { inline_keyboard: [[
-      { text: "🔙 رجوع", callback_data: `mb|open|${levelMenuId}` },
-      { text: "🏠 الرئيسية", callback_data: "mb|root" },
-    ]] } : undefined;
+    const navKeyboard = isLast && !hideKeyboard ? { inline_keyboard: navRows } : undefined;
     if (step.kind === "video" || step.kind === "photo") {
       const method = step.kind === "video" ? "sendVideo" : "sendPhoto";
       const res = await telegram(env, method, { chat_id: chatId, [step.kind]: step.fileId, caption: step.caption, ...(hideKeyboard ? { reply_markup: hideKeyboard } : {}), ...(navKeyboard ? { reply_markup: navKeyboard } : {}) });
@@ -1149,7 +1197,7 @@ import { lookupCertificate, parseCertCsv } from "./certificates.js";
 import { extractCodePattern } from "./exam-pattern.js";
 import { getCodeFromMacro, buildGetCodeReply, buildGetCodeWhatsAppUrl, normalizeGetCodePhone, getCodePhoneValid, GET_CODE_SHEET_ID } from "./getcode.js";
 import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VIDEO_MENU_ID, cleanMenuTitle, cleanMenuText, cleanButtonLabel, cleanUrl, cleanCommand, normalizeMenus, findMenu, findButton, rootMenus, descendantMenuIds, buildMenuKeyboard, buildRootKeyboard, menuOpenText, menuAdminListText, menuAdminDetailText, parseMenuTarget, parseButtonTarget, addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton, ensureVideoMenu } from "./menu-builder.js";
-import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
+import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 import { getHiddenUi, setHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
 import { LEARN_LEVELS } from "./learn-manifest.js";
 import { LEARN_IMPORT_KEY, LEARN_GET_CODE_TEXT, learnUploadItems, emptyImportState, normalizeImportState, importProgress, learnPendingItems, findLearnLesson, learnLessonSendPlan, buildLearnMenus, mergeMenus, uploadLearnFile, parseImportLearnArg, learnImportStartText, learnProgressText } from "./learn-import.js";
@@ -6695,10 +6743,10 @@ async function handleUpdate(update, env, ctx) {
       const mbParts = String(callback.data ?? "").split("|");
       if (mbParts[1] === "open") {
         await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
-        await openMenu(env, callback.message?.chat?.id, mbParts[2] ?? "", callback.from?.id);
+        await openMenu(env, callback.message?.chat?.id, mbParts[2] ?? "", callback.from?.id, callback.message?.message_id);
       } else if (mbParts[1] === "root") {
         await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
-        await sendRootMenus(env, callback.message?.chat?.id, callback.from?.id);
+        await sendRootMenus(env, callback.message?.chat?.id, callback.from?.id, callback.message?.message_id);
       } else {
         await handleMenuButton(env, callback);
       }

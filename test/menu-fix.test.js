@@ -98,8 +98,14 @@ const say = (kvEnv, userId, text) => sendUpdate(kvEnv, { message: { text, chat: 
 const tap = (kvEnv, userId, data) => sendUpdate(kvEnv, { callback_query: { id: "cb1", data, from: { id: userId }, message: { message_id: 5, chat: { id: userId, type: "private" }, text: "x" } } });
 const sent = (calls) => calls.filter((c) => c.url.endsWith("/sendMessage") && c.ok !== false).map((c) => c.payload);
 const attempted = (calls) => calls.filter((c) => c.url.endsWith("/sendMessage")).map((c) => c.payload);
+const edited = (calls) => calls.filter((c) => c.url.endsWith("/editMessageText")).map((c) => c.payload);
 const toChat = (calls, chatId) => sent(calls).filter((m) => String(m.chat_id) === String(chatId));
 const anyText = (calls, chatId, re) => toChat(calls, chatId).some((m) => re.test(m.text ?? ""));
+// Menu Builder logic: a menu opened from a callback EDITS the tapped
+// message in place, so its text reaches the user as an edit, not a new
+// sendMessage — both channels count as "delivered".
+const anyVisibleText = (calls, chatId, re) => [...toChat(calls, chatId), ...edited(calls).filter((m) => String(m.chat_id) === String(chatId))].some((m) => re.test(m.text ?? ""));
+const noEmptyInlineKeyboard = (calls) => ![...attempted(calls), ...edited(calls)].some((m) => Array.isArray(m.reply_markup?.inline_keyboard) && m.reply_markup.inline_keyboard.length === 0);
 const seedMenus = (kvEnv, menus) => kvEnv.USERS.store.set(MENUS_KEY, { menus });
 const seedUser = (kvEnv, userId, record) => kvEnv.USERS.store.set(`user:${userId}`, record);
 const nowIso = () => new Date().toISOString();
@@ -110,10 +116,10 @@ test("menu-fix: opening an empty menu (inline path) still delivers a message", a
   const kvEnv = { ...env, USERS: fakeKv() };
   seedMenus(kvEnv, [{ id: "m_empty", title: "قائمة فارغة", text: "نص القائمة الفارغة", buttons: [] }]);
   const calls = await tap(kvEnv, USER, "mb|open|m_empty");
-  assert.ok(anyText(calls, USER, /نص القائمة الفارغة/), "the menu text must reach the user");
-  assert.ok(anyText(calls, USER, /لا توجد أزرار/), "an empty-state line must be shown");
+  assert.ok(anyVisibleText(calls, USER, /نص القائمة الفارغة/), "the menu text must reach the user");
+  assert.ok(anyVisibleText(calls, USER, /لا توجد أزرار/), "an empty-state line must be shown");
   // No sendMessage attempt may carry an empty inline keyboard.
-  assert.ok(!attempted(calls).some((m) => Array.isArray(m.reply_markup?.inline_keyboard) && m.reply_markup.inline_keyboard.length === 0),
+  assert.ok(noEmptyInlineKeyboard(calls),
     "an empty inline keyboard must never be sent");
 });
 
@@ -123,8 +129,8 @@ test("menu-fix: video menu with no lessons shows the empty text", async () => {
   // used to create it lazily; the stored menu itself is the entry now.
   seedMenus(kvEnv, [{ id: VIDEO_MENU_ID, title: "🎬 دروس فيديو", text: "🎬 <b>دروس فيديو</b>\n\nاختر درسًا لمشاهدته:", buttons: [] }]);
   const calls = await tap(kvEnv, USER, "mb|open|m_video");
-  assert.ok(anyText(calls, USER, /لا توجد دروس فيديو/), "the empty video-lessons text must reach the user");
-  assert.ok(!attempted(calls).some((m) => Array.isArray(m.reply_markup?.inline_keyboard) && m.reply_markup.inline_keyboard.length === 0),
+  assert.ok(anyVisibleText(calls, USER, /لا توجد دروس فيديو/), "the empty video-lessons text must reach the user");
+  assert.ok(noEmptyInlineKeyboard(calls),
     "an empty inline keyboard must never be sent");
 });
 
@@ -134,10 +140,10 @@ test("menu-fix: a menu whose buttons are all admin-only still answers a normal u
     { id: "b_1", label: "درس سري", kind: "video", fileId: "file-1", adminOnly: true },
   ] }]);
   const calls = await tap(kvEnv, USER, "mb|open|m_video");
-  assert.ok(anyText(calls, USER, /دروس فيديو/), "the menu must answer a normal user even when every button is admin-only");
-  assert.ok(!attempted(calls).some((m) => Array.isArray(m.reply_markup?.inline_keyboard) && m.reply_markup.inline_keyboard.length === 0),
+  assert.ok(anyVisibleText(calls, USER, /دروس فيديو/), "the menu must answer a normal user even when every button is admin-only");
+  assert.ok(noEmptyInlineKeyboard(calls),
     "an empty inline keyboard must never be sent");
-  assert.ok(!JSON.stringify(toChat(calls, USER)).includes("درس سري"), "the admin-only button must stay hidden");
+  assert.ok(!JSON.stringify([...toChat(calls, USER), ...edited(calls)]).includes("درس سري"), "the admin-only button must stay hidden");
 });
 
 test("menu-fix: menu text containing '<' and '&' still delivers", async () => {

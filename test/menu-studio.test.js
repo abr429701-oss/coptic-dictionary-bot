@@ -235,11 +235,17 @@ test("menu-studio: a user opens /menu and taps a real button (no callback data)"
     { id: "m_s", title: "فرعية", text: "داخل الفرعية", parentId: "m_r", buttons: [] },
   ] });
   const list = await say(kvEnv, 700, "/menu");
+  // Menu Builder logic: /menu is one message with an inline keyboard;
+  // the message itself removes any old reply keyboard.
   const panel = toChat(list, 700).at(-1);
-  assert.ok(Array.isArray(panel.reply_markup?.keyboard));
-  assert.equal(panel.reply_markup?.inline_keyboard, undefined);
-  assert.ok(!JSON.stringify(toChat(list, 700)).includes("callback_data"));
+  assert.deepEqual(panel.reply_markup, { remove_keyboard: true }, "the root message removes the reply keyboard");
+  const attach = list.find((c) => c.url.endsWith("/editMessageReplyMarkup"));
+  assert.ok(attach, "the inline root keyboard is attached to the root message");
+  const rootButtons = (attach.payload?.reply_markup?.inline_keyboard ?? []).flat();
+  assert.ok(rootButtons.some((b) => b.text === "الرئيسية" && b.callback_data === "mb|open|m_r"), "the root menu is an inline button");
 
+  // Typing a menu title still opens it the old way (reply keyboard, no
+  // callback data) — the text-tap fallback for users without the inline list.
   const opened = await say(kvEnv, 700, "الرئيسية");
   assert.ok(anyText(opened, 700, /قائمة رئيسية/));
   const kb = toChat(opened, 700).at(-1).reply_markup;

@@ -307,7 +307,15 @@ test("menu-builder: /menuadmin studio builds a menu that users open from bottom 
 
   const list = await say(kvEnv, 53, "/menu");
   assert.ok(anyText(list, 53, /أختر المستوى لبدء تعلم اللغة القبطية/), "the /menu root invites the user to pick a level");
-  assert.ok(labelsOf(toChat(list, 53).at(-1)).includes("قائمة التعلم"));
+  // Menu Builder logic: the root list is an inline keyboard, not a reply
+  // keyboard — it is attached to the root message, which removes any old
+  // reply keyboard instead of sending a new one.
+  const rootMsg = toChat(list, 53).at(-1);
+  assert.deepEqual(rootMsg.reply_markup, { remove_keyboard: true }, "the root message removes the reply keyboard");
+  const attach = list.find((c) => c.url.endsWith("/editMessageReplyMarkup"));
+  assert.ok(attach, "the inline root keyboard is attached to the root message");
+  const inlineLabels = (attach.payload?.reply_markup?.inline_keyboard ?? []).flat().map((b) => b.text);
+  assert.ok(inlineLabels.includes("قائمة التعلم"), "the custom root menu is an inline button");
   const opened = await say(kvEnv, 53, "قائمة التعلم");
   assert.ok(anyText(opened, 53, /قائمة التعلم/));
   assert.ok(noInline(sent(opened)));
