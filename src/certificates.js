@@ -11,15 +11,14 @@
 // Sheets (all live, by name — the main sheet holds the level sheets and
 // the settings tab; the codes sheet holds code13 and the level-2 lists):
 //   main  1V3N16W3523NQUQnLUq-a7_YPr9L-7lkHJq_AUefATcI : Sheet1, LEVEL2,
-//         USER (L1), FINAL (L1), settings (gid 36067296)
-//   codes 1w9bJFNZjyDf6NHl5b20fEN3Gh72vA4ZoF48sdh6FYRk : code13, USER (L2),
-//         FINAL (L2)
+//         FINAL (L1), settings (gid 36067296)
+//   codes 1w9bJFNZjyDf6NHl5b20fEN3Gh72vA4ZoF48sdh6FYRk : code13, FINAL (L2)
 // Flow (exactly as the Apps Script): the student's code is looked up in
 // the level sheet (columns from the settings tab); if found, the reply is
 // built from the response columns and the certificate link (C for level 1,
-// BT for level 2) is sent as a photo. If not found, code13 gives the name,
-// USER says whether all exams are done, and FINAL lists the missing exams.
-// A code found nowhere gets "الرقم الكودي غير صحيح."
+// BT for level 2) is sent as a photo. If not found, code13 gives the name
+// and FINAL lists the missing exams. A code found nowhere gets
+// "الرقم الكودي غير صحيح."
 //
 // Speed + reliability (2026-11-09, after the first live test): the level
 // sheet and the completion sheets are fetched with a gviz `where` query
@@ -232,19 +231,27 @@ export async function fetchCertImageBytes(fileLink) {
   }
 }
 
-// The Apps Script's checkCompletionStatus, verbatim: code13 (codes sheet)
-// gives the name; USER says whether all exams are done; FINAL lists the
-// missing exams. The three sheets are fetched in parallel, each with a
-// `where` filter on the code column(s). Returns a photo result to send,
-// or null when the code is not handled here (unknown code, or exams done
-// but no certificate row).
+// Completion check (the Apps Script's checkCompletionStatus, CORRECTED
+// 2026-11-13): code13 (codes sheet) gives the name, and FINAL lists
+// which exams the student did — its per-exam code columns are the only
+// record of completed exams. The original also read USER and treated a
+// code found there as "all exams done", but USER is the exam-entry login
+// sheet (code + sequential password: 1000, 1001, ...) — EVERY registered
+// student is in it, so that check answered "الرقم الكودي غير صحيح." for
+// every student who had done exams but had no certificate row yet
+// (verified live 2026-11-13 with code 5307205: registered, exams 1-9
+// done in FINAL, final not done — the bot said "wrong code" instead of
+// "only the final is missing"). USER is no longer read here at all. A
+// student who did everything but has no certificate row yet gets
+// "certificate being prepared" instead of an empty missing-exams list.
+// Returns a photo result to send, or null when the code is not handled
+// here (unknown code).
 export async function checkCertCompletion(code, level) {
   const examsSheetId = level === "0" ? CERT_MAIN_SHEET_ID : CERT_CODES_SHEET_ID;
   const examCols = level === "0" ? [0, 2, 4, 6, 8, 10, 12, 14, 16, 18] : [0, 2, 4, 6];
   const examLetters = examCols.map((i) => certIndexToLetter(i));
-  const [codesData, examsData, finalData] = await Promise.all([
+  const [codesData, finalData] = await Promise.all([
     fetchCertSheetCsv(CERT_CODES_SHEET_ID, { sheet: "code13", where: certWhereClause(["A"], code) }),
-    fetchCertSheetCsv(examsSheetId, { sheet: "USER", where: certWhereClause(["A"], code) }),
     fetchCertSheetCsv(examsSheetId, { sheet: "FINAL", where: certWhereClause(examLetters, code) }),
   ]);
   let studentName = null;
@@ -255,12 +262,6 @@ export async function checkCertCompletion(code, level) {
     }
   }
   if (!studentName) return null;
-
-  let hasCompletedExams = false;
-  for (let i = 0; i < examsData.length; i++) {
-    if (String(examsData[i][0] ?? "").trim() === code) { hasCompletedExams = true; break; }
-  }
-  if (hasCompletedExams) return null;
 
   let examNames;
   if (level === "0") {
@@ -293,6 +294,16 @@ export async function checkCertCompletion(code, level) {
   const missingExams = [];
   for (let j = 0; j < examCols.length; j++) {
     if (!examsStatus[j]) missingExams.push(examNames[j]);
+  }
+  if (missingExams.length === 0) {
+    // Every exam is done but the certificate row is not in the level
+    // sheet yet (the teacher adds it when the certificate is issued):
+    // say so plainly instead of an empty "you must solve" list.
+    return {
+      kind: "photo",
+      url: CERT_EXAM_ICON_URL,
+      caption: `مبروك <b>${studentName}</b>،\nأكملت كل الامتحانات — شهادتك قيد التجهيز، جرّب تاني بعد شوية. 🎓`,
+    };
   }
   const formattedMissingExams = missingExams.map((exam, index) => (index === 0 ? exam : exam.replace("الامتحان ", "")));
   return {

@@ -87,20 +87,22 @@ const CODE13_CSV = csv([
   [3, { 0: "8880004", 1: "منى حسن", 2: "01000000003" }],
   [3, { 0: "7770005", 1: "كريم علي", 2: "01000000004" }],
   [3, { 0: "6660006", 1: "هدى سامي", 2: "01000000005" }],
-]);
-const USER_MAIN_CSV = csv([
-  [2, { 0: "ادخل الرقم الكودي", 1: "ادخل كلمة السر" }],
-  [2, { 0: "9990003", 1: "1000" }],
-  [2, { 0: "5550001", 1: "1001" }],
+  // Live case 2026-11-13: code 5307205 (لمياء وائل شرف) did exams 1-9
+  // but not the final, and is registered in USER — the old USER check
+  // answered "wrong code" for her instead of "only the final is missing".
+  [3, { 0: "5307205", 1: "لمياء وائل شرف", 2: "1004072638" }],
+  // All exams done, no certificate row yet.
+  [3, { 0: "4440004", 1: "كامل الامتحانات", 2: "01000000006" }],
 ]);
 const FINAL_MAIN_CSV = csv([
   // L1: code in cols 0 and 2 -> exams 1 and 2 done, 3..10 missing.
   [20, { 0: "الرقم الكودي للامتحان الاول", 1: "نتيجة الامتحان الاول", 2: "الرقم الكودي للامتحان الثاني", 3: "نتيجة الامتحان الثاني" }],
   [20, { 0: "8880004", 1: "20 / 30", 2: "8880004", 3: "28 / 30" }],
-]);
-const USER_CODES_CSV = csv([
-  [3, { 0: "", 1: "ادخل الرقم الكودي", 2: "ادخل كلمة السر" }],
-  [3, { 0: "", 1: "7770002", 2: "98000" }],
+  // Live case 2026-11-13: 5307205 in exam cols 0..16 (exams 1-9 done),
+  // nothing in col 18 (the final) -> only the final is missing.
+  [20, { 0: "5307205", 2: "5307205", 4: "5307205", 6: "5307205", 8: "5307205", 10: "5307205", 12: "5307205", 14: "5307205", 16: "5307205" }],
+  // All ten exam cols -> every exam done, no certificate row yet.
+  [20, { 0: "4440004", 2: "4440004", 4: "4440004", 6: "4440004", 8: "4440004", 10: "4440004", 12: "4440004", 14: "4440004", 16: "4440004", 18: "4440004" }],
 ]);
 const FINAL_CODES_CSV = csv([
   // L2: code in col 0 only -> exam 1 done, 2/3/final missing.
@@ -141,12 +143,10 @@ function makeCertFetchStub(calls, { failSheets = false, recordUrls = null } = {}
       if (u.includes(CERT_MAIN_SHEET_ID)) {
         if (sheet === "Sheet1") return new Response(SHEET1_CSV, { status: 200, headers: { "content-type": "text/csv" } });
         if (sheet === "LEVEL2") return new Response(LEVEL2_CSV, { status: 200, headers: { "content-type": "text/csv" } });
-        if (sheet === "USER") return new Response(USER_MAIN_CSV, { status: 200, headers: { "content-type": "text/csv" } });
         if (sheet === "FINAL") return new Response(FINAL_MAIN_CSV, { status: 200, headers: { "content-type": "text/csv" } });
       }
       if (u.includes(CERT_CODES_SHEET_ID)) {
         if (sheet === "code13") return new Response(CODE13_CSV, { status: 200, headers: { "content-type": "text/csv" } });
-        if (sheet === "USER") return new Response(USER_CODES_CSV, { status: 200, headers: { "content-type": "text/csv" } });
         if (sheet === "FINAL") return new Response(FINAL_CODES_CSV, { status: 200, headers: { "content-type": "text/csv" } });
       }
       return new Response("Not found", { status: 404 });
@@ -320,8 +320,8 @@ test("certificates: the level sheet is fetched with a where query on the code", 
   assert.match(tq, /5550001/);
   assert.match(tq, /G = 5550001/);
   assert.match(tq, /G = '5550001'/);
-  // A code that reaches the completion check: the completion sheets are
-  // fetched with a where on column A too.
+  // A code that reaches the completion check: code13 is fetched with a
+  // where on column A too.
   const urls2 = [];
   makeCertFetchStub(calls, { recordUrls: urls2 });
   await lookupCertificate("8880004", "0");
@@ -351,10 +351,48 @@ test("certificates: found row without a link returns the reply as text", async (
   assert.match(result.text, /مبروك يا ليلى/);
 });
 
-test("certificates: completed student with no certificate row is not-found", async () => {
+test("certificates: a registered student with no exams is told to start them, not 'wrong code'", async () => {
+  // 9990003 is in code13 and has no FINAL row at all. The old USER
+  // check answered "wrong code" for any registered student without a
+  // certificate row; the completion answer now comes from FINAL only.
   const calls = [];
   makeCertFetchStub(calls);
-  assert.deepEqual(await lookupCertificate("9990003", "0"), { kind: "not-found" });
+  const result = await lookupCertificate("9990003", "0");
+  assert.equal(result.kind, "photo");
+  assert.equal(result.url, CERT_EXAM_ICON_URL);
+  assert.match(result.caption, /سارة أحمد/);
+  assert.match(result.caption, /يجب بدء حل الامتحانات الالكترونية وانهاءها للحصول على الشهادة/);
+});
+
+test("certificates: exams 1-9 done and final missing lists only the final (live case 5307205)", async () => {
+  // Regression test for 2026-11-13: code 5307205 did exams 1-9 but not
+  // the final, and is registered — the old USER check answered
+  // "not-found" ("الرقم الكودي غير صحيح.") instead of naming the one
+  // missing exam. The USER sheet is never consulted now.
+  const calls = [];
+  const urls = [];
+  makeCertFetchStub(calls, { recordUrls: urls });
+  const result = await lookupCertificate("5307205", "0");
+  assert.equal(result.kind, "photo");
+  assert.equal(result.url, CERT_EXAM_ICON_URL);
+  assert.match(result.caption, /لمياء وائل شرف/);
+  assert.match(result.caption, /يجب حل الامتحان النهائي للحصول على الشهادة/);
+  assert.doesNotMatch(result.caption, /التاسع/, "exam 9 was done — it must not be listed as missing");
+  assert.ok(!urls.some((u) => u.includes("sheet=USER")), "the USER sheet must never be fetched");
+});
+
+test("certificates: all exams done but no certificate row says the certificate is being prepared", async () => {
+  // 4440004 has every exam in FINAL and no Sheet1 row: the old code
+  // would have built an empty missing-exams list ("يجب حل  للحصول على
+  // الشهادة.") or, via USER, "wrong code".
+  const calls = [];
+  makeCertFetchStub(calls);
+  const result = await lookupCertificate("4440004", "0");
+  assert.equal(result.kind, "photo");
+  assert.equal(result.url, CERT_EXAM_ICON_URL);
+  assert.match(result.caption, /كامل الامتحانات/);
+  assert.match(result.caption, /أكملت كل الامتحانات/);
+  assert.match(result.caption, /قيد التجهيز/);
 });
 
 test("certificates: student with missing exams gets the icon photo naming them", async () => {
