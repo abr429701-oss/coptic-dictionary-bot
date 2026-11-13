@@ -450,6 +450,30 @@ async function saveImportState(env, state) {
     return false;
   }
 }
+// Cancel flag for the learn import (2026-11-13): /importlearn cancel
+// writes { at } to this key; a running import checks it before picking
+// up each new file and stops when the flag is newer than the run's start.
+// A flag older than the run's start is stale and ignored, so no clearing
+// is needed — a cancel never blocks a later run.
+export const LEARN_IMPORT_CANCEL_KEY = "learn-import:cancel:v1";
+async function loadImportCancel(env) {
+  if (!env.USERS) return null;
+  try {
+    const value = (await storeCall(env, { op: "get", key: LEARN_IMPORT_CANCEL_KEY })).value;
+    return value && typeof value === "object" ? value : null;
+  } catch {
+    return null;
+  }
+}
+async function saveImportCancel(env, value) {
+  if (!env.USERS) return false;
+  try {
+    await storeCall(env, { op: "put", key: LEARN_IMPORT_CANCEL_KEY, value });
+    return true;
+  } catch {
+    return false;
+  }
+}
 async function rebuildLearnMenus(env, state) {
   const stored = await loadMenus(env);
   const { menus } = buildLearnMenus(LEARN_LEVELS, state);
@@ -465,6 +489,7 @@ async function rebuildLearnMenus(env, state) {
 // runs outside that chain (ctx.waitUntil), so guard here instead.
 const learnImportRuns = new Set();
 async function runLearnImportAll(env, chatId) {
+  const runStartedAt = Date.now();
   const state = await loadImportState(env);
   const items = learnUploadItems(LEARN_LEVELS);
   if (!state.startedAt) state.startedAt = new Date().toISOString();
@@ -511,8 +536,28 @@ async function runLearnImportAll(env, chatId) {
       // Save after every item: if the platform interrupts the run, the next
       // /importlearn resumes instead of re-uploading the same files.
       await saveState();
+    }, {
+      // Cancel: /importlearn cancel writes a timestamp to the cancel key;
+      // a flag newer than this run's start stops the pool from picking
+      // up new files. In-flight uploads finish and their file_ids are
+      // saved, so a later /importlearn resumes from where it stopped.
+      isCancelled: async () => {
+        const flag = await loadImportCancel(env);
+        return Boolean(flag?.at && Date.parse(flag.at) > runStartedAt);
+      },
     });
     await saveQueue;
+    // Cancelled mid-run: do NOT record the manifest hash (the tick will
+    // restart the import on its own within 5 minutes, or /importlearn
+    // starts it at once), but rebuild the menus so the lessons that ARE
+    // ready appear.
+    const cancelFlag = await loadImportCancel(env);
+    if (cancelFlag?.at && Date.parse(cancelFlag.at) > runStartedAt) {
+      await rebuildLearnMenus(env, state);
+      const progress = importProgress(state, items);
+      await telegram(env, "sendMessage", { chat_id: chatId, text: `🛑 تم إلغاء الاستيراد.\n\n${learnProgressText(progress)}\n\nشغّل /importlearn لاستكمال الاستيراد من حيث توقف.`, parse_mode: "HTML" });
+      return;
+    }
     state.manifestHash = currentHash;
     state.stateVersion = 2;
     await saveImportState(env, state);
@@ -571,7 +616,7 @@ async function handleImportLearn(env, chatId, userId, text, ctx) {
   }
   const action = parseImportLearnArg(text);
   if (action === "usage") {
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "✏️ الاستخدام:\n/importlearn — استيراد كل دروس القبطي مرة واحدة (في الخلفية، وستصلك رسالة عند الانتهاء)\n/importlearn status — حالة الاستيراد\n/importlearn reset — مسح حالة الاستيراد وقوائم الدروس" });
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "✏️ الاستخدام:\n/importlearn — استيراد كل دروس القبطي مرة واحدة (في الخلفية، وستصلك رسالة عند الانتهاء)\n/importlearn status — حالة الاستيراد\n/importlearn cancel — إلغاء الاستيراد الجاري\n/importlearn reset — مسح حالة الاستيراد وقوائم الدروس" });
     return;
   }
   if (action === "reset") {
@@ -580,6 +625,11 @@ async function handleImportLearn(env, chatId, userId, text, ctx) {
     await saveMenus(env, { menus: kept });
     await saveImportState(env, emptyImportState());
     await telegram(env, "sendMessage", { chat_id: chatId, text: "🗑 تم مسح حالة استيراد الدروس وقوائم «المستوى الأول/الثاني». شغّل /importlearn للبدء من جديد." });
+    return;
+  }
+  if (action === "cancel") {
+    await saveImportCancel(env, { at: new Date().toISOString() });
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "🛑 جارٍ إلغاء الاستيراد الحالي… سيتوقف قبل بدء أي ملف جديد، وسأرسل لك رسالة عند التوقف." });
     return;
   }
   const state = await loadImportState(env);

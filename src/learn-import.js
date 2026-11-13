@@ -422,11 +422,23 @@ export function parseRetryAfter(error) {
   return Math.min(Math.max(parseInt(match[1], 10) || 0, 0), 60);
 }
 
+// Permanent failures are not worth retrying: a 404 means the Drive file
+// is gone, a 400 means the request itself is bad, a file over the cap
+// will never fit, an empty file will stay empty. Everything else (flood
+// control, timeouts, 5xx, network errors) is transient and retried.
+// Without this, a systematically failing file burned 3 attempts × up to
+// 120s each and held its whole batch hostage.
+const PERMANENT_IMPORT_ERRORS = [/HTTP 404\b/, /Bad Request/i, /file is too big/i, /over the .* cap/i, /is empty/i];
+export function isRetryableImportError(error) {
+  const text = error instanceof Error ? error.message : String(error ?? "");
+  return !PERMANENT_IMPORT_ERRORS.some((re) => re.test(text));
+}
+
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Upload one item, retrying transient failures: a flood-control wait is
 // honoured exactly; anything else waits 2s, then 5s. Permanent failures
-// (a bad Drive id, a file over the cap) still fail after all attempts.
+// fail after the first attempt.
 export async function uploadWithRetry(item, uploadFn, { attempts = LEARN_IMPORT_ATTEMPTS, sleepFn = sleep } = {}) {
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -434,7 +446,7 @@ export async function uploadWithRetry(item, uploadFn, { attempts = LEARN_IMPORT_
       return await uploadFn(item);
     } catch (error) {
       lastError = error;
-      if (attempt === attempts) break;
+      if (attempt === attempts || !isRetryableImportError(error)) break;
       const retryAfter = parseRetryAfter(error);
       await sleepFn(retryAfter != null ? retryAfter * 1000 : attempt === 1 ? 2000 : 5000);
     }
@@ -442,17 +454,27 @@ export async function uploadWithRetry(item, uploadFn, { attempts = LEARN_IMPORT_
   throw lastError;
 }
 
-// Upload items in batches of `concurrency` at a time; onSettled(item,
-// result) runs for every item as it settles (result is { ok: true,
-// uploaded } or { ok: false, error }). Item failures never throw here —
-// they are reported through onSettled, and a throwing onSettled cannot
-// abort the batch. Returns { done, failed }.
-export async function runImportUploads(items, uploadFn, onSettled, { concurrency = LEARN_IMPORT_CONCURRENCY, attempts = LEARN_IMPORT_ATTEMPTS, sleepFn = sleep } = {}) {
+// Upload items with a rolling pool of `concurrency` workers: whenever a
+// worker finishes an item it picks the next one, so one slow file holds a
+// single slot instead of a whole batch (the old fixed batches stalled
+// everything behind one hanging download). onSettled(item, result) runs
+// for every item as it settles (result is { ok: true, uploaded } or
+// { ok: false, error }). isCancelled, when given, is awaited before each
+// pickup — a run cancelled with /importlearn cancel stops starting new
+// files at once (in-flight uploads finish). Item failures never throw
+// here — they are reported through onSettled, and a throwing onSettled
+// cannot abort the pool. Returns { done, failed }.
+export async function runImportUploads(items, uploadFn, onSettled, { concurrency = LEARN_IMPORT_CONCURRENCY, attempts = LEARN_IMPORT_ATTEMPTS, sleepFn = sleep, isCancelled = null } = {}) {
   let done = 0;
   let failed = 0;
-  for (let i = 0; i < items.length; i += concurrency) {
-    const batch = items.slice(i, i + concurrency);
-    await Promise.all(batch.map(async (item) => {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    for (;;) {
+      if (isCancelled && (await isCancelled())) return;
+      const index = next;
+      next += 1;
+      if (index >= items.length) return;
+      const item = items[index];
       let result;
       try {
         const uploaded = await uploadWithRetry(item, uploadFn, { attempts, sleepFn });
@@ -467,8 +489,9 @@ export async function runImportUploads(items, uploadFn, onSettled, { concurrency
       } catch (error) {
         console.error("Learn import onSettled failed", error instanceof Error ? error.message : "unknown error");
       }
-    }));
-  }
+    }
+  });
+  await Promise.all(workers);
   return { done, failed };
 }
 
@@ -481,6 +504,7 @@ export function parseImportLearnArg(text) {
   if (!arg) return "run";
   if (arg === "status") return "status";
   if (arg === "reset") return "reset";
+  if (arg === "cancel") return "cancel";
   return "usage";
 }
 

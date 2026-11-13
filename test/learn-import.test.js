@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import worker, { UserStore } from "../src/index.js";
+import worker, { UserStore, LEARN_IMPORT_CANCEL_KEY } from "../src/index.js";
 import { MENUS_KEY, VIDEO_MENU_ID, normalizeMenus } from "../src/menu-builder.js";
 import { LEARN_LEVELS, LEARN_MANIFEST_VERSION } from "../src/learn-manifest.js";
 import {
@@ -682,13 +682,22 @@ test("learn-import: fast import honours retry_after, retries floods, uploads 5 a
   assert.equal(attempts, 3);
   assert.deepEqual(waits, [2000, 2000]);
 
-  // A permanent failure still fails after all three attempts.
+  // A transient failure (a slow download timing out) is retried three times.
   let tries = 0;
   await assert.rejects(() => uploadWithRetry({ key: "y" }, async () => {
     tries += 1;
+    throw new Error("The operation timed out");
+  }, { sleepFn: async () => {} }), /timed out/);
+  assert.equal(tries, 3);
+
+  // A permanent failure (the Drive file is gone) fails after one attempt —
+  // retrying it would only burn minutes.
+  let permTries = 0;
+  await assert.rejects(() => uploadWithRetry({ key: "z" }, async () => {
+    permTries += 1;
     throw new Error("Drive download failed: HTTP 404");
   }, { sleepFn: async () => {} }), /HTTP 404/);
-  assert.equal(tries, 3);
+  assert.equal(permTries, 1);
 
   // runImportUploads: 10 items, 15ms each — at most 5 in flight at once,
   // all finish, onSettled sees every item.
@@ -717,6 +726,19 @@ test("learn-import: fast import honours retry_after, retries floods, uploads 5 a
     return { fileId: "VID", fileUniqueId: "UVID" };
   }, async () => {}, { sleepFn: async () => {} });
   assert.deepEqual(counts2, { done: 9, failed: 1 });
+
+  // Cancellation: the pool stops picking up new files once isCancelled
+  // says so — here after 4 pickups, so 4 of 6 finish and 2 never start.
+  let pickups = 0;
+  const counts3 = await runImportUploads(items10.slice(0, 6), fakeUpload, async () => {}, {
+    concurrency: 2,
+    sleepFn: async () => {},
+    isCancelled: async () => {
+      pickups += 1;
+      return pickups > 4;
+    },
+  });
+  assert.deepEqual(counts3, { done: 4, failed: 0 });
 });
 
 // ---------------------------------------------------------------------------
@@ -811,6 +833,17 @@ test("learn-import: a manual /importlearn refuses while another run holds the lo
   kvEnv.USERS.store.set(LEARN_IMPORT_KEY, state);
   const calls2 = await sayMsg(kvEnv, ADMIN, "/importlearn");
   assert.ok(anyMessage(calls2, /50\/50/), "a stale lock must not block the import");
+});
+
+test("learn-import: /importlearn cancel writes the cancel flag and answers at once", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedMenus(kvEnv);
+  const calls = await sayMsg(kvEnv, ADMIN, "/importlearn cancel");
+  assert.ok(anyMessage(calls, /إلغاء/), "must answer that the import is being cancelled");
+  const flag = kvEnv.USERS.store.get(LEARN_IMPORT_CANCEL_KEY);
+  assert.equal(typeof flag?.at, "string", "the cancel flag must be stored with a timestamp");
+  assert.ok(!Number.isNaN(Date.parse(flag.at)), "the flag timestamp must parse");
+  assert.equal(calls.filter((c) => c.method === "sendVideo").length, 0, "cancel uploads nothing");
 });
 
 test("learn-import: rebuild drops old per-lesson submenus left by the previous version", async () => {
