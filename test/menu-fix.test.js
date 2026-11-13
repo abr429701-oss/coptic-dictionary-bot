@@ -112,7 +112,7 @@ const nowIso = () => new Date().toISOString();
 const ADMIN = 813894692;
 const USER = 51;
 
-test("menu-fix: opening an empty menu (inline path) still delivers a message", async () => {
+test("menu-fix: opening an empty menu (reply path) still delivers a message", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   seedMenus(kvEnv, [{ id: "m_empty", title: "قائمة فارغة", text: "نص القائمة الفارغة", buttons: [] }]);
   const calls = await tap(kvEnv, USER, "mb|open|m_empty");

@@ -693,39 +693,27 @@ test("learn-import: plain tap on a lesson sends video, photo, then the exam link
   assert.equal(calls[1].payload?.reply_markup, undefined, "only the first message carries the removal");
   const exam = calls[2].payload;
   assert.match(exam.text, /^📝 الامتحان الإلكتروني: https:\/\/docs\.google\.com\/forms\//u);
-  // Navigation survives as inline buttons under the last lesson message —
-  // they take no screen space. ("الدرس الاول" is the third button in the
+  // Navigation returns as a small reply keyboard on the last lesson
+  // message — no inline, ever. ("الدرس الاول" is the third button in the
   // stored level menu — the manifest titles do not follow the id order —
   // so it has both a Previous and a Next.)
-  assert.deepEqual(exam.reply_markup, { inline_keyboard: [
-    [
-      { text: "⏮ السابق", callback_data: "mb|btn|m_learn_l1|b_learn_l1_02" },
-      { text: "التالي ⏭", callback_data: "mb|btn|m_learn_l1|b_learn_l1_04" },
-    ],
-    [
-      { text: "🔙 رجوع", callback_data: "mb|open|m_learn_l1" },
-      { text: "🏠 الرئيسية", callback_data: "mb|root" },
-    ],
-  ] }, "exam message carries Previous/Next + Back/Home inline navigation");
+  assert.deepEqual(exam.reply_markup, { keyboard: [
+    [{ text: "⏮ السابق" }, { text: "التالي ⏭" }],
+    [{ text: "🔙 رجوع" }, { text: "🏠 الرئيسية" }],
+  ], resize_keyboard: true }, "exam message carries the small reply nav keyboard (Previous/Next + Back/Home)");
 });
 
-test("learn-import: inline 🏠 الرئيسية under a lesson returns to the main menu", async () => {
+test("learn-import: tapping 🏠 الرئيسية under a lesson returns to the main menu", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   seedMenus(kvEnv);
   await sayMsg(kvEnv, ADMIN, "/importlearn");
   await sayMsg(kvEnv, 57, "/menu");
   await sayMsg(kvEnv, 57, "المستوى الأول");
   await sayMsg(kvEnv, 57, "الدرس الاول");
-  // The new "mb|root" callback (Home under the lesson's last message)
-  // must open the root menu list, like the old reply-keyboard button did —
-  // Menu Builder logic: it EDITS the same message into the root list
-  // instead of stacking a new message.
-  const calls = await tapCallback(kvEnv, 57, "mb|root");
-  const edit = calls.find((c) => c.url.endsWith("/editMessageText"));
-  assert.ok(edit, "tapping home edits the message into the main menu list");
-  assert.equal(edit.payload?.message_id, 5, "the tapped message becomes the root list");
-  assert.match(String(edit.payload?.text ?? ""), /أختر المستوى لبدء تعلم اللغة القبطية/u);
-  assert.ok(edit.payload?.reply_markup?.inline_keyboard?.some((row) => row.some((b) => b.text === "المستوى الأول" && b.callback_data === "mb|open|m_learn_l1")), "root list shows the levels as inline buttons");
+  // No inline, ever: Home is a button on the small reply nav keyboard
+  // under the lesson, tapped as plain text like every menu button.
+  const calls = await sayMsg(kvEnv, 57, "🏠 الرئيسية");
+  assert.ok(anyMessage(calls, /أختر المستوى لبدء تعلم اللغة القبطية/u), "tapping home must open the main menu list");
   assert.ok(!calls.some((c) => c.method === "sendVideo" || c.method === "sendPhoto"), "no lesson must be sent");
 });
 
@@ -742,50 +730,44 @@ test("learn-import: tapping 🏠 الرئيسية inside a level returns to the 
   assert.ok(!calls.some((c) => c.method === "sendVideo" || c.method === "sendPhoto"), "no lesson must be sent");
 });
 
-// Menu Builder logic (user 2026-11-13): /menu is ONE message with an
-// inline keyboard — the root list — and no reply keyboard is ever sent,
-// so nothing covers the screen while the user browses lessons.
-test("learn-import: /menu sends the root list as an inline keyboard and removes the reply keyboard", async () => {
+// No inline, ever (user 2026-11-13): /menu is a reply keyboard of the
+// root menu titles — nothing inline is sent anywhere in the learn flow.
+test("learn-import: /menu sends the root list as a reply keyboard, no inline anywhere", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   seedMenus(kvEnv);
   await sayMsg(kvEnv, ADMIN, "/importlearn");
   const calls = await sayMsg(kvEnv, 57, "/menu");
   const root = calls.filter((c) => c.method === "sendMessage").map((c) => c.payload).find((p) => String(p.text ?? "").includes("أختر المستوى لبدء تعلم اللغة القبطية"));
   assert.ok(root, "the root text is sent");
-  assert.deepEqual(root.reply_markup, { remove_keyboard: true }, "the root message removes any old reply keyboard");
-  assert.ok(!calls.some((c) => Array.isArray(c.payload?.reply_markup?.keyboard)), "no reply keyboard is sent at all");
-  const attach = calls.find((c) => c.url.endsWith("/editMessageReplyMarkup"));
-  assert.ok(attach, "the inline root keyboard is attached to the same message");
-  assert.equal(attach.payload?.message_id, 900, "attached to the message just sent");
-  const buttons = (attach.payload?.reply_markup?.inline_keyboard ?? []).flat();
-  assert.ok(buttons.some((b) => b.text === "المستوى الأول" && b.callback_data === "mb|open|m_learn_l1"), "level 1 is an inline button");
-  assert.ok(buttons.some((b) => b.text === "المستوى الثاني" && b.callback_data === "mb|open|m_learn_l2"), "level 2 is an inline button");
+  const labels = (root.reply_markup?.keyboard ?? []).flat().map((b) => b.text);
+  assert.ok(labels.includes("المستوى الأول"), "level 1 is a reply-keyboard button");
+  assert.ok(labels.includes("المستوى الثاني"), "level 2 is a reply-keyboard button");
+  assert.ok(!calls.some((c) => JSON.stringify(c.payload?.reply_markup ?? {}).includes("inline_keyboard")), "no inline keyboard is sent at all");
 });
 
-test("learn-import: tapping a level edits the same message into the lesson list", async () => {
+test("learn-import: opening a level from an old inline button shows it as a reply keyboard", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedMenus(kvEnv);
+  await sayMsg(kvEnv, ADMIN, "/importlearn");
+  const calls = await tapCallback(kvEnv, 57, "mb|open|m_learn_l1");
+  const opened = calls.filter((c) => c.method === "sendMessage").map((c) => c.payload).find((p) => (p.reply_markup?.keyboard ?? []).flat().some((b) => b.text === "الدرس الاول"));
+  assert.ok(opened, "the level opens as a reply keyboard with the lessons");
+  assert.ok(!calls.some((c) => JSON.stringify(c.payload?.reply_markup ?? {}).includes("inline_keyboard")), "no inline keyboard is sent at all");
+});
+
+test("learn-import: tapping التالي on the lesson nav keyboard opens the next lesson", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   seedMenus(kvEnv);
   await sayMsg(kvEnv, ADMIN, "/importlearn");
   await sayMsg(kvEnv, 57, "/menu");
-  const calls = await tapCallback(kvEnv, 57, "mb|open|m_learn_l1");
-  const edit = calls.find((c) => c.url.endsWith("/editMessageText"));
-  assert.ok(edit, "opening a level edits the menu message in place");
-  assert.equal(edit.payload?.message_id, 5, "the tapped message becomes the lesson list");
-  const buttons = (edit.payload?.reply_markup?.inline_keyboard ?? []).flat();
-  assert.ok(buttons.some((b) => b.callback_data === "mb|btn|m_learn_l1|b_learn_l1_01"), "lessons are inline buttons on the edited message");
-  assert.ok(!calls.some((c) => c.url.endsWith("/sendMessage")), "no new message is stacked");
-});
-
-test("learn-import: tapping التالي under a lesson opens the next lesson", async () => {
-  const kvEnv = { ...env, USERS: fakeKv() };
-  seedMenus(kvEnv);
-  await sayMsg(kvEnv, ADMIN, "/importlearn");
-  await tapCallback(kvEnv, 57, "mb|btn|m_learn_l1|b_learn_l1_03");
-  // The Next button under "الدرس الاول" (b_learn_l1_03) is b_learn_l1_04
-  // ("الدرس الثاني") — tapping it sends that lesson in full.
-  const calls = await tapCallback(kvEnv, 57, "mb|btn|m_learn_l1|b_learn_l1_04");
-  assert.deepEqual(calls.map((c) => c.method), ["answerCallbackQuery", "sendVideo", "sendPhoto", "sendMessage"]);
-  assert.match(String(calls[1].payload?.caption ?? ""), /الدرس الثاني/u, "the next lesson's video arrives");
+  await sayMsg(kvEnv, 57, "المستوى الأول");
+  await sayMsg(kvEnv, 57, "الدرس الاول");
+  // No inline, ever: Next is a button on the small reply nav keyboard
+  // under the lesson, tapped as plain text. "الدرس الاول" (b_learn_l1_03)
+  // is followed by "الدرس الثاني" (b_learn_l1_04).
+  const calls = await sayMsg(kvEnv, 57, "التالي ⏭");
+  assert.deepEqual(calls.map((c) => c.method), ["sendVideo", "sendPhoto", "sendMessage"]);
+  assert.match(String(calls[0].payload?.caption ?? ""), /الدرس الثاني/u, "the next lesson's video arrives");
 });
 
 test("learn-import: inline tap on an L2 lesson sends video, photo, exercise text, exam link", async () => {
@@ -799,16 +781,10 @@ test("learn-import: inline tap on an L2 lesson sends video, photo, exercise text
   assert.match(messageTexts(calls).find((t) => /التدريب الثالث/u.test(t)) ?? "", /التدريب الثالث/u);
   const exam = calls[4].payload;
   assert.match(exam.text, /^📝 الامتحان الإلكتروني: https:\/\/docs\.google\.com\/forms\//u);
-  assert.deepEqual(exam.reply_markup, { inline_keyboard: [
-    [
-      { text: "⏮ السابق", callback_data: "mb|btn|m_learn_l2|b_learn_l2_05" },
-      { text: "التالي ⏭", callback_data: "mb|btn|m_learn_l2|b_learn_l2_07" },
-    ],
-    [
-      { text: "🔙 رجوع", callback_data: "mb|open|m_learn_l2" },
-      { text: "🏠 الرئيسية", callback_data: "mb|root" },
-    ],
-  ] }, "exam message carries Previous/Next + Back/Home inline navigation");
+  assert.deepEqual(exam.reply_markup, { keyboard: [
+    [{ text: "⏮ السابق" }, { text: "التالي ⏭" }],
+    [{ text: "🔙 رجوع" }, { text: "🏠 الرئيسية" }],
+  ], resize_keyboard: true }, "exam message carries the small reply nav keyboard (Previous/Next + Back/Home)");
 });
 
 test("learn-import: one failed lesson item does not abort the rest of the lesson", async () => {
@@ -841,16 +817,10 @@ test("learn-import: one failed lesson item does not abort the rest of the lesson
   assert.ok(messageTexts(calls).some((t) => /wrong file identifier/u.test(t)), "admin sees the real reason");
   const exam = calls.at(-1).payload;
   assert.match(exam.text, /^📝 الامتحان الإلكتروني: https:\/\/docs\.google\.com\/forms\//u);
-  assert.deepEqual(exam.reply_markup, { inline_keyboard: [
-    [
-      { text: "⏮ السابق", callback_data: "mb|btn|m_learn_l1|b_learn_l1_02" },
-      { text: "التالي ⏭", callback_data: "mb|btn|m_learn_l1|b_learn_l1_04" },
-    ],
-    [
-      { text: "🔙 رجوع", callback_data: "mb|open|m_learn_l1" },
-      { text: "🏠 الرئيسية", callback_data: "mb|root" },
-    ],
-  ] }, "exam message carries Previous/Next + Back/Home inline navigation even after a failed item");
+  assert.deepEqual(exam.reply_markup, { keyboard: [
+    [{ text: "⏮ السابق" }, { text: "التالي ⏭" }],
+    [{ text: "🔙 رجوع" }, { text: "🏠 الرئيسية" }],
+  ], resize_keyboard: true }, "exam message carries the small reply nav keyboard (Previous/Next + Back/Home) even after a failed item");
 });
 
 // ---------------------------------------------------------------------------
