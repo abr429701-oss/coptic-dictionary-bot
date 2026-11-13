@@ -93,7 +93,18 @@ export function learnUploadItems(levels = LEARN_LEVELS) {
 // ---------------------------------------------------------------------------
 
 export function emptyImportState() {
-  return { version: 1, startedAt: null, updatedAt: null, items: {}, manifestHash: "", importRunningSince: "" };
+  return { version: 1, stateVersion: 2, startedAt: null, updatedAt: null, items: {}, manifestHash: "", importRunningSince: "" };
+}
+
+// A stored import state is trusted only when it was written by the
+// driveId-aware importer (stateVersion 2): its entries carry the Drive file
+// each file_id came from, so a manifest change can be detected precisely.
+// Older states (no stateVersion) predate that bookkeeping — their file_ids
+// cannot be matched to Drive files, so the next run re-imports everything
+// once instead of trusting keys that may have shifted (a deleted lesson
+// renumbers the ones after it).
+export function isImportStateTrusted(state) {
+  return state?.stateVersion === 2;
 }
 
 // Coerce any stored value into a valid state; entries for items that are not
@@ -105,6 +116,9 @@ export function normalizeImportState(value, levels = LEARN_LEVELS) {
   if (typeof value.updatedAt === "string") state.updatedAt = value.updatedAt;
   if (typeof value.manifestHash === "string") state.manifestHash = value.manifestHash;
   if (typeof value.importRunningSince === "string") state.importRunningSince = value.importRunningSince;
+  // A stored state without a stateVersion is version 0: untrusted (see
+  // isImportStateTrusted). A fresh state from emptyImportState is version 2.
+  state.stateVersion = typeof value.stateVersion === "number" ? value.stateVersion : 0;
   const known = new Set(learnUploadItems(levels).map((item) => item.key));
   const raw = value.items && typeof value.items === "object" ? value.items : {};
   for (const [key, entry] of Object.entries(raw)) {
@@ -172,24 +186,6 @@ export function learnManifestHash(levels = LEARN_LEVELS) {
   return hash.toString(16).padStart(8, "0");
 }
 
-// One-time adoption for import states written before driveIds and the
-// manifest hash were stored: fill each done entry's driveId from the current
-// manifest (what was actually uploaded) and record the hash. After this, a
-// later manifest change is detected precisely — only the items whose driveId
-// actually changed are re-uploaded. Returns true when it set the hash (the
-// caller saves the state); false when the hash was already recorded.
-export function adoptImportState(state, items, hash) {
-  if (!state || typeof state !== "object") return false;
-  if (typeof state.manifestHash === "string" && state.manifestHash) return false;
-  const byKey = new Map(items.map((item) => [item.key, item]));
-  for (const [key, entry] of Object.entries(state.items ?? {})) {
-    if (entry?.status === "done" && !entry.driveId && byKey.get(key)) {
-      entry.driveId = byKey.get(key).driveId;
-    }
-  }
-  state.manifestHash = hash;
-  return true;
-}
 
 // ---------------------------------------------------------------------------
 // Lesson lookup + send plan (one tap sends the whole lesson, in order)

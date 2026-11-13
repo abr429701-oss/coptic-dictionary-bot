@@ -468,20 +468,25 @@ async function runLearnImportAll(env, chatId) {
   const state = await loadImportState(env);
   const items = learnUploadItems(LEARN_LEVELS);
   if (!state.startedAt) state.startedAt = new Date().toISOString();
-  // Whether the manifest changed since this state was written — decided
-  // BEFORE adoption (adoption records the current hash when none is stored).
+  // Whether the manifest changed since this state was written. A state
+  // without a recorded hash differs from every hash — it is untrusted and
+  // gets a full re-import below (see isImportStateTrusted).
   const currentHash = learnManifestHash(LEARN_LEVELS);
-  const hashChanged = Boolean(state.manifestHash) && state.manifestHash !== currentHash;
-  // Adopt pre-hash states (backfill driveIds) and take the Durable Object
-  // lock so a cron tick and a manual /importlearn never upload twice.
-  adoptImportState(state, items, currentHash);
+  const hashChanged = state.manifestHash !== currentHash;
+  // Take the Durable Object lock so a cron tick and a manual /importlearn
+  // never upload twice.
   state.importRunningSince = new Date().toISOString();
   await saveImportState(env, state);
   const errors = [];
   try {
     // A manifest change re-uploads only the items whose Drive file actually
-    // changed (driveId mismatch); everything else is skipped as done.
-    for (const item of learnPendingItems(state, items, hashChanged)) {
+    // changed (driveId mismatch); everything else is skipped as done. An
+    // untrusted state re-imports EVERYTHING once — its file_ids cannot be
+    // matched to Drive files, and lesson ids may have shifted (a deleted
+    // lesson renumbers the ones after it), so trusting its keys would send
+    // the wrong videos.
+    const pending = isImportStateTrusted(state) ? learnPendingItems(state, items, hashChanged) : items;
+    for (const item of pending) {
       try {
         const uploaded = await uploadLearnFile(env, chatId, item);
         state.items[item.key] = { status: "done", fileId: uploaded.fileId, fileUniqueId: uploaded.fileUniqueId, driveId: item.driveId, error: "", at: new Date().toISOString() };
@@ -495,6 +500,7 @@ async function runLearnImportAll(env, chatId) {
       await saveImportState(env, state);
     }
     state.manifestHash = currentHash;
+    state.stateVersion = 2;
     await saveImportState(env, state);
     await rebuildLearnMenus(env, state);
     const progress = importProgress(state, items);
@@ -521,13 +527,10 @@ async function maybeAutoImportLearn(env, ctx) {
   const state = await loadImportState(env);
   const items = learnUploadItems(LEARN_LEVELS);
   const currentHash = learnManifestHash(LEARN_LEVELS);
-  const hashChanged = Boolean(state.manifestHash) && state.manifestHash !== currentHash;
-  const adopted = adoptImportState(state, items, currentHash);
-  const pending = learnPendingItems(state, items, hashChanged);
-  if (!pending.length && !hashChanged) {
-    if (adopted) await saveImportState(env, state);
-    return;
-  }
+  const hashChanged = state.manifestHash !== currentHash;
+  const trusted = isImportStateTrusted(state);
+  const pending = trusted ? learnPendingItems(state, items, hashChanged) : items;
+  if (!pending.length && !hashChanged && trusted) return;
   if (state.importRunningSince && Date.now() - Date.parse(state.importRunningSince) < LEARN_AUTO_IMPORT_LOCK_MS) return;
   const adminId = DEFAULT_ADMIN_IDS;
   if (learnImportRuns.has(adminId)) return;
@@ -575,9 +578,11 @@ async function handleImportLearn(env, chatId, userId, text, ctx) {
   const progress = importProgress(state, items);
   // A manifest change (a Drive file replaced in the Sheet) leaves every
   // status "done" but makes some driveIds stale — that is NOT complete:
-  // fall through to the run, which re-uploads only the changed files.
-  const manifestChanged = Boolean(state.manifestHash) && state.manifestHash !== learnManifestHash(LEARN_LEVELS);
-  if (progress.complete && !manifestChanged) {
+  // fall through to the run, which re-uploads only the changed files. An
+  // untrusted state is never complete either (its file_ids cannot be
+  // matched to Drive files).
+  const manifestChanged = state.manifestHash !== learnManifestHash(LEARN_LEVELS);
+  if (progress.complete && !manifestChanged && isImportStateTrusted(state)) {
     // The stored menus may still be the old importer's (one button per
     // item): delete them entirely and write the new one-button-per-lesson
     // menus, even though nothing is left to upload.
@@ -1217,7 +1222,7 @@ import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VI
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 import { getHiddenUi, setHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
 import { LEARN_LEVELS } from "./learn-manifest.js";
-import { LEARN_IMPORT_KEY, LEARN_GET_CODE_TEXT, learnUploadItems, emptyImportState, normalizeImportState, importProgress, learnPendingItems, learnManifestHash, adoptImportState, findLearnLesson, learnLessonSendPlan, buildLearnMenus, mergeMenus, uploadLearnFile, parseImportLearnArg, learnImportStartText, learnProgressText } from "./learn-import.js";
+import { LEARN_IMPORT_KEY, LEARN_GET_CODE_TEXT, learnUploadItems, emptyImportState, normalizeImportState, importProgress, learnPendingItems, learnManifestHash, isImportStateTrusted, findLearnLesson, learnLessonSendPlan, buildLearnMenus, mergeMenus, uploadLearnFile, parseImportLearnArg, learnImportStartText, learnProgressText } from "./learn-import.js";
 
 // ---- reply-keyboard menus (real buttons under the field, no inline) --------
 // The position of a user inside the menus is remembered so a plain-text tap can

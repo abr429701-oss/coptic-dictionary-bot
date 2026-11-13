@@ -16,7 +16,7 @@ import {
   importProgress,
   learnPendingItems,
   learnManifestHash,
-  adoptImportState,
+  isImportStateTrusted,
   findLearnLesson,
   learnLessonSendPlan,
   buildLearnMenus,
@@ -355,17 +355,13 @@ test("learn-import: manifest hash is stable and sensitive to media changes", () 
   assert.notEqual(learnManifestHash(retitled), hash);
 });
 
-test("learn-import: adoptImportState backfills driveIds once", () => {
-  const items = learnUploadItems();
-  const state = fullState(); // done entries, no driveIds, no hash
-  assert.equal(adoptImportState(state, items, "abc123"), true);
-  assert.equal(state.manifestHash, "abc123");
-  assert.equal(state.items[items[0].key].driveId, items[0].driveId);
-  // Second call is a no-op (hash already recorded).
-  state.items[items[0].key].driveId = "KEEP_ME";
-  assert.equal(adoptImportState(state, items, "different"), false);
-  assert.equal(state.manifestHash, "abc123");
-  assert.equal(state.items[items[0].key].driveId, "KEEP_ME");
+test("learn-import: isImportStateTrusted only trusts version-2 states", () => {
+  assert.equal(isImportStateTrusted(emptyImportState()), true);
+  assert.equal(isImportStateTrusted(normalizeImportState({})), false);
+  assert.equal(isImportStateTrusted(normalizeImportState({ stateVersion: 2 })), true);
+  assert.equal(isImportStateTrusted(normalizeImportState({ stateVersion: 1 })), false);
+  assert.equal(isImportStateTrusted(null), false);
+  assert.equal(isImportStateTrusted(undefined), false);
 });
 
 test("learn-import: normalizeImportState keeps driveId and manifest hash", () => {
@@ -378,6 +374,9 @@ test("learn-import: normalizeImportState keeps driveId and manifest hash", () =>
   assert.equal(state.manifestHash, "deadbeef");
   assert.equal(state.importRunningSince, "2026-11-13T10:00:00.000Z");
   assert.equal(state.items[items[0].key].driveId, "D1");
+  // No stateVersion stored: version 0, untrusted (see isImportStateTrusted).
+  assert.equal(state.stateVersion, 0);
+  assert.equal(normalizeImportState({ stateVersion: 2 }).stateVersion, 2);
 });
 
 // ---------------------------------------------------------------------------
@@ -402,19 +401,32 @@ test("learn-import: scheduled tick does nothing when the manifest is unchanged",
   }
 });
 
-test("learn-import: scheduled tick adopts a pre-hash state without re-uploading", async () => {
+test("learn-import: scheduled tick with an untrusted state re-imports everything once", async () => {
   const calls = [];
   const kvEnv = { ...env, USERS: fakeKv() };
-  kvEnv.USERS.store.set(LEARN_IMPORT_KEY, fullState()); // done, no driveIds, no hash
+  // The old production state: 49/49 done, but no driveIds, no hash and no
+  // stateVersion — its file_ids cannot be matched to Drive files, and the
+  // lesson ids may have shifted since the import (a deleted lesson
+  // renumbers the ones after it). Trusting its keys would send the wrong
+  // videos, so the tick re-imports everything once and records version 2.
+  const state = fullState();
+  delete state.stateVersion;
+  kvEnv.USERS.store.set(LEARN_IMPORT_KEY, state);
+  seedMenus(kvEnv);
   const realFetch = globalThis.fetch;
   try {
     makeMessageStub(calls);
     await worker.scheduled({ cron: "*/5 * * * *", scheduledTime: Date.now() }, kvEnv);
-    assert.equal(calls.length, 0);
+    const drives = calls.filter((c) => c.kind === "drive");
+    assert.equal(drives.length, 49);
     const stored = storedState(kvEnv);
+    assert.equal(stored.stateVersion, 2);
     assert.equal(stored.manifestHash, learnManifestHash(LEARN_LEVELS));
+    assert.equal(stored.importRunningSince, "");
     const first = learnUploadItems()[0];
     assert.equal(stored.items[first.key].driveId, first.driveId);
+    assert.ok(anyMessage(calls, /تحديث تلقائي للدروس/));
+    assert.ok(anyMessage(calls, /اكتمل الاستيراد/));
   } finally {
     globalThis.fetch = realFetch;
   }
@@ -740,12 +752,14 @@ test("learn-import: rebuild drops old per-lesson submenus left by the previous v
 test("learn-import: /importlearn on an already-complete import still rebuilds menus (drops v1 submenus)", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   seedMenus(kvEnv);
-  // State as the previous importer left it: 49/49 done. Menus as the
-  // previous importer left them: level menus plus per-lesson submenus
-  // with one button per item. Before the fix, /importlearn short-
-  // circuited on "complete" and never rebuilt, so users kept seeing
-  // the old separate item buttons.
-  kvEnv.USERS.store.set(LEARN_IMPORT_KEY, fullState());
+  // State as the previous importer left it: 49/49 done, trusted (current
+  // manifest hash recorded). Menus as the previous importer left them:
+  // level menus plus per-lesson submenus with one button per item. Before
+  // the fix, /importlearn short-circuited on "complete" and never rebuilt,
+  // so users kept seeing the old separate item buttons.
+  const completeState = fullState();
+  completeState.manifestHash = learnManifestHash(LEARN_LEVELS);
+  kvEnv.USERS.store.set(LEARN_IMPORT_KEY, completeState);
   kvEnv.USERS.store.set(MENUS_KEY, { menus: [
     ...storedMenus(kvEnv),
     { id: "m_learn_l1", title: "المستوى الأول", text: "المستوى الأول", parentId: null, buttons: [{ id: "b_learn_l1_01", label: "الدرس الاول", kind: "submenu", targetMenuId: "m_learn_l1_01" }] },
