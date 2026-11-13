@@ -525,7 +525,13 @@ async function runLearnImportAll(env, chatId) {
       saveQueue = saveQueue.then(() => saveImportState(env, state));
       return saveQueue;
     };
-    await runImportUploads(pending, (item) => uploadLearnFile(env, chatId, item), async (item, result) => {
+    await runImportUploads(pending, (item, signal) => uploadLearnFile(env, chatId, item, undefined, signal), async (item, result) => {
+      if (result.cancelled) {
+        // Cancelled mid-upload: leave the item as it was (pending/failed)
+        // so the next run retries it; do not count it as failed.
+        await saveState();
+        return;
+      }
       if (result.ok) {
         state.items[item.key] = { status: "done", fileId: result.uploaded.fileId, fileUniqueId: result.uploaded.fileUniqueId, driveId: item.driveId, error: "", at: new Date().toISOString() };
       } else {

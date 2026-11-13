@@ -699,6 +699,14 @@ test("learn-import: fast import honours retry_after, retries floods, uploads 5 a
   }, { sleepFn: async () => {} }), /HTTP 404/);
   assert.equal(permTries, 1);
 
+  // A cancelled upload is never retried.
+  let cancelTries = 0;
+  await assert.rejects(() => uploadWithRetry({ key: "w" }, async () => {
+    cancelTries += 1;
+    throw new Error("import cancelled");
+  }, { sleepFn: async () => {} }), /import cancelled/);
+  assert.equal(cancelTries, 1);
+
   // runImportUploads: 10 items, 15ms each — at most 5 in flight at once,
   // all finish, onSettled sees every item.
   let inFlight = 0;
@@ -739,6 +747,40 @@ test("learn-import: fast import honours retry_after, retries floods, uploads 5 a
     },
   });
   assert.deepEqual(counts3, { done: 4, failed: 0 });
+});
+
+test("learn-import: cancelling aborts in-flight uploads at once", { timeout: 10000 }, async () => {
+  // The uploads below hang for 60s each; the cancel must land in seconds
+  // (2026-11-13: /importlearn cancel only stopped NEW files, so a run
+  // stuck on slow uploads took minutes to stop).
+  const items6 = learnUploadItems().slice(0, 6);
+  const hangingUpload = async (item, signal) => {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => resolve({ fileId: "VID", fileUniqueId: "UVID" }), 60000);
+      signal.addEventListener("abort", () => {
+        clearTimeout(timer);
+        reject(new Error("import cancelled"));
+      }, { once: true });
+    });
+  };
+  let checks = 0;
+  const settled = [];
+  const started = Date.now();
+  const counts = await runImportUploads(items6, hangingUpload, async (item, result) => {
+    settled.push(result);
+  }, {
+    concurrency: 2,
+    sleepFn: async () => {},
+    cancelPollMs: 10,
+    isCancelled: async () => {
+      checks += 1;
+      return checks >= 3;
+    },
+  });
+  assert.ok(Date.now() - started < 5000, "the abort must land in seconds, not after the 60s uploads");
+  assert.deepEqual(counts, { done: 0, failed: 0 });
+  assert.equal(settled.length, 2, "only the two in-flight items settle");
+  assert.ok(settled.every((r) => r.cancelled === true), "aborted items are cancelled, not failed");
 });
 
 // ---------------------------------------------------------------------------

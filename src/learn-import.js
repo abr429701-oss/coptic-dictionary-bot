@@ -346,10 +346,13 @@ export function driveDownloadUrl(driveId) {
   return `https://drive.usercontent.google.com/download?id=${encodeURIComponent(driveId)}&export=download&confirm=t`;
 }
 
-export async function downloadDriveFile(driveId, fetchFn = globalThis.fetch) {
+export async function downloadDriveFile(driveId, fetchFn = globalThis.fetch, signal = undefined) {
   const response = await fetchFn(driveDownloadUrl(driveId), {
     redirect: "follow",
-    signal: AbortSignal.timeout(120000),
+    // A 21MB file on a slow link needs more than a minute; a timeout
+    // failure is retried from scratch, so a short timeout wastes the
+    // whole download instead of letting it finish.
+    signal: signal ? AbortSignal.any([AbortSignal.timeout(300000), signal]) : AbortSignal.timeout(300000),
   });
   const type = response.headers?.get?.("content-type") ?? "";
   if (!response.ok || type.includes("text/html")) {
@@ -366,8 +369,9 @@ export async function downloadDriveFile(driveId, fetchFn = globalThis.fetch) {
 // Download one manifest item from Drive, upload it to Telegram in the admin
 // chat, delete the sent message (the file_id stays valid), and return the
 // captured file_id. Throws on any failure — the caller records it and moves on.
-export async function uploadLearnFile(env, chatId, item, fetchFn = globalThis.fetch) {
-  const { data, type } = await downloadDriveFile(item.driveId, fetchFn);
+// `signal` aborts the in-flight transfers (see /importlearn cancel).
+export async function uploadLearnFile(env, chatId, item, fetchFn = globalThis.fetch, signal = undefined) {
+  const { data, type } = await downloadDriveFile(item.driveId, fetchFn, signal);
   const method = item.kind === "video" ? "sendVideo" : "sendPhoto";
   const field = item.kind === "video" ? "video" : "photo";
   const mime = /^(video|image)\//u.test(type) ? type : LEARN_DRIVE_MIME[item.kind];
@@ -379,7 +383,7 @@ export async function uploadLearnFile(env, chatId, item, fetchFn = globalThis.fe
   const response = await fetchFn(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
     method: "POST",
     body: form,
-    signal: AbortSignal.timeout(120000),
+    signal: signal ? AbortSignal.any([AbortSignal.timeout(300000), signal]) : AbortSignal.timeout(300000),
   });
   const parsed = await response.json().catch(() => null);
   if (!response.ok || !parsed?.ok) {
@@ -436,19 +440,45 @@ export function isRetryableImportError(error) {
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// The error a cancelled upload fails with: the pool aborts the item's
+// controller with this error, and the retry loop must NOT retry it.
+export const IMPORT_CANCELLED_MESSAGE = "import cancelled";
+export function isImportCancelledError(error) {
+  if (!error || typeof error !== "object") return false;
+  return error.message === IMPORT_CANCELLED_MESSAGE || error.name === "AbortError";
+}
+
+// Sleep unless the signal aborts first (a retry backoff must not make a
+// cancelled run wait out a 60s flood-control delay).
+function sleepOrAbort(ms, signal, sleepFn) {
+  if (!signal) return sleepFn(ms);
+  if (signal.aborted) throw signal.reason ?? new Error(IMPORT_CANCELLED_MESSAGE);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new Error(IMPORT_CANCELLED_MESSAGE));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 // Upload one item, retrying transient failures: a flood-control wait is
 // honoured exactly; anything else waits 2s, then 5s. Permanent failures
-// fail after the first attempt.
-export async function uploadWithRetry(item, uploadFn, { attempts = LEARN_IMPORT_ATTEMPTS, sleepFn = sleep } = {}) {
+// fail after the first attempt, and a cancelled upload is never retried.
+export async function uploadWithRetry(item, uploadFn, { attempts = LEARN_IMPORT_ATTEMPTS, sleepFn = sleep, signal = undefined } = {}) {
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       return await uploadFn(item);
     } catch (error) {
       lastError = error;
-      if (attempt === attempts || !isRetryableImportError(error)) break;
+      if (attempt === attempts || isImportCancelledError(error) || !isRetryableImportError(error)) break;
       const retryAfter = parseRetryAfter(error);
-      await sleepFn(retryAfter != null ? retryAfter * 1000 : attempt === 1 ? 2000 : 5000);
+      await sleepOrAbort(retryAfter != null ? retryAfter * 1000 : attempt === 1 ? 2000 : 5000, signal, sleepFn);
     }
   }
   throw lastError;
@@ -458,16 +488,28 @@ export async function uploadWithRetry(item, uploadFn, { attempts = LEARN_IMPORT_
 // worker finishes an item it picks the next one, so one slow file holds a
 // single slot instead of a whole batch (the old fixed batches stalled
 // everything behind one hanging download). onSettled(item, result) runs
-// for every item as it settles (result is { ok: true, uploaded } or
-// { ok: false, error }). isCancelled, when given, is awaited before each
-// pickup — a run cancelled with /importlearn cancel stops starting new
-// files at once (in-flight uploads finish). Item failures never throw
-// here — they are reported through onSettled, and a throwing onSettled
-// cannot abort the pool. Returns { done, failed }.
-export async function runImportUploads(items, uploadFn, onSettled, { concurrency = LEARN_IMPORT_CONCURRENCY, attempts = LEARN_IMPORT_ATTEMPTS, sleepFn = sleep, isCancelled = null } = {}) {
+// for every item as it settles (result is { ok: true, uploaded },
+// { ok: false, error } or { ok: false, error, cancelled: true } — a
+// cancelled item is NOT counted as failed and keeps its previous status,
+// so the next run retries it). isCancelled, when given, is polled every
+// `cancelPollMs` by one shared timer: when it says yes, every in-flight
+// upload is aborted at once, so a cancel lands in seconds instead of
+// waiting out the slowest file. Item failures never throw here — they
+// are reported through onSettled, and a throwing onSettled cannot abort
+// the pool. Returns { done, failed } (cancelled items count as neither).
+export async function runImportUploads(items, uploadFn, onSettled, { concurrency = LEARN_IMPORT_CONCURRENCY, attempts = LEARN_IMPORT_ATTEMPTS, sleepFn = sleep, isCancelled = null, cancelPollMs = 2000 } = {}) {
   let done = 0;
   let failed = 0;
   let next = 0;
+  const controllers = new Set();
+  let poller = null;
+  if (isCancelled) {
+    poller = setInterval(() => {
+      isCancelled().then((yes) => {
+        if (yes) for (const controller of controllers) controller.abort(new Error(IMPORT_CANCELLED_MESSAGE));
+      }).catch(() => {});
+    }, cancelPollMs);
+  }
   const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
     for (;;) {
       if (isCancelled && (await isCancelled())) return;
@@ -475,14 +517,22 @@ export async function runImportUploads(items, uploadFn, onSettled, { concurrency
       next += 1;
       if (index >= items.length) return;
       const item = items[index];
+      const controller = new AbortController();
+      controllers.add(controller);
       let result;
       try {
-        const uploaded = await uploadWithRetry(item, uploadFn, { attempts, sleepFn });
+        const uploaded = await uploadWithRetry(item, (it) => uploadFn(it, controller.signal), { attempts, sleepFn, signal: controller.signal });
         done += 1;
         result = { ok: true, uploaded };
       } catch (error) {
-        failed += 1;
-        result = { ok: false, error };
+        if (isImportCancelledError(error)) {
+          result = { ok: false, error, cancelled: true };
+        } else {
+          failed += 1;
+          result = { ok: false, error };
+        }
+      } finally {
+        controllers.delete(controller);
       }
       try {
         await onSettled(item, result);
@@ -491,7 +541,11 @@ export async function runImportUploads(items, uploadFn, onSettled, { concurrency
       }
     }
   });
-  await Promise.all(workers);
+  try {
+    await Promise.all(workers);
+  } finally {
+    if (poller) clearInterval(poller);
+  }
   return { done, failed };
 }
 
