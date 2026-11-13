@@ -48,8 +48,14 @@ test("learn-app: index.html loads the data and plays video natively", () => {
   assert.ok(appHtml.includes("https://telegram.org/js/telegram-web-app.js"), "Telegram WebApp SDK");
   assert.ok(appHtml.includes('fetch("lessons.json")'), "loads the static lesson data");
   assert.ok(appHtml.includes("<video controls playsinline"), "native video element, no Drive player embed");
-  assert.ok(appHtml.includes("drive.usercontent.google.com/download"), "videos stream straight from Google, zero Worker requests");
-  assert.ok(appHtml.includes("drive.google.com/file/d/"), "Drive preview iframe as fallback when native video errors");
+  // Video goes through the Worker's /video/<id> proxy (user-approved small
+  // request cost, 2026-11-13): clean media headers, native playback, no
+  // player. The direct usercontent URL is gone — Drive's attachment header
+  // breaks inline playback on the user's phone.
+  assert.ok(appHtml.includes('"/video/"'), "videos play through the Worker proxy");
+  assert.ok(!appHtml.includes("drive.usercontent.google.com/download"), "no direct usercontent video URL");
+  assert.ok(!appHtml.includes("/preview"), "no Drive preview player iframe");
+  assert.ok(appHtml.includes("drive.google.com/file/d/"), "Drive link stays as a fallback");
   assert.ok(appHtml.includes("الامتحان الإلكتروني"), "exam button label");
 });
 

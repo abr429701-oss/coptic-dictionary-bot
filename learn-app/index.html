@@ -100,7 +100,6 @@
   .lbl { font-size: 14px; font-weight: 700; color: var(--muted); margin-bottom: 8px; }
   .videoWrap { position: relative; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); }
   .videoWrap video { position: absolute; inset: 0; width: 100%; height: 100%; background: #000; }
-  .videoWrap iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
   .photo { width: 100%; border-radius: var(--radius); display: block; box-shadow: var(--shadow); }
   .exercise {
     background: var(--gold-soft); border: 1px solid #eadfba; border-radius: var(--radius);
@@ -212,13 +211,15 @@
     });
   }
   function driveView(id) { return "https://drive.google.com/file/d/" + encodeURIComponent(id) + "/view"; }
-  function drivePreview(id) { return "https://drive.google.com/file/d/" + encodeURIComponent(id) + "/preview"; }
   function driveImg(id) { return "https://drive.google.com/uc?export=download&id=" + encodeURIComponent(id); }
 
-  // Lesson videos stream straight from Google's download host (it answers
-  // video Range with 206; the uc URL 303-redirects on Range and Telegram's
-  // webview fails on that) — zero Worker requests, the bot is never involved.
-  function driveVideo(id) { return "https://drive.usercontent.google.com/download?id=" + encodeURIComponent(id) + "&export=download"; }
+  // Lesson videos play through the Worker's /video/<id> proxy: it forwards
+  // the Range header to Drive and streams the video back with clean media
+  // headers (no redirect, no attachment disposition), so the native <video>
+  // element plays it inline — no player, no Drive preview iframe (the user
+  // explicitly rejected players). Cost, user-approved ("بطلب صغير"): one
+  // Worker request per Range fetch — a handful per view.
+  function driveVideo(id) { return "/video/" + encodeURIComponent(id); }
 
   function formIdFromUrl(url) {
     var m = String(url || "").match(/\/forms\/d\/([A-Za-z0-9_-]+)\//);
@@ -294,7 +295,7 @@
   function renderItem(item) {
     if (item.kind === "video") {
       return "<div class='item'><div class='lbl'>" + esc(item.label || "🎬 فيديو الدرس") + "</div>" +
-        "<div class='videoWrap'><video controls playsinline preload='metadata' data-drive='" + esc(item.driveId) + "' src='" + esc(driveVideo(item.driveId)) + "'></video></div>" +
+        "<div class='videoWrap'><video controls playsinline preload='metadata' src='" + esc(driveVideo(item.driveId)) + "'></video></div>" +
         "<a class='fallback' style='display:none' href='" + esc(driveView(item.driveId)) + "' target='_blank' rel='noopener'>الفيديو ما اشتغلش؟ افتحه في Drive ←</a></div>";
     }
     if (item.kind === "photo") {
@@ -336,19 +337,12 @@
     view.querySelectorAll("[data-exam]").forEach(function (btn) {
       btn.addEventListener("click", function () { openExam(btn.getAttribute("data-exam"), id); });
     });
-    // If the native video fails in this phone's webview (Drive answers the
-    // direct link with an attachment header some webviews refuse, or the
-    // file fails to load), swap the player in place for Google's own Drive
-    // preview — still zero Worker requests, still inside the app. The Drive
-    // link below appears too, as a last resort.
+    // If a video fails to load, reveal only its own Drive fallback link —
+    // no player swap: the user wants the native <video> element, not a
+    // Drive preview player.
     view.querySelectorAll("video").forEach(function (v) {
       v.addEventListener("error", function () {
-        var wrap = v.closest(".videoWrap");
-        var item = v.closest(".item");
-        if (wrap) {
-          wrap.innerHTML = "<iframe src='" + esc(drivePreview(v.getAttribute("data-drive") || "")) + "' allow='autoplay; fullscreen' allowfullscreen></iframe>";
-        }
-        var fb = item ? item.querySelector(".fallback") : null;
+        var fb = v.closest(".item").querySelector(".fallback");
         if (fb) fb.style.display = "";
       });
     });

@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import worker, { UserStore, resetVoiceFileIdCache } from "../src/index.js";
+import { LEARN_LEVELS } from "../src/learn-manifest.js";
 import { translateFieldValue, VALUE_TRANSLATIONS } from "../src/field-translations.js";
 import { resetAudioCaches, HUMAN_AUDIO_VERSION } from "../src/neural-voice.js";
 import records from "../data/dictionary.json" with { type: "json" };
@@ -85,6 +86,48 @@ test("health endpoint is public and returns ready", async () => {
   const response = await worker.fetch(new Request("https://bot.test/health"), env);
   assert.equal(response.status, 200);
   assert.match(await response.text(), /ready/u);
+});
+
+test("lesson video proxy streams Drive video with clean media headers", async () => {
+  const videoId = LEARN_LEVELS.flatMap((level) => level.lessons)
+    .flatMap((lesson) => lesson.items)
+    .find((item) => item.kind === "video").driveId;
+  const realFetch = globalThis.fetch;
+  const seen = {};
+  globalThis.fetch = async (input, init) => {
+    seen.url = String(input);
+    seen.range = init?.headers?.range ?? null;
+    return new Response(new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112]), {
+      status: 206,
+      headers: {
+        "content-type": "video/mp4",
+        "content-length": "10285132",
+        "content-range": "bytes 0-7/10285132",
+        "accept-ranges": "bytes",
+        "content-disposition": "attachment; filename=\"x.mp4\"",
+      },
+    });
+  };
+  try {
+    const response = await worker.fetch(
+      new Request(`https://bot.test/video/${videoId}`, { headers: { range: "bytes=0-7" } }), env,
+    );
+    assert.equal(response.status, 206);
+    assert.equal(response.headers.get("content-type"), "video/mp4");
+    assert.equal(response.headers.get("content-range"), "bytes 0-7/10285132");
+    assert.equal(response.headers.get("accept-ranges"), "bytes");
+    assert.equal(response.headers.get("content-disposition"), null);
+    assert.equal(await response.text(), "\0\0\0\u0018ftyp");
+    assert.ok(seen.url.includes("drive.google.com/uc?export=download"), "fetches from Drive");
+    assert.equal(seen.range, "bytes=0-7", "forwards the Range header");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("lesson video proxy rejects ids outside the lesson manifest", async () => {
+  const response = await worker.fetch(new Request("https://bot.test/video/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), env);
+  assert.equal(response.status, 404);
 });
 
 test("scheduled keep-warm tick runs without storage or Telegram work", async () => {

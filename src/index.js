@@ -8155,6 +8155,26 @@ async function handleHiddenUiCallback({ env, callback }) {
   }).catch(() => null);
 }
 
+// Lesson videos, served through the Worker (2026-11-13): the Drive download
+// URL answers a video Range request with a 303 redirect to another host, and
+// media players in Telegram's webview fail on that — the direct usercontent
+// URL works, but Drive also sends Content-Disposition: attachment, which
+// some webviews refuse to play inline. So the app points its <video> tags
+// here instead: the Worker forwards the client's Range header to Drive and
+// streams the 200/206 back with clean headers (no redirect, no attachment
+// disposition for the player to choke on). Only the 27 video file ids from
+// the frozen lesson manifest are served — a closed set, not an open proxy.
+// Cost (user-approved 2026-11-13, "بطلب صغير"): one Worker request per Range
+// fetch (initial load + buffering/seeks) — a handful per view, far below the
+// 100k/day free limit. The user explicitly rejected the Drive preview iframe
+// player, so there is no in-app player fallback — only a plain Drive link.
+const LESSON_VIDEO_IDS = new Set(
+  LEARN_LEVELS.flatMap((level) => level.lessons)
+    .flatMap((lesson) => lesson.items)
+    .filter((item) => item.kind === "video" && item.driveId)
+    .map((item) => item.driveId),
+);
+
 // Serialized background chain: fast-ack hands each update to ctx.waitUntil, but updates
 // still execute one after another so message sequences (e.g. /record then a voice note)
 // keep their state order.
@@ -8181,6 +8201,35 @@ export default {
         usersStore: Boolean(env.USERS),
         driveConfigured: Boolean(await driveConfig(env).catch(() => null)),
       });
+    }
+    // Lesson video proxy (see LESSON_VIDEO_IDS): stream a lesson video from
+    // Drive with clean media headers. A video view costs one Worker request
+    // per Range fetch (initial load + buffering/seeks) — a handful per view,
+    // far below the 100k/day free limit.
+    const video = /^\/video\/([A-Za-z0-9_-]+)$/u.exec(url.pathname);
+    if (video && request.method === "GET") {
+      if (!LESSON_VIDEO_IDS.has(video[1])) return new Response("Not found", { status: 404 });
+      const upstreamHeaders = {};
+      const range = request.headers.get("range");
+      if (range) upstreamHeaders.range = range;
+      let upstream;
+      try {
+        upstream = await fetch(`https://drive.google.com/uc?export=download&id=${video[1]}`, { headers: upstreamHeaders });
+      } catch {
+        return new Response("Video unavailable", { status: 502 });
+      }
+      const type = upstream.headers.get("content-type") ?? "";
+      if (!upstream.ok || !type.startsWith("video/")) {
+        return new Response("Video unavailable", { status: 502 });
+      }
+      const out = new Headers();
+      out.set("content-type", type);
+      for (const name of ["content-length", "content-range", "accept-ranges"]) {
+        const value = upstream.headers.get(name);
+        if (value) out.set(name, value);
+      }
+      out.set("cache-control", "public, max-age=86400");
+      return new Response(upstream.body, { status: upstream.status, headers: out });
     }
     // Public read-only API for external consumers (admin-issued keys, 120 req/min per key).
     if (request.method === "GET" && url.pathname === "/api/dictionary") {
