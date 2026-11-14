@@ -3165,6 +3165,10 @@ export class UserStore {
   // the earliest. A step that is not due yet (job.nextAt in the future)
   // reports the remaining wait without running.
   async alarm() {
+    // One counted request per alarm: each alarm is one Durable Object
+    // request — the binding constraint now that chat runs in the DO — and
+    // it can answer up to 100 updates, so chatting barely moves /usage.
+    countRequest(this.doEnv, this.pollCtx);
     let next = Infinity;
     try {
       const syncDelay = await this.syncStep();
@@ -3396,9 +3400,11 @@ export class UserStore {
   }
 
   async processPollUpdate(update, env) {
-    // Count the request like the webhook does, so /usage keeps reporting
-    // bot activity (messages processed) instead of going stale.
-    countRequest(env, this.pollCtx);
+    // NOTE: answering a message is NOT counted here. The counter tracks
+    // billable invocations — Worker requests and poller alarms (one per
+    // alarm(), which can answer up to 100 updates). Counting per message
+    // made /usage climb with every chat even though chat costs ~0 Worker
+    // requests, which is exactly what the admin saw on 2026-11-14.
     activeEnv = env;
     await handleUpdate(update, env, this.pollCtx);
   }
@@ -4765,6 +4771,8 @@ const USAGE_ALERT_LEVELS = [50000, 80000, 95000, 100000];
 const USAGE_FLUSH_EVERY = 20;
 const USAGE_FLUSH_MS = 60000;
 const usageState = { day: "", pending: 0, flushedAt: 0 };
+// Test hook: reset the in-memory usage counter between scenarios.
+export function resetUsageCounter() { usageState.day = ""; usageState.pending = 0; usageState.flushedAt = 0; }
 
 // ---- Pro feature: per-user rate limiting (sliding window, in-memory) ----
 const RATE_LIMIT_WINDOW_MS = 10000;
@@ -5426,7 +5434,9 @@ async function flushUsage(env, day, count) {
   }
 }
 
-// Called for every request the Worker receives; sends one batched write per ~20 requests.
+// Called for every billable invocation: each Worker request the Worker
+// receives, and each Durable Object alarm (one per poller wake, answering
+// up to 100 updates). Sends one batched write per ~20 requests.
 function countRequest(env, ctx) {
   if (!env.USERS) return;
   const day = utcDay();
@@ -5473,7 +5483,7 @@ async function sendUsageReport(env, chatId) {
     "<b>آخر الأيام:</b>",
     ...rows.slice(0, 7).map((item) => `${item.day}: ${fmt(item.count)}`),
     "",
-    "العدّاد تقديري وقد ينقص بضع عشرات من الطلبات. سأنبّهك تلقائيًا عند 50% و80% و95%.",
+    "العدّاد تقديري. رسائل الشات عبر البولر لا تُحسب — العدّاد يحسب طلبات ووركر ودورات البولر فقط، فالرد على رسالة لا يستهلك طلبًا. سأنبّهك تلقائيًا عند 50% و80% و95%.",
   ];
   await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML" });
 }

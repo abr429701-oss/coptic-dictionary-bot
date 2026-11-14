@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import worker, { UserStore, createSendThrottle, resetVoiceFileIdCache } from "../src/index.js";
+import worker, { UserStore, createSendThrottle, resetVoiceFileIdCache, resetUsageCounter } from "../src/index.js";
 import { resetAudioCaches } from "../src/neural-voice.js";
 import records from "../data/dictionary.json" with { type: "json" };
 
@@ -168,6 +168,32 @@ test("getUpdates 409 (webhook still set) makes the poller idle instead of spinni
   const wait = kvEnv.USERS.alarms.at(-1) - Date.now();
   assert.ok(wait >= 4000 && wait <= 6000, `idle reschedule ~5s, got ${wait}ms`);
   assert.equal(kvEnv.USERS.store.get("poll:offset"), undefined);
+});
+
+test("usage: answering 50 messages in one alarm counts 1 request, not 50", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  for (let i = 0; i < 50; i += 1) kvEnv.USERS.store.set(`user:${1000 + i}`, { name: `user ${1000 + i}` });
+  await enablePoller(kvEnv);
+  resetUsageCounter();
+  const calls = [];
+  // 50 messages across 50 chats in a single getUpdates batch (one alarm),
+  // then 20 empty alarms: 21 alarms total, 50 messages answered.
+  const queue = Array.from({ length: 50 }, (_, i) => msg(1001 + i, 1000 + i, TEST_QUERY));
+  fakePollTelegram(calls, queue);
+  await kvEnv.USERS.object.alarm();
+  assert.equal(kvEnv.USERS.store.get("poll:offset"), 1051, "all 50 messages processed");
+  for (let i = 0; i < 20; i += 1) await kvEnv.USERS.object.alarm();
+  const res = await kvEnv.USERS.object.fetch(new Request("https://user-store/", {
+    method: "POST",
+    body: JSON.stringify({ op: "usageReport", limit: 8 }),
+  }));
+  const report = await res.json();
+  const today = new Date().toISOString().slice(0, 10);
+  const row = report.days.find((d) => d.day === today);
+  // 2026-11-14: /usage kept climbing per message because processPollUpdate
+  // counted every answer as a request. Now one alarm = one counted
+  // request, however many messages it answered.
+  assert.equal(row?.count, 21, `21 alarms = 21 counted requests, got ${row?.count}`);
 });
 
 test("pollkick starts the alarm loop only when no alarm is pending", async () => {
