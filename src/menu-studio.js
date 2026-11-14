@@ -570,7 +570,8 @@ export function createMenuStudio(deps) {
         await send(env, chatId, "🛠 <b>أدوات</b>", [[S.WIPE], [S.CLEAN], [S.BACK]]);
         return true;
       }
-      return false;
+      // Not handled here: fall through to the shared catch-all below (a
+      // studio label must never leak into dictionary search).
     }
 
     if (state.step === "tools") {
@@ -588,7 +589,7 @@ export function createMenuStudio(deps) {
         return true;
       }
       if (raw === S.BACK) { await showMain(env, chatId, userId); return true; }
-      return false;
+      // Fall through to the shared catch-all below.
     }
 
     if (state.step === "menus") {
@@ -602,7 +603,7 @@ export function createMenuStudio(deps) {
       const pick = /^(\d+)\./u.exec(raw);
       const target = pick ? list[Number(pick[1]) - 1] : list.find((m) => m.title.trim() === raw);
       if (target) { await showMenu(env, chatId, userId, target.id); return true; }
-      return false;
+      // Fall through to the shared catch-all below.
     }
 
     if (state.step === "menu" && menu) {
@@ -663,7 +664,7 @@ export function createMenuStudio(deps) {
       const pick = /^(\d+)\./u.exec(raw);
       const target = pick ? menu.buttons[Number(pick[1]) - 1] : menu.buttons.find((b) => b.label.trim() === raw);
       if (target) { await showButton(env, chatId, userId, menu.id, target.id); return true; }
-      return false;
+      // Fall through to the shared catch-all below.
     }
 
     if (state.step === "confirmdel" && menu) {
@@ -675,7 +676,7 @@ export function createMenuStudio(deps) {
         return true;
       }
       if (raw === S.BACK) { await showMenu(env, chatId, userId, menu.id); return true; }
-      return false;
+      // Fall through to the shared catch-all below.
     }
 
     if (state.step === "button" && menu && button) {
@@ -736,7 +737,7 @@ export function createMenuStudio(deps) {
         await showMenu(env, chatId, userId, menu.id);
         return true;
       }
-      return false;
+      // Fall through to the shared catch-all below.
     }
 
     if (state.step === "kindchange" && menu && button) {
@@ -751,6 +752,20 @@ export function createMenuStudio(deps) {
       await showButton(env, chatId, userId, menu.id, created.id);
       return true;
     }
+
+    // A studio button tapped in the wrong panel must never leak into
+    // dictionary search: its label would come back as a "did you mean"
+    // inline keyboard, the one thing this surface must never send (the
+    // studio is bottom buttons only). Navigation labels work from anywhere;
+    // any other studio label goes back to the studio home.
+    if (raw === S.BACK) { await back(); return true; }
+    if (raw === S.MENUS) { await showMenus(env, chatId, userId); return true; }
+    if (raw === S.EXIT) {
+      await writeState(env, userId, null);
+      await telegram(env, "sendMessage", { chat_id: chatId, text: "🚪 خرجت من محرر القوائم.", reply_markup: { remove_keyboard: true } });
+      return true;
+    }
+    if (Object.values(S).includes(raw)) { await showMain(env, chatId, userId); return true; }
 
     return false;
   }
