@@ -355,15 +355,34 @@
     if (old) old.remove();
     container.insertBefore(node, container.firstChild);
   }
-  // Lesson videos and photos play/show through the Worker's /media/<id>
-  // proxy: it forwards the Range header to Drive and streams the file back
-  // with clean media headers (no redirect, no attachment disposition), so
-  // the native <video> plays inline and <img> renders — the direct Drive
-  // links fail on the user's phone webview (attachment disposition).
-  // Cost, user-approved ("بطلب صغير"): one Worker request per Range fetch
-  // for video, one per photo/image load.
-  function driveImg(id) { return "/media/" + encodeURIComponent(id); }
-  function driveVideo(id) { return "/media/" + encodeURIComponent(id); }
+  // Lesson videos and photos come straight from a public R2 bucket
+  // (2026-11-14), so they cost ZERO Worker requests — the old
+  // /media/<id> proxy cost one Worker request per Range fetch. R2 serves
+  // clean media headers, so the native <video> plays inline and <img>
+  // renders (the direct Drive links fail in the phone webview: Drive
+  // sends Content-Disposition: attachment).
+  // R2_PUBLIC_BASE is the bucket's public URL: it normally arrives inside
+  // r2-media.json (written by scripts/upload-media-to-r2.mjs); this
+  // constant is only a fallback. While the base is still the placeholder,
+  // or an id has no R2 key yet (see r2-media.json), the old /media/<id>
+  // proxy is the fallback — the app works either way.
+  var R2_PUBLIC_BASE = "https://pub-PLACEHOLDER.r2.dev";
+  var r2Media = null; // { base, keys: driveId -> R2 key }, loaded lazily from r2-media.json
+  function loadR2Media() {
+    if (r2Media) return Promise.resolve(r2Media);
+    return fetch("r2-media.json")
+      .then(function (r) { if (!r.ok) throw new Error("r2-media.json: " + r.status); return r.json(); })
+      .then(function (json) { r2Media = json || {}; return r2Media; })
+      .catch(function () { r2Media = {}; return r2Media; });
+  }
+  function r2MediaUrl(id) {
+    var base = (r2Media && r2Media.base) || R2_PUBLIC_BASE;
+    if (!base || base.indexOf("PLACEHOLDER") !== -1) return null;
+    var key = (r2Media && r2Media.keys && r2Media.keys[id]) || (r2Media && r2Media[id]);
+    return key ? base.replace(/\/+$/, "") + "/" + key : null;
+  }
+  function driveImg(id) { return r2MediaUrl(id) || "/media/" + encodeURIComponent(id); }
+  function driveVideo(id) { return r2MediaUrl(id) || "/media/" + encodeURIComponent(id); }
 
   // The get-code form (final registration project) — fallback when the
   // in-app code lookup cannot reach the macro.
@@ -378,7 +397,12 @@
     if (lessons) return Promise.resolve(lessons);
     return fetch("lessons.json")
       .then(function (r) { if (!r.ok) throw new Error("lessons.json: " + r.status); return r.json(); })
-      .then(function (json) { lessons = json; return json; });
+      .then(function (json) {
+        lessons = json;
+        // The R2 key map rides along (best effort — a missing map just
+        // means media falls back to the /media/<id> proxy).
+        return loadR2Media().then(function () { return json; });
+      });
   }
 
   function loadExams() {

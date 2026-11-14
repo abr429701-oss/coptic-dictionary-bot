@@ -10,7 +10,7 @@
     "deploy": "wrangler deploy",
     "pretest": "npm run build:search-index && npm run build:exam-data && npm run build:learn-app && npm run build:media-ids",
     "test": "node --test",
-    "build:learn-app": "node scripts/generate-learn-app-data.mjs && mkdir -p public/learn-app && cp learn-app/index.html learn-app/lessons.json learn-app/exams.json learn-app/codes.json public/learn-app/",
+    "build:learn-app": "node scripts/generate-learn-app-data.mjs && mkdir -p public/learn-app && cp learn-app/index.html learn-app/lessons.json learn-app/exams.json learn-app/codes.json learn-app/r2-media.json public/learn-app/",
     "build:exam-data": "node scripts/generate-exam-data.mjs && node scripts/generate-code-names.mjs",
     "build:media-ids": "node scripts/generate-media-ids.mjs"
   },

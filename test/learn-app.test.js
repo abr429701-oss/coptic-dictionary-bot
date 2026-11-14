@@ -60,6 +60,15 @@ test("learn-app: index.html loads the data and plays video natively", () => {
   // attachment header breaks inline playback and <img> rendering on the
   // user's phone.
   assert.ok(appHtml.includes('"/media/"'), "videos and photos go through the Worker proxy");
+  // R2 media (2026-11-14): videos/photos come straight from a public R2
+  // bucket at zero Worker requests; the /media/<id> proxy stays only as
+  // the fallback while the bucket URL is a placeholder or an id has no
+  // R2 key yet (see r2-media.json).
+  assert.ok(appHtml.includes("R2_PUBLIC_BASE"), "R2 public base URL constant");
+  assert.ok(appHtml.includes("pub-PLACEHOLDER.r2.dev"), "placeholder base until the real bucket URL is known");
+  assert.ok(appHtml.includes('fetch("r2-media.json")'), "R2 key map loads from r2-media.json");
+  assert.ok(appHtml.includes("loadR2Media"), "R2 map loads before lessons render");
+  assert.ok(appHtml.includes("r2Media.base"), "R2 base URL comes from the map when present");
   assert.ok(!appHtml.includes("drive.usercontent.google.com/download"), "no direct usercontent media URL");
   assert.ok(!appHtml.includes("uc?export=download"), "no direct Drive download URL");
   assert.ok(!appHtml.includes("/preview"), "no Drive preview player iframe");

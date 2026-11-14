@@ -1,0 +1,72 @@
+name: Upload lesson media to R2
+
+# Manual only: moves the learn app's lesson videos/photos from Google
+# Drive into the public R2 bucket "coptic-lessons", so the web app can
+# serve them straight from R2 at ZERO Worker requests (the Worker's
+# /media/<id> proxy costs one Worker request per Range fetch).
+# This workflow NEVER deploys the Worker and NEVER touches the webhook.
+# The public URL is written into learn-app/r2-media.json by the upload
+# script (as "base"), so the app picks it up on the next deploy with no
+# manual paste; until then the app keeps using the /media/<id> proxy fallback.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: r2-media
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Create R2 bucket if missing
+        run: |
+          if npx wrangler r2 bucket list | grep -qw "coptic-lessons"; then
+            echo "bucket coptic-lessons already exists"
+          else
+            npx wrangler r2 bucket create coptic-lessons
+          fi
+
+      # The r2.dev public URL is rate-limited and meant for development
+      # traffic (Cloudflare docs) — fine for the cutover, but if it ever
+      # throttles under real student load, switch the bucket to a custom
+      # domain instead (bucket Settings -> Custom Domains).
+      - name: Enable public r2.dev URL
+        id: devurl
+        run: |
+          npx wrangler r2 bucket dev-url enable coptic-lessons
+          url="$(npx wrangler r2 bucket dev-url get coptic-lessons | grep -oE 'https://pub-[A-Za-z0-9-]+\.r2\.dev' | head -1)"
+          echo "public_url=$url" >> "$GITHUB_OUTPUT"
+          echo "R2 public URL: ${url:-<could not parse — run 'wrangler r2 bucket dev-url get coptic-lessons' to see it>}"
+
+      # --allow-partial: the 36 exam image ids are known-dead on Drive
+      # (public 404; the live /media proxy 502s for them today), so the
+      # run must still succeed and commit the map for the 50 good ids.
+      - name: Upload media to R2
+        run: R2_PUBLIC_BASE="${{ steps.devurl.outputs.public_url }}" node scripts/upload-media-to-r2.mjs --allow-partial
+
+      - name: Commit r2-media.json if it changed
+        run: |
+          git add learn-app/r2-media.json
+          if git diff --cached --quiet; then
+            echo "r2-media.json unchanged"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "Learn app: R2 media map"
+            git push
+          fi

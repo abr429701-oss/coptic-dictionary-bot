@@ -20,6 +20,18 @@ const BROADCAST_BATCH_DELAY_MS = 1200;
 const BROADCAST_DEFAULT_PER_USER_DELAY_MS = 5000;
 const BROADCAST_MAX_TRANSIENT_RETRIES = 5;
 
+// Poller (DO alarm-loop bot brain): one Durable Object pulls Telegram updates
+// with getUpdates instead of the webhook, so chat costs ~0 Worker requests.
+// Cadence is adaptive: idle 5s, busy 2s, backlog draining 1s. Each setAlarm
+// is billed as one row written, so the floor is 2s when busy (43k/day) —
+// 1s alarms all day would eat 86k of the 100k daily row-write budget alone.
+const POLL_IDLE_MS = 5000;
+const POLL_BUSY_MS = 2000;
+const POLL_DRAIN_MS = 1000;
+const POLL_MAX_UPDATES = 40;
+const POLL_OFFSET_KEY = "poll:offset";
+const POLL_OFFSET_PUT_MIN_MS = 10000;
+
 // ============================================================================
 // Batch 3 admin features: word of the day, favorites, keyword auto-replies,
 // daily search limits, usage alerts, broadcast templates, broadcast opt-out,
@@ -67,7 +79,7 @@ const slowModeCache = { value: null, at: 0 };
 // change only when an admin runs /lockdown or /verifygate.
 const lockdownCache = { value: null, at: 0 };
 const verifyGateCache = { value: null, at: 0 };
-const FEATURE_DEFAULTS = { audio: true, voice_transcribe: true, inline_mode: true, keyboard: true, suggestions: true, gamify: true, contact: true, wod: true, autoreply: true };
+const FEATURE_DEFAULTS = { audio: true, voice_transcribe: true, inline_mode: true, keyboard: true, suggestions: true, gamify: true, contact: true, wod: true, autoreply: true, poller: false };
 const recentSearches = []; // ring buffer of { userId, name, query, at }
 const RECENT_SEARCHES_MAX = 200;
 const lastUserSearchAt = new Map(); // userId -> ts (slow mode)
@@ -2215,6 +2227,46 @@ async function migrateUserMenuHidden(env) {
     await storeCall(env, { op: "put", key: "usermenu:v2:migrated", value: true });
   } catch { /* never block the menu */ }
 }
+// Poller-only send pacing: Telegram allows ~30 messages/sec per bot and
+// 1 message/sec per chat. The webhook path sends sequentially and never sets
+// __sendThrottle, so it is unaffected. Takes are serialized through a queue
+// so parallel updates cannot burst past the limits.
+export function createSendThrottle() {
+  const lastByChat = new Map();
+  let lastGlobal = 0;
+  let calls = 0;
+  let queue = Promise.resolve();
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  return {
+    get calls() { return calls; },
+    resetCalls() { calls = 0; },
+    take(chatId) {
+      const run = queue.then(async () => {
+        calls += 1;
+        for (;;) {
+          const now = Date.now();
+          const globalWait = 40 - (now - lastGlobal);
+          // Per chat: Telegram's documented limit is 1 msg/sec, but small
+          // bursts are tolerated in practice (the webhook sends a 4-message
+          // lesson back-to-back today with no 429s), so pace at 350ms: a
+          // lesson still lands in ~1s instead of ~4s, while sustained spam
+          // stays well under the limit.
+          const lastChat = chatId == null ? 0 : (lastByChat.get(String(chatId)) ?? 0);
+          const chatWait = 350 - (now - lastChat);
+          const wait = Math.max(globalWait, chatWait, 0);
+          if (wait <= 0) break;
+          await sleep(wait);
+        }
+        const at = Date.now();
+        lastGlobal = at;
+        if (chatId != null) lastByChat.set(String(chatId), at);
+      });
+      queue = run.catch(() => {});
+      return run;
+    },
+  };
+}
+
 async function telegram(env, method, payload) {
   // Central UI-visibility filter: strip admin-hidden buttons/commands from
   // every outgoing payload before it reaches Telegram. Admin recipients always
@@ -2238,6 +2290,9 @@ async function telegram(env, method, payload) {
       /* visibility filtering must never block a real send */
     }
   }
+  // Poller pacing (see createSendThrottle): only the DO alarm sets
+  // __sendThrottle, so the webhook path sends exactly as before.
+  if (env.__sendThrottle) await env.__sendThrottle.take(payload?.chat_id);
   const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -2931,6 +2986,27 @@ export class UserStore {
   constructor(state, env) {
     this.state = state;
     this.env = env;
+    // Direct in-DO storage path: when bot logic runs inside this object (the
+    // poller), storeCall skips the stub.fetch round trip and calls the
+    // storage API directly, so chat costs zero Durable Object requests. The
+    // Worker path never sets __directStore, so it keeps using the binding.
+    this.directStore = {
+      handle: async (payload) => {
+        const res = await this.fetch(new Request("https://user-store/", { method: "POST", body: JSON.stringify(payload) }));
+        return res.json();
+      },
+    };
+    // Same env, plus the direct path (and the poller's send throttle): used
+    // by alarm()/pollStep()/syncStep()/broadcastStep() instead of this.env.
+    this.doEnv = { ...env, __directStore: this.directStore, __sendThrottle: createSendThrottle() };
+    // Poller stats live in memory (no storage write per alarm); read them
+    // via the "pollStats" store op.
+    this.pollProcessed = 0;
+    this.pollLastRun = 0;
+    this.pollLastLagMs = null;
+    this.pollOffset = null;
+    this.pollLastOffsetPutAt = 0;
+    this.pollCtx = { waitUntil: (p) => { try { this.state.waitUntil(p); } catch { /* alarm already ending */ } } };
     // Run the one-time conversion before any request is served.
     state.blockConcurrencyWhile?.(() => this.migrateLegacyVoices());
   }
@@ -2962,12 +3038,18 @@ export class UserStore {
     return ids;
   }
 
-  // One page of the user sync. Returns true while a job exists (so alarm() stops there).
+  // One page of the user sync. Returns the ms until the next sync step, or
+  // null when no job exists. The job carries job.nextAt: alarm() wakes for
+  // the poller every few seconds, so a sync page only runs when its own
+  // pause has passed — the 25s pause between pages is a deliberate throttle
+  // (Sheets + Telegram), not a suggestion.
   async syncStep() {
     const storage = this.state.storage;
-    const env = this.env;
+    const env = this.doEnv;
     const job = await storage.get("sync:job");
-    if (!job) return false;
+    if (!job) return null;
+    if (job.nextAt && Date.now() < job.nextAt) return job.nextAt - Date.now();
+    delete job.nextAt;
     try {
       const cursor = (await storage.get(USERS_SYNC_CURSOR)) ?? null;
       const pageSize = 50;
@@ -2977,7 +3059,7 @@ export class UserStore {
         id: storedKey.slice("user:".length),
         record,
       }));
-      if (!items.length) { await this.finishSync(job); return true; }
+      if (!items.length) { await this.finishSync(job); return null; }
       const rows = [];
       for (let c = 0; c < items.length; c += 10) {
         const chunk = items.slice(c, c + 10);
@@ -3004,18 +3086,18 @@ export class UserStore {
             chat_id: job.adminChat,
             text: `❌ أُوقفت المزامنة بعد ${job.attempts} محاولات: ${job.lastError}\nتم حفظ ${job.total ?? 0} مستخدم قبل التوقف. أصلح السبب ثم أرسل /syncusers.`,
           }).catch(() => null);
-          return true;
+          return null;
         }
-        await storage.put("sync:job", job);
         const waitMs = Math.min(120000, 15000 * job.attempts);
-        await storage.setAlarm(Date.now() + waitMs);
+        job.nextAt = Date.now() + waitMs;
+        await storage.put("sync:job", job);
         if (job.attempts === 1) {
           await telegram(env, "sendMessage", {
             chat_id: job.adminChat,
             text: `⚠️ تعثّر رفع دفعة إلى الشيت (${job.lastError}). سأعيد المحاولة تلقائيًا بعد ${Math.round(waitMs / 1000)} ثانية من حيث توقفت.`,
           }).catch(() => null);
         }
-        return true;
+        return waitMs;
       }
       job.total = (job.total ?? 0) + rows.length;
       job.rounds = (job.rounds ?? 0) + 1;
@@ -3026,27 +3108,28 @@ export class UserStore {
       const nextCursor = items.length === pageSize ? items[items.length - 1].key : null;
       if (nextCursor) {
         await storage.put(USERS_SYNC_CURSOR, nextCursor);
+        job.nextAt = Date.now() + 25000; // sync, pause ~25s, resume
         await storage.put("sync:job", job);
-        await storage.setAlarm(Date.now() + 25000); // sync, pause ~25s, resume
         if (job.rounds % 4 === 0) {
           await telegram(env, "sendMessage", {
             chat_id: job.adminChat,
             text: `⏳ مزامنة تلقائية: ${job.total} مستخدم حتى الآن (الجولة ${job.rounds})…`,
           }).catch(() => null);
         }
-        return true;
+        return 25000;
       }
       await this.finishSync(job);
-      return true;
+      return null;
     } catch (error) {
       const message = error instanceof Error ? error.message : "unknown error";
       job.attempts = (job.attempts ?? 0) + 1;
       job.lastError = message;
       console.error("syncStep failed", message);
-      await storage.put("sync:job", job).catch(() => null);
       // Always reschedule: a thrown error used to leave the job without an alarm, so the sync stopped for good.
-      await storage.setAlarm(Date.now() + Math.min(120000, 20000 * job.attempts)).catch(() => null);
-      return true;
+      const delay = Math.min(120000, 20000 * job.attempts);
+      job.nextAt = Date.now() + delay;
+      await storage.put("sync:job", job).catch(() => null);
+      return delay;
     }
   }
 
@@ -3054,28 +3137,54 @@ export class UserStore {
     const storage = this.state.storage;
     await storage.delete(USERS_SYNC_CURSOR);
     await storage.delete("sync:job");
-    await telegram(this.env, "sendMessage", {
+    await telegram(this.doEnv, "sendMessage", {
       chat_id: job.adminChat,
       text: `✅ اكتملت المزامنة التلقائية: ${job.total ?? 0} مستخدم في ${job.rounds ?? 0} جولة. تحقّق من تبويب "users" في الشيت.`,
     }).catch(() => null);
   }
 
+  // Single scheduler for everything the DO wakes up for: sync pages,
+  // broadcast batches and the poller share ONE pending alarm (a DO can only
+  // have one), so each step reports its own next delay and alarm() wakes at
+  // the earliest. A step that is not due yet (job.nextAt in the future)
+  // reports the remaining wait without running.
   async alarm() {
+    let next = Infinity;
+    const syncDelay = await this.syncStep();
+    if (typeof syncDelay === "number" && syncDelay >= 0) next = Math.min(next, syncDelay);
+    const bcDelay = await this.broadcastStep();
+    if (typeof bcDelay === "number" && bcDelay >= 0) next = Math.min(next, bcDelay);
+    const pollDelay = await this.pollStep();
+    if (typeof pollDelay === "number" && pollDelay >= 0) next = Math.min(next, pollDelay);
+    // Delay measured from when the steps finished (a broadcast batch sleeps
+    // seconds between recipients); measuring from the start would schedule
+    // the next wake in the past.
+    if (next !== Infinity) await this.state.storage.setAlarm(Date.now() + next);
+  }
+
+  // One broadcast batch. Returns the ms until the next batch, or null when
+  // no broadcast is active. job.nextAt gates retries: Telegram's retry_after
+  // must be respected even when the poller wakes sooner.
+  async broadcastStep() {
     const storage = this.state.storage;
-    // Sync job: each batch runs in its own alarm invocation with fresh time limit.
-    // The sync job continues one page at a time; every failure reschedules itself instead of dying.
-    if (await this.syncStep()) return;
+    const env = this.doEnv;
     const job = await storage.get("broadcast");
-    if (!job) return;
+    if (!job) return null;
+    if (job.nextAt && Date.now() < job.nextAt) return job.nextAt - Date.now();
+    delete job.nextAt;
     // Batch 4: broadcast pause/cancel control.
     const ctrl = (await storage.get("broadcast:control")) ?? { paused: false };
     if (ctrl.cancel) {
       await storage.delete("broadcast");
       await storage.delete("broadcast:control");
-      await telegram(this.env, "sendMessage", { chat_id: job.adminChat, text: `🛑 تم إلغاء الإرسال الجماعي. تم إرسال ${job.sent} من ${job.total}.` });
-      return;
+      await telegram(env, "sendMessage", { chat_id: job.adminChat, text: `🛑 تم إلغاء الإرسال الجماعي. تم إرسال ${job.sent} من ${job.total}.` });
+      return null;
     }
-    if (ctrl.paused) { await storage.setAlarm(Date.now() + 15000); return; }
+    if (ctrl.paused) {
+      job.nextAt = Date.now() + 15000;
+      await storage.put("broadcast", job);
+      return 15000;
+    }
     const batch = job.queue.splice(0, BROADCAST_BATCH_SIZE);
     let delay = BROADCAST_BATCH_DELAY_MS;
     const perUserDelay = Number(await storage.get("bc:perUserDelay")) || BROADCAST_DEFAULT_PER_USER_DELAY_MS;
@@ -3109,7 +3218,7 @@ export class UserStore {
       };
       let result;
       try {
-        result = await telegram(this.env, "copyMessage", {
+        result = await telegram(env, "copyMessage", {
           chat_id: id,
           from_chat_id: job.fromChat,
           message_id: job.messageId,
@@ -3119,7 +3228,7 @@ export class UserStore {
         // cannot be copied). The poll is fresh for each recipient; previous votes cannot
         // be transferred by the Bot API.
         if (!result?.ok && result?.error_code !== 429 && result?.error_code === 400 && job.poll) {
-          result = await telegram(this.env, "sendPoll", { chat_id: id, ...job.poll });
+          result = await telegram(env, "sendPoll", { chat_id: id, ...job.poll });
         }
       } catch (error) {
         // Persist the successful prefix and retry transient network errors with backoff.
@@ -3161,15 +3270,15 @@ export class UserStore {
       }
     }
     if (job.queue.length) {
+      job.nextAt = Date.now() + delay;
       await storage.put("broadcast", job);
-      await storage.setAlarm(Date.now() + delay);
-      return;
+      return delay;
     }
     await storage.delete("broadcast");
     await storage.delete("broadcast:control");
     const failureLines = Object.entries(job.failureReasons ?? {}).slice(0, 3)
       .map(([reason, count]) => `• ${count}× ${reason}`);
-    await telegram(this.env, "sendMessage", {
+    await telegram(env, "sendMessage", {
       chat_id: job.adminChat,
       text: [
         "✅ اكتمل الإرسال الجماعي.",
@@ -3180,6 +3289,94 @@ export class UserStore {
         ...(failureLines.length ? ["أمثلة لأسباب الفشل:", ...failureLines] : []),
       ].join("\n").slice(0, 3500),
     });
+    return null;
+  }
+
+  // Poller: pull Telegram updates with getUpdates and answer them from
+  // inside this DO (in-memory dictionary + direct storage), so chat costs
+  // ~0 Worker requests and ~0 Durable Object requests. Gated on the
+  // "poller" feature flag (/feature poller on) — off by default, so the
+  // webhook keeps working until the cutover. Returns the ms until the next
+  // alarm, or null when disabled.
+  async pollStep() {
+    const storage = this.state.storage;
+    const flags = (await storage.get(FEATURE_FLAGS_KEY)) ?? {};
+    if (flags?.poller !== true) return null;
+    const env = this.doEnv;
+    const offset = this.pollOffset ?? (await storage.get(POLL_OFFSET_KEY)) ?? 0;
+    let result;
+    try {
+      result = await telegram(env, "getUpdates", { offset, limit: 100, timeout: 0, allowed_updates: ["message", "callback_query", "inline_query"] });
+    } catch {
+      return POLL_IDLE_MS;
+    }
+    if (!result?.ok || !Array.isArray(result.result)) {
+      if (result?.error_code === 409) console.error("Poller: getUpdates 409 — the webhook is still registered; delete it to start polling");
+      return POLL_IDLE_MS;
+    }
+    const updates = result.result;
+    if (!updates.length) return POLL_IDLE_MS;
+    this.doEnv.__sendThrottle.resetCalls();
+    // Chats in parallel (4 at a time), updates within a chat strictly in
+    // order. A failed update is logged and skipped — never retried — the
+    // same philosophy as the webhook, which answers 200 even when handling
+    // fails, so one poison update can never stall the queue.
+    const byChat = new Map();
+    for (const update of updates) {
+      const chatId = this.pollChatId(update);
+      if (!byChat.has(chatId)) byChat.set(chatId, []);
+      byChat.get(chatId).push(update);
+    }
+    const groups = [...byChat.values()];
+    const t0 = Date.now();
+    for (let i = 0; i < groups.length; i += 4) {
+      await Promise.all(groups.slice(i, i + 4).map(async (group) => {
+        for (const update of group) {
+          try {
+            await this.processPollUpdate(update, env);
+            this.pollProcessed += 1;
+          } catch (error) {
+            // logError is synchronous (in-memory log, flushed later); a
+            // throw here must never break the batch.
+            logError(env, error, { where: "poll", update_id: update.update_id ?? null });
+          }
+        }
+      }));
+    }
+    const lastId = updates[updates.length - 1].update_id;
+    if (typeof lastId === "number") {
+      this.pollOffset = lastId + 1;
+      // Persist the offset at most every 10s: a crash replays at most ~10s
+      // of updates (a few duplicate replies), and the row-write budget
+      // stays far under the 100k/day cap.
+      if (Date.now() - this.pollLastOffsetPutAt >= POLL_OFFSET_PUT_MIN_MS) {
+        await storage.put(POLL_OFFSET_KEY, this.pollOffset);
+        this.pollLastOffsetPutAt = Date.now();
+      }
+    }
+    this.pollLastRun = Date.now();
+    const oldest = updates[0];
+    const oldestAt = (oldest.message?.date ?? oldest.callback_query?.message?.date ?? 0) * 1000;
+    if (oldestAt) this.pollLastLagMs = t0 - oldestAt;
+    console.log(JSON.stringify({ ev: "poll", updates: updates.length, ms: Date.now() - t0, lag_ms: this.pollLastLagMs ?? null, offset: this.pollOffset }));
+    if (updates.length >= 100) return POLL_DRAIN_MS;
+    return POLL_BUSY_MS;
+  }
+
+  pollChatId(update) {
+    return update.message?.chat?.id
+      ?? update.callback_query?.message?.chat?.id
+      ?? update.callback_query?.from?.id
+      ?? update.inline_query?.from?.id
+      ?? "unknown";
+  }
+
+  async processPollUpdate(update, env) {
+    // Count the request like the webhook does, so /usage keeps reporting
+    // bot activity (messages processed) instead of going stale.
+    countRequest(env, this.pollCtx);
+    activeEnv = env;
+    await handleUpdate(update, env, this.pollCtx);
   }
 
   async fetch(request) {
@@ -3187,6 +3384,16 @@ export class UserStore {
     const { op, key, value, userId, input, kb, exclude, fromChat, messageId, poll, id, fileId, drive, limit, profile, cursor, language, ids } = body;
     const storage = this.state.storage;
     if (op === "get") return Response.json({ value: (await storage.get(key)) ?? null });
+    if (op === "pollStats") {
+      const flags = (await storage.get(FEATURE_FLAGS_KEY)) ?? {};
+      return Response.json({
+        enabled: flags?.poller === true,
+        offset: this.pollOffset ?? (await storage.get(POLL_OFFSET_KEY)) ?? 0,
+        processed: this.pollProcessed ?? 0,
+        lastRun: this.pollLastRun ?? 0,
+        lastLagMs: this.pollLastLagMs ?? null,
+      });
+    }
     if (op === "put") {
       await storage.put(key, value);
       return Response.json({ ok: true });
@@ -3630,6 +3837,10 @@ export class UserStore {
 }
 
 async function storeCall(env, payload) {
+  // In-DO direct path (poller): same storage API, no stub.fetch round trip,
+  // so no Durable Object request is spent. Every other caller goes through
+  // the binding exactly as before.
+  if (env.__directStore) return env.__directStore.handle(payload);
   const stub = env.USERS.get(env.USERS.idFromName("users"));
   const response = await stub.fetch("https://user-store/", { method: "POST", body: JSON.stringify(payload) });
   return response.json();
@@ -8689,5 +8900,19 @@ export default {
   // isolate in another region), it makes them rare.
   async scheduled(event, env, ctx) {
     await maybeAutoImportLearn(env, ctx);
+    // Poller guard: while polling is the delivery path, a webhook must not
+    // stay registered (getUpdates returns nothing while one is set). A manual
+    // setup_webhook run is undone here within one tick; pending updates are
+    // never dropped.
+    try {
+      const flags = await featureFlags(env).catch(() => ({}));
+      if (flags?.poller === true) {
+        const info = await telegram(env, "getWebhookInfo", {});
+        if (info?.ok && info.result?.url) {
+          await telegram(env, "deleteWebhook", { drop_pending_updates: false });
+          console.log("Poller guard: removed a re-registered webhook; polling resumes");
+        }
+      }
+    } catch { /* the guard must never break the tick */ }
   },
 };

@@ -1032,6 +1032,9 @@ test("broadcast marks blocked users, skips them next time, and backs off on rate
   assert.equal(kvEnv.USERS.store.get("broadcast").queue.length, 1);
   assert.ok(kvEnv.USERS.alarms.at(-1) - Date.now() >= 3000);
 
+  // The 429 retry_after gate (job.nextAt) is real: simulate the alarm firing
+  // after the scheduled delay by clearing it.
+  kvEnv.USERS.store.get("broadcast").nextAt = 0;
   await kvEnv.USERS.object.alarm();
   assert.equal(kvEnv.USERS.store.get("broadcast"), undefined);
   const report = calls.filter((call) => call.url.endsWith("/sendMessage")).at(-1).payload.text;
@@ -1145,6 +1148,8 @@ test("temporary network failures retry the same recipient and keep the broadcast
   assert.equal(kvEnv.USERS.store.get("broadcast").retryCount, 1);
   assert.ok(kvEnv.USERS.alarms.at(-1) > Date.now());
 
+  // Same retry gate as above: the second alarm fires after the backoff.
+  kvEnv.USERS.store.get("broadcast").nextAt = 0;
   await kvEnv.USERS.object.alarm();
   assert.equal(kvEnv.USERS.store.get("broadcast"), undefined);
   assert.equal(calls.filter((call) => call.url.endsWith("/copyMessage")).length, 2);
