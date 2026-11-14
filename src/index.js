@@ -22,12 +22,18 @@ const BROADCAST_MAX_TRANSIENT_RETRIES = 5;
 
 // Poller (DO alarm-loop bot brain): one Durable Object pulls Telegram updates
 // with getUpdates instead of the webhook, so chat costs ~0 Worker requests.
-// Cadence is adaptive: idle 5s, busy 2s, backlog draining 1s. Each setAlarm
-// is billed as one row written, so the floor is 2s when busy (43k/day) —
-// 1s alarms all day would eat 86k of the 100k daily row-write budget alone.
-const POLL_IDLE_MS = 5000;
-const POLL_BUSY_MS = 2000;
-const POLL_DRAIN_MS = 1000;
+// Long polling: getUpdates waits up to POLL_LONG_TIMEOUT_S for a message, so
+// a reply starts the moment the message arrives — no 2–5s poll gap like the
+// webhook had none of. Between alarms the loop only sleeps ~0.5s, because the
+// waiting happens inside getUpdates, not between alarms. Each setAlarm is
+// billed as one row written, so the idle floor is ~8k/day at a 10s long poll
+// (far under the 100k budget). Errors and 409s back off at POLL_ERROR_MS so a
+// stuck poller never spins.
+const POLL_IDLE_MS = 500;
+const POLL_BUSY_MS = 500;
+const POLL_DRAIN_MS = 200;
+const POLL_ERROR_MS = 5000;
+const POLL_LONG_TIMEOUT_S = 10;
 const POLL_MAX_UPDATES = 40;
 const POLL_OFFSET_KEY = "poll:offset";
 const POLL_OFFSET_PUT_MIN_MS = 10000;
@@ -3168,11 +3174,11 @@ export class UserStore {
       const pollDelay = await this.pollStep();
       if (typeof pollDelay === "number" && pollDelay >= 0) next = Math.min(next, pollDelay);
     } catch (error) {
-      // A throwing step must never kill the loop: retry at the idle
-      // cadence. The next alarm stops the loop by itself when nothing is
+      // A throwing step must never kill the loop: retry after the error
+      // backoff. The next alarm stops the loop by itself when nothing is
       // due (all steps return null, so next stays Infinity).
-      console.error("alarm step failed, rescheduling at idle cadence", error);
-      next = Math.min(next, POLL_IDLE_MS);
+      console.error("alarm step failed, rescheduling after error backoff", error);
+      next = Math.min(next, POLL_ERROR_MS);
     }
     // Delay measured from when the steps finished (a broadcast batch sleeps
     // seconds between recipients); measuring from the start would schedule
@@ -3324,13 +3330,13 @@ export class UserStore {
     const offset = this.pollOffset ?? (await storage.get(POLL_OFFSET_KEY)) ?? 0;
     let result;
     try {
-      result = await telegram(env, "getUpdates", { offset, limit: 100, timeout: 0, allowed_updates: ["message", "callback_query", "inline_query"] });
+      result = await telegram(env, "getUpdates", { offset, limit: 100, timeout: POLL_LONG_TIMEOUT_S, allowed_updates: ["message", "callback_query", "inline_query"] });
     } catch {
-      return POLL_IDLE_MS;
+      return POLL_ERROR_MS;
     }
     if (!result?.ok || !Array.isArray(result.result)) {
       if (result?.error_code === 409) console.error("Poller: getUpdates 409 — the webhook is still registered; delete it to start polling");
-      return POLL_IDLE_MS;
+      return POLL_ERROR_MS;
     }
     const updates = result.result;
     if (!updates.length) return POLL_IDLE_MS;

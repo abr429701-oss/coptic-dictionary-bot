@@ -108,9 +108,10 @@ test("poller answers queued updates, advances the offset, and reschedules busy",
   assert.ok(calls.some((c) => c.url.endsWith("/sendVoice") && String(c.payload?.chat_id) === "101"), "search gets a voice reply");
   assert.ok(sendsTo(calls, 102).length >= 1, "/start gets an answer");
   assert.equal(kvEnv.USERS.store.get("poll:offset"), 1003);
-  // Busy batch -> next alarm in ~2s.
+  // Busy batch -> next alarm in ~0.5s (the wait happens inside the long
+  // poll, not between alarms).
   const wait = kvEnv.USERS.alarms.at(-1) - Date.now();
-  assert.ok(wait >= 1500 && wait <= 3000, `busy reschedule ~2s, got ${wait}ms`);
+  assert.ok(wait >= 200 && wait <= 1000, `busy reschedule ~0.5s, got ${wait}ms`);
   // A second alarm finds nothing new: getUpdates is called again with the
   // advanced offset and returns nothing.
   const before = calls.filter((c) => c.kind === "getUpdates").length;
@@ -204,6 +205,19 @@ test("/feature poller on schedules the first alarm (the kick)", async () => {
   assert.ok(kvEnv.USERS.alarms.length >= 1, "enabling the poller must schedule an alarm");
 });
 
+test("poller long-polls: getUpdates waits 10s and an empty poll reschedules fast", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await enablePoller(kvEnv);
+  const calls = [];
+  fakePollTelegram(calls, []);
+  await kvEnv.USERS.object.alarm();
+  const getUpdates = calls.filter((c) => c.kind === "getUpdates");
+  assert.equal(getUpdates.length, 1);
+  assert.equal(getUpdates[0].payload?.timeout, 10, "long polling: Telegram holds the request until a message arrives");
+  const wait = kvEnv.USERS.alarms.at(-1) - Date.now();
+  assert.ok(wait >= 200 && wait <= 1000, `empty long poll reschedules fast (~0.5s), got ${wait}ms`);
+});
+
 test("alarm() reschedules at the idle cadence after a throwing step", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   await enablePoller(kvEnv);
@@ -211,7 +225,7 @@ test("alarm() reschedules at the idle cadence after a throwing step", async () =
   await kvEnv.USERS.object.alarm();
   assert.equal(kvEnv.USERS.alarms.length, 1);
   const wait = kvEnv.USERS.alarms.at(-1) - Date.now();
-  assert.ok(wait >= 4000 && wait <= 6000, `idle reschedule ~5s after a crash, got ${wait}ms`);
+  assert.ok(wait >= 4000 && wait <= 6000, `error backoff ~5s after a crash, got ${wait}ms`);
 });
 
 test("pollStats op reports the poller state", async () => {
