@@ -231,7 +231,7 @@ test("/feature poller on schedules the first alarm (the kick)", async () => {
   assert.ok(kvEnv.USERS.alarms.length >= 1, "enabling the poller must schedule an alarm");
 });
 
-test("poller long-polls: getUpdates waits 10s and an empty poll reschedules fast", async () => {
+test("poller long-polls: getUpdates waits 50s and an empty poll reschedules fast", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   await enablePoller(kvEnv);
   const calls = [];
@@ -239,9 +239,23 @@ test("poller long-polls: getUpdates waits 10s and an empty poll reschedules fast
   await kvEnv.USERS.object.alarm();
   const getUpdates = calls.filter((c) => c.kind === "getUpdates");
   assert.equal(getUpdates.length, 1);
-  assert.equal(getUpdates[0].payload?.timeout, 10, "long polling: Telegram holds the request until a message arrives");
+  assert.equal(getUpdates[0].payload?.timeout, 50, "long polling: Telegram holds the request until a message arrives");
   const wait = kvEnv.USERS.alarms.at(-1) - Date.now();
   assert.ok(wait >= 200 && wait <= 1000, `empty long poll reschedules fast (~0.5s), got ${wait}ms`);
+});
+
+test("poller skips the long poll while a broadcast is active, so batches drain fast", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await enablePoller(kvEnv);
+  // A broadcast job waiting for its next batch: broadcastStep returns its
+  // remaining wait without touching the job, so pollStep still sees it.
+  kvEnv.USERS.store.set("broadcast", { queue: [], total: 0, sent: 0, nextAt: Date.now() + 60000 });
+  const calls = [];
+  fakePollTelegram(calls, []);
+  await kvEnv.USERS.object.alarm();
+  const getUpdates = calls.filter((c) => c.kind === "getUpdates");
+  assert.equal(getUpdates.length, 1);
+  assert.equal(getUpdates[0].payload?.timeout, 0, "no 50s wait between broadcast batches");
 });
 
 test("alarm() reschedules at the idle cadence after a throwing step", async () => {

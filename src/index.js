@@ -25,15 +25,16 @@ const BROADCAST_MAX_TRANSIENT_RETRIES = 5;
 // Long polling: getUpdates waits up to POLL_LONG_TIMEOUT_S for a message, so
 // a reply starts the moment the message arrives — no 2–5s poll gap like the
 // webhook had none of. Between alarms the loop only sleeps ~0.5s, because the
-// waiting happens inside getUpdates, not between alarms. Each setAlarm is
-// billed as one row written, so the idle floor is ~8k/day at a 10s long poll
-// (far under the 100k budget). Errors and 409s back off at POLL_ERROR_MS so a
-// stuck poller never spins.
+// waiting happens inside getUpdates, not between alarms. At a 50s long poll
+// the idle floor is ~1.7k DO requests/day (far under the 100k budget); while
+// a broadcast is active the poll uses timeout 0 so its batches drain fast
+// instead of waiting out the long poll. Errors and 409s back off at
+// POLL_ERROR_MS so a stuck poller never spins.
 const POLL_IDLE_MS = 500;
 const POLL_BUSY_MS = 500;
 const POLL_DRAIN_MS = 200;
 const POLL_ERROR_MS = 5000;
-const POLL_LONG_TIMEOUT_S = 10;
+const POLL_LONG_TIMEOUT_S = 50;
 const POLL_MAX_UPDATES = 40;
 const POLL_OFFSET_KEY = "poll:offset";
 const POLL_OFFSET_PUT_MIN_MS = 10000;
@@ -3334,7 +3335,12 @@ export class UserStore {
     const offset = this.pollOffset ?? (await storage.get(POLL_OFFSET_KEY)) ?? 0;
     let result;
     try {
-      result = await telegram(env, "getUpdates", { offset, limit: 100, timeout: POLL_LONG_TIMEOUT_S, allowed_updates: ["message", "callback_query", "inline_query"] });
+      // While a broadcast is active, don't long-poll: its batches drain one
+      // per alarm, and a 50s wait between batches would stall a broadcast
+      // for hours. Otherwise long-poll so replies start instantly.
+      const broadcastActive = (await storage.get("broadcast")) != null;
+      const timeout = broadcastActive ? 0 : POLL_LONG_TIMEOUT_S;
+      result = await telegram(env, "getUpdates", { offset, limit: 100, timeout, allowed_updates: ["message", "callback_query", "inline_query"] });
     } catch {
       return POLL_ERROR_MS;
     }
