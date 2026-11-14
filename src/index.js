@@ -3023,6 +3023,13 @@ export class UserStore {
     this.pollLastLagMs = null;
     this.pollOffset = null;
     this.pollLastOffsetPutAt = 0;
+    // Detailed /usage: alarms + messages answered per UTC day. Kept in
+    // memory and flushed to usage-poll:<day> at most every 10s (piggybacked
+    // on the offset write budget); usageReport merges the live values so
+    // a report generated mid-alarm is already accurate.
+    this.pollDetailDay = "";
+    this.pollDetail = null;
+    this.pollLastDetailPutAt = 0;
     this.pollCtx = { waitUntil: (p) => { try { this.state.waitUntil(p); } catch { /* alarm already ending */ } } };
     // Run the one-time conversion before any request is served.
     state.blockConcurrencyWhile?.(() => this.migrateLegacyVoices());
@@ -3171,6 +3178,10 @@ export class UserStore {
     // alarm — so counting alarms still made /usage climb ~1 per message
     // for the admin's spaced-out tests (seen 2026-11-14). /usage tracks
     // Worker requests only, and poller chat costs zero of those.
+    // Alarms ARE tracked separately (usage-poll:<day>) for the detailed
+    // /usage report — that is a diagnostic counter, not the billable one.
+    await this.loadPollDetail();
+    this.pollDetail.alarms += 1;
     let next = Infinity;
     try {
       const syncDelay = await this.syncStep();
@@ -3186,10 +3197,28 @@ export class UserStore {
       console.error("alarm step failed, rescheduling after error backoff", error);
       next = Math.min(next, POLL_ERROR_MS);
     }
+    await this.flushPollDetail();
     // Delay measured from when the steps finished (a broadcast batch sleeps
     // seconds between recipients); measuring from the start would schedule
     // the next wake in the past.
     if (next !== Infinity) await this.state.storage.setAlarm(Date.now() + next);
+  }
+
+  async loadPollDetail() {
+    const today = utcDay();
+    if (this.pollDetailDay === today && this.pollDetail) return;
+    const stored = await this.state.storage.get(`usage-poll:${today}`);
+    this.pollDetailDay = today;
+    this.pollDetail = stored && typeof stored === "object"
+      ? { alarms: Number(stored.alarms ?? 0), messages: Number(stored.messages ?? 0) }
+      : { alarms: 0, messages: 0 };
+  }
+
+  async flushPollDetail() {
+    const now = Date.now();
+    if (!this.pollDetail || now - this.pollLastDetailPutAt < POLL_OFFSET_PUT_MIN_MS) return;
+    await this.state.storage.put(`usage-poll:${this.pollDetailDay}`, this.pollDetail);
+    this.pollLastDetailPutAt = now;
   }
 
   // One broadcast batch. Returns the ms until the next batch, or null when
@@ -3330,6 +3359,7 @@ export class UserStore {
   // alarm, or null when disabled.
   async pollStep() {
     const storage = this.state.storage;
+    await this.loadPollDetail();
     const flags = (await storage.get(FEATURE_FLAGS_KEY)) ?? {};
     if (flags?.poller !== true) return null;
     const env = this.doEnv;
@@ -3368,6 +3398,9 @@ export class UserStore {
       await Promise.all(groups.slice(i, i + 4).map(async (group) => {
         for (const update of group) {
           try {
+            // Count on receipt, before processing: a /usage report generated
+            // while handling this very update must already include it.
+            if (this.pollDetail) this.pollDetail.messages += 1;
             await this.processPollUpdate(update, env);
             this.pollProcessed += 1;
           } catch (error) {
@@ -3407,18 +3440,19 @@ export class UserStore {
   }
 
   async processPollUpdate(update, env) {
-    // NOTE: answering a message is NOT counted here. The counter tracks
-    // billable invocations — Worker requests and poller alarms (one per
-    // alarm(), which can answer up to 100 updates). Counting per message
-    // made /usage climb with every chat even though chat costs ~0 Worker
-    // requests, which is exactly what the admin saw on 2026-11-14.
+    // NOTE: answering a message is NOT counted in /usage. The counter
+    // tracks Worker requests only; poller chat costs zero of those, so
+    // counting per message made /usage climb with every chat even though
+    // chat costs ~0 Worker requests — exactly what the admin saw on
+    // 2026-11-14. Messages ARE counted separately (usage-poll:<day>)
+    // for the detailed /usage report.
     activeEnv = env;
     await handleUpdate(update, env, this.pollCtx);
   }
 
   async fetch(request) {
     const body = await request.json();
-    const { op, key, value, userId, input, kb, exclude, fromChat, messageId, poll, id, fileId, drive, limit, profile, cursor, language, ids } = body;
+    const { op, key, value, userId, input, kb, exclude, fromChat, messageId, poll, id, fileId, drive, limit, profile, cursor, language, ids, detail } = body;
     const storage = this.state.storage;
     if (op === "get") return Response.json({ value: (await storage.get(key)) ?? null });
     if (op === "pollStats") {
@@ -3628,10 +3662,23 @@ export class UserStore {
       const day = String(profile?.day ?? id);
       const total = ((await storage.get(dayKey)) ?? 0) + Number(limit ?? 0);
       await storage.put(dayKey, total);
+      // Detailed breakdown (Worker requests by endpoint kind) for /usage.
+      const detailByPath = detail?.byPath ?? {};
+      if (Object.keys(detailByPath).length) {
+        const detailKey = `usage-detail:${day}`;
+        const prev = (await storage.get(detailKey)) ?? {};
+        const byPath = { ...(prev.byPath ?? {}) };
+        for (const [kind, count] of Object.entries(detailByPath)) byPath[kind] = (byPath[kind] ?? 0) + Number(count ?? 0);
+        await storage.put(detailKey, { byPath });
+      }
       if (total === Number(limit ?? 0)) {
         // First write of a new day: forget counters older than 40 days.
         const old = [...(await storage.list({ prefix: "usage:" })).keys()].sort().slice(0, -40);
         for (const oldKey of old) await storage.delete(oldKey);
+        for (const prefix of ["usage-detail:", "usage-poll:"]) {
+          const oldDetail = [...(await storage.list({ prefix })).keys()].sort().slice(0, -40);
+          for (const oldKey of oldDetail) await storage.delete(oldKey);
+        }
       }
       const alertKey = `usage-alert:${day}`;
       const alerted = (await storage.get(alertKey)) ?? 0;
@@ -3646,7 +3693,19 @@ export class UserStore {
       const all = await storage.list({ prefix: "usage:" });
       const days = [...all].map(([storedKey, count]) => ({ day: storedKey.slice("usage:".length), count }))
         .sort((a, b) => (a.day < b.day ? 1 : -1));
-      return Response.json({ days: days.slice(0, Number(limit ?? 8)) });
+      // Detailed /usage: Worker breakdown (flushed) + poller counters.
+      // The poll counters also merge the DO's in-memory values: the report
+      // can be generated mid-alarm, before the throttled storage flush.
+      const today = utcDay();
+      const storedDetail = (await storage.get(`usage-detail:${today}`)) ?? {};
+      const storedPoll = (await storage.get(`usage-poll:${today}`)) ?? {};
+      const livePoll = (this.pollDetailDay === today && this.pollDetail) ? this.pollDetail : null;
+      const poll = {
+        alarms: Math.max(Number(storedPoll.alarms ?? 0), Number(livePoll?.alarms ?? 0)),
+        messages: Math.max(Number(storedPoll.messages ?? 0), Number(livePoll?.messages ?? 0)),
+      };
+      const flags = (await storage.get(FEATURE_FLAGS_KEY)) ?? {};
+      return Response.json({ days: days.slice(0, Number(limit ?? 8)), detail: { byPath: storedDetail.byPath ?? {} }, poll, pollerOn: flags?.poller === true });
     }
     if (op === "voiceClaim") {
       const user = (await storage.get(`user:${userId}`)) ?? {};
@@ -4777,7 +4836,42 @@ const DAILY_REQUEST_LIMIT = 100000;
 const USAGE_ALERT_LEVELS = [50000, 80000, 95000, 100000];
 const USAGE_FLUSH_EVERY = 20;
 const USAGE_FLUSH_MS = 60000;
-const usageState = { day: "", pending: 0, flushedAt: 0 };
+const usageState = { day: "", pending: 0, flushedAt: 0, byPath: {} };
+
+// Detailed /usage: Worker requests split by endpoint kind (Arabic labels
+// used by sendUsageReport). Static app files never reach the fetch handler
+// (Cloudflare serves them from the asset system), so they have no kind.
+const USAGE_PATH_LABELS = {
+  cert: "شهادات من التطبيق",
+  exam: "تحقق كود امتحان",
+  checkcode: "فحص كود",
+  getcode: "الحصول على الرقم الكودي",
+  media: "وسائط عبر الووركر",
+  health: "فحص الصحة",
+  webhook: "ويبهوك",
+  api: "API القاموس",
+  voice: "رفع صوت",
+  import: "استيراد الدروس",
+  setup: "إعداد",
+  root: "الصفحة الرئيسية",
+  other: "أخرى",
+};
+function usageKindForPath(pathname) {
+  const path = String(pathname ?? "");
+  if (path === "/cert") return "cert";
+  if (path === "/exam-pattern") return "exam";
+  if (path === "/checkcode") return "checkcode";
+  if (path === "/getcode") return "getcode";
+  if (path === "/health") return "health";
+  if (path.startsWith("/media/") || path.startsWith("/video/")) return "media";
+  if (path === "/webhook") return "webhook";
+  if (path === "/api/dictionary") return "api";
+  if (path === "/voice-drive") return "voice";
+  if (path === "/__learn-import") return "import";
+  if (path === "/__setup") return "setup";
+  if (path === "/") return "root";
+  return "other";
+}
 
 // ---- Pro feature: per-user rate limiting (sliding window, in-memory) ----
 const RATE_LIMIT_WINDOW_MS = 10000;
@@ -5427,9 +5521,9 @@ async function uploadAdminAudio(env, message, userId, admin) {
   }
 }
 
-async function flushUsage(env, day, count) {
+async function flushUsage(env, day, count, byPath) {
   try {
-    const result = await storeCall(env, { op: "usage", profile: { day }, limit: count });
+    const result = await storeCall(env, { op: "usage", profile: { day }, limit: count, detail: { byPath: byPath ?? {} } });
     if (result?.alert) {
       const percent = Math.round((result.total / DAILY_REQUEST_LIMIT) * 100);
       await notifyAdmins(env, `⚠️ <b>تنبيه الاستخدام</b>\nوصلت طلبات اليوم إلى ${Number(result.total).toLocaleString("en-US")} من ${DAILY_REQUEST_LIMIT.toLocaleString("en-US")} (${percent}%).\nعند الوصول للحد يتوقف البوت حتى تصفير العدّاد. أرسل /usage للتفاصيل.`);
@@ -5439,25 +5533,34 @@ async function flushUsage(env, day, count) {
   }
 }
 
-// Called for every billable invocation: each Worker request the Worker
-// receives, and each Durable Object alarm (one per poller wake, answering
-// up to 100 updates). Sends one batched write per ~20 requests.
-function countRequest(env, ctx) {
+// Called for every Worker request the Worker receives. /usage tracks
+// Worker requests only — poller chat costs zero of those, so the counter
+// never moves when chatting. The per-path breakdown (byPath) is flushed
+// with the same batched write. Alarms are NOT counted here (a spaced-out
+// message wakes its own alarm, so counting them still climbed ~1 per
+// message — seen 2026-11-14); alarms/messages are tracked separately in
+// the DO's usage-poll:<day> record for the detailed /usage report.
+function countRequest(env, ctx, pathname) {
   if (!env.USERS) return;
   const day = utcDay();
   const now = Date.now();
+  const kind = usageKindForPath(pathname);
   if (usageState.day && usageState.day !== day && usageState.pending) {
-    const previous = { day: usageState.day, count: usageState.pending };
+    const previous = { day: usageState.day, count: usageState.pending, byPath: usageState.byPath };
     usageState.pending = 0;
-    inBackground(ctx, flushUsage(env, previous.day, previous.count));
+    usageState.byPath = {};
+    inBackground(ctx, flushUsage(env, previous.day, previous.count, previous.byPath));
   }
   usageState.day = day;
   usageState.pending += 1;
+  usageState.byPath[kind] = (usageState.byPath[kind] ?? 0) + 1;
   if (usageState.pending >= USAGE_FLUSH_EVERY || now - usageState.flushedAt >= USAGE_FLUSH_MS) {
     const count = usageState.pending;
+    const byPath = usageState.byPath;
     usageState.pending = 0;
+    usageState.byPath = {};
     usageState.flushedAt = now;
-    inBackground(ctx, flushUsage(env, day, count));
+    inBackground(ctx, flushUsage(env, day, count, byPath));
   }
 }
 
@@ -5479,11 +5582,40 @@ async function sendUsageReport(env, chatId) {
   nextReset.setUTCDate(nextReset.getUTCDate() + 1);
   const resetAt = new Intl.DateTimeFormat("ar-EG", { timeZone: "Africa/Cairo", hour: "2-digit", minute: "2-digit" }).format(nextReset);
   const fmt = (value) => Number(value).toLocaleString("en-US");
+  // Detailed breakdown: stored (flushed) Worker requests by path + the
+  // still-pending in-memory part, so the detail is exact at report time.
+  const byPath = { ...(report.detail?.byPath ?? {}) };
+  if (usageState.day === today) {
+    for (const [kind, count] of Object.entries(usageState.byPath)) byPath[kind] = (byPath[kind] ?? 0) + count;
+  }
+  const pathLines = Object.entries(USAGE_PATH_LABELS)
+    .filter(([kind]) => (byPath[kind] ?? 0) > 0)
+    .map(([kind, label]) => `• ${label}: ${fmt(byPath[kind])}`);
+  const poll = report.poll ?? {};
+  // DO duration cannot be measured from inside the bot — Cloudflare only
+  // shows it on the dashboard. While the poller loop runs the DO is awake
+  // ~24h/day at 128MB, i.e. ~10,800 of the 13,000 free GB-s/day (83%),
+  // and that figure barely moves with student count. Labelled as an
+  // estimate so it is never mistaken for a live measurement.
+  const durationLine = report.pollerOn
+    ? "• مدة تشغيل الـDO (تقدير ليوم كامل): ~10,800 من 13,000 GB-s ‏(83%) — الرقم الدقيق في لوحة كلاودفلير بس"
+    : "• مدة تشغيل الـDO: ≈ 0 (البولر متوقف، الـDO نايم)";
   const lines = [
     `📊 <b>طلبات البوت اليوم</b> (UTC ${today})`,
     `المستخدَم: <b>${fmt(used)}</b> من ${fmt(DAILY_REQUEST_LIMIT)} (${((used / DAILY_REQUEST_LIMIT) * 100).toFixed(1)}%)`,
     `المتبقي: <b>${fmt(remaining)}</b>`,
     `يتصفّر العدّاد الساعة ${resetAt} بتوقيت القاهرة`,
+    "",
+    "<b>🔍 تفصيل طلبات ووركر اليوم:</b>",
+    ...(pathLines.length ? pathLines : ["• لا توجد طلبات ووركر مسجلة بعد اليوم"]),
+    "",
+    "<b>💬 الشات عبر البولر (صفر طلبات ووركر):</b>",
+    `• رسائل تم استلامها اليوم: <b>${fmt(poll.messages ?? 0)}</b>`,
+    `• استيقاظات الـDO اليوم: <b>${fmt(poll.alarms ?? 0)}</b>`,
+    durationLine,
+    "",
+    "⏰ تك كل 5 دقايق: 288/يوم ثابت — في عدّاد كلاودفلير، مش في العدّاد ده",
+    "📦 R2 (فيديوهات وصور الدروس): عمليات الشهر مش متاحة من البوت — بتتشاف في لوحة كلاودفلير",
     "",
     "<b>آخر الأيام:</b>",
     ...rows.slice(0, 7).map((item) => `${item.day}: ${fmt(item.count)}`),
@@ -8715,9 +8847,9 @@ async function fetchLiveExamPattern(formId) {
 
 export default {
   async fetch(request, env, ctx) {
-    countRequest(env, ctx);
-    activeEnv = env;
     const url = new URL(request.url);
+    countRequest(env, ctx, url.pathname);
+    activeEnv = env;
     const speech = /^\/tts\/(\d{1,6})\.(?:mp3|ogg)$/u.exec(url.pathname);
     if (speech && (request.method === "GET" || request.method === "HEAD") && records[Number(speech[1])]) {
       return serveSpeech(request, ctx, env, Number(speech[1]));

@@ -194,6 +194,40 @@ test("usage: poller chat costs zero Worker requests — alarms are not counted",
   assert.equal(row?.count ?? 0, 0, `poller chat must not move /usage, got ${row?.count ?? 0}`);
 });
 
+test("usage detail: /usage reports Worker requests by path plus poller alarms/messages", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  kvEnv.USERS.store.set("user:813894692", { name: "admin" });
+  await enablePoller(kvEnv);
+  // Six Worker requests of different kinds (no outbound fetches involved).
+  await worker.fetch(new Request("https://bot.test/health"), kvEnv);
+  await worker.fetch(new Request("https://bot.test/health"), kvEnv);
+  await worker.fetch(new Request("https://bot.test/"), kvEnv);
+  await worker.fetch(new Request("https://bot.test/api/dictionary"), kvEnv);
+  await worker.fetch(new Request("https://bot.test/unknown-path"), kvEnv);
+  await worker.fetch(new Request("https://bot.test/webhook", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ update_id: 1 }),
+  }), kvEnv);
+  // One admin /usage message via the poller; capture the sent report.
+  const calls = [];
+  fakePollTelegram(calls, [msg(1001, 813894692, "/usage")]);
+  await kvEnv.USERS.object.alarm();
+  const reportText = sendsTo(calls, 813894692).map((c) => c.payload?.text ?? "").join("\n");
+  // 2026-11-14: the admin asked /usage to show every consumption in
+  // detail, not just one counter — Worker requests by endpoint, plus the
+  // poller's own alarms/messages (which cost zero Worker requests).
+  assert.match(reportText, /المستخدَم: <b>6<\/b> من 100,000/);
+  assert.match(reportText, /فحص الصحة: 2/);
+  assert.match(reportText, /الصفحة الرئيسية: 1/);
+  assert.match(reportText, /API القاموس: 1/);
+  assert.match(reportText, /ويبهوك: 1/);
+  assert.match(reportText, /أخرى: 1/);
+  assert.match(reportText, /رسائل تم استلامها اليوم: <b>1<\/b>/);
+  assert.match(reportText, /استيقاظات الـDO اليوم: <b>1<\/b>/);
+  assert.match(reportText, /مدة تشغيل الـDO \(تقدير ليوم كامل\)/);
+});
+
 test("pollkick starts the alarm loop only when no alarm is pending", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const kick = async () => {
