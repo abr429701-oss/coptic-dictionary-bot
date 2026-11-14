@@ -3166,10 +3166,11 @@ export class UserStore {
   // the earliest. A step that is not due yet (job.nextAt in the future)
   // reports the remaining wait without running.
   async alarm() {
-    // One counted request per alarm: each alarm is one Durable Object
-    // request — the binding constraint now that chat runs in the DO — and
-    // it can answer up to 100 updates, so chatting barely moves /usage.
-    countRequest(this.doEnv, this.pollCtx);
+    // NOTE: alarms are deliberately NOT counted in /usage. One alarm can
+    // answer up to 100 updates, but a spaced-out message wakes its own
+    // alarm — so counting alarms still made /usage climb ~1 per message
+    // for the admin's spaced-out tests (seen 2026-11-14). /usage tracks
+    // Worker requests only, and poller chat costs zero of those.
     let next = Infinity;
     try {
       const syncDelay = await this.syncStep();
@@ -4777,8 +4778,6 @@ const USAGE_ALERT_LEVELS = [50000, 80000, 95000, 100000];
 const USAGE_FLUSH_EVERY = 20;
 const USAGE_FLUSH_MS = 60000;
 const usageState = { day: "", pending: 0, flushedAt: 0 };
-// Test hook: reset the in-memory usage counter between scenarios.
-export function resetUsageCounter() { usageState.day = ""; usageState.pending = 0; usageState.flushedAt = 0; }
 
 // ---- Pro feature: per-user rate limiting (sliding window, in-memory) ----
 const RATE_LIMIT_WINDOW_MS = 10000;
@@ -5489,7 +5488,7 @@ async function sendUsageReport(env, chatId) {
     "<b>آخر الأيام:</b>",
     ...rows.slice(0, 7).map((item) => `${item.day}: ${fmt(item.count)}`),
     "",
-    "العدّاد تقديري. رسائل الشات عبر البولر لا تُحسب — العدّاد يحسب طلبات ووركر ودورات البولر فقط، فالرد على رسالة لا يستهلك طلبًا. سأنبّهك تلقائيًا عند 50% و80% و95%.",
+    "العدّاد تقديري ويحسب طلبات ووركر فقط. الشات عبر البولر لا يستهلك طلبات ووركر إطلاقًا، فالرد على رسالة لا يحرّك العدّاد. سأنبّهك تلقائيًا عند 50% و80% و95%.",
   ];
   await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n"), parse_mode: "HTML" });
 }
