@@ -148,6 +148,13 @@ test("learn-app: index.html renders the exam in-app and posts to Google", () => 
   // the primary save path and the direct /cert link is the fallback.
   assert.ok(appHtml.includes("navigator.share"), "certificate is saved through the native share sheet");
   assert.ok(appHtml.includes("مشاركة / حفظ الشهادة"), "share/save button");
+  // Error banners (2026-11-14): a failed lookup shows ONE banner — a
+  // second tap replaces the first instead of stacking a duplicate of
+  // the same message underneath it (the cert flow showed the same
+  // missing-exams message twice after two taps on "عرض الشهادة").
+  assert.ok(appHtml.includes("showTopError"), "error banners go through one helper");
+  assert.ok(appHtml.includes('querySelector("#error")'), "the helper clears the previous banner first");
+  assert.strictEqual(appHtml.split("showTopError(").length - 1, 4, "one helper definition + three call sites (cert, get-code, exam submit)");
   // Live exam pattern (2026-11-13): the teacher's sequencing lives in the
   // Forms themselves — each form's code question only allows the codes of
   // students eligible for THAT exam — so a code the baked pattern does

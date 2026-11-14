@@ -346,6 +346,15 @@
   function arabicNum(n) {
     return String(n).replace(/\d/g, function (d) { return "٠١٢٣٤٥٦٧٨٩"[Number(d)]; });
   }
+  // Result banners (#error) are shown ONE at a time: a fresh lookup that
+  // fails must REPLACE the previous banner, not stack a second copy of
+  // the same message underneath it (reported 2026-11-14 in the cert
+  // flow — tapping "عرض الشهادة" twice showed the same error twice).
+  function showTopError(container, node) {
+    var old = container.querySelector("#error");
+    if (old) old.remove();
+    container.insertBefore(node, container.firstChild);
+  }
   // Lesson videos and photos play/show through the Worker's /media/<id>
   // proxy: it forwards the Range header to Drive and streams the file back
   // with clean media headers (no redirect, no attachment disposition), so
@@ -780,7 +789,7 @@
         err.id = "error";
         err.innerHTML = "تعذّر إحضار الرقم الكودي دلوقتي — جرّب تاني، أو احصل عليه من النموذج مباشرة: " +
           "<a href='" + esc(GET_CODE_FORM_URL) + "' target='_blank' rel='noopener'>فتح نموذج الرقم الكودي ←</a>";
-        view.insertBefore(err, view.firstChild);
+        showTopError(view, err);
         window.scrollTo(0, 0);
       });
     });
@@ -864,7 +873,7 @@
             var msg = document.createElement("div");
             msg.id = "error";
             msg.textContent = j.text || "الرقم الكودي غير صحيح.";
-            view.insertBefore(msg, view.firstChild);
+            showTopError(view, msg);
             btn.disabled = false;
             btn.textContent = "عرض الشهادة";
             window.scrollTo(0, 0);
@@ -1186,7 +1195,7 @@
       var err = document.createElement("div");
       err.id = "error";
       err.textContent = "تعذّر الإرسال — اتأكد من النت وحاول تاني.";
-      formEl.insertBefore(err, formEl.firstChild);
+      showTopError(formEl, err);
       window.scrollTo(0, 0);
     });
   }
