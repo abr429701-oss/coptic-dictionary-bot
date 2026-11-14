@@ -90,7 +90,17 @@ function pushRecentSearch(userId, name, query) {
 }
 async function featureFlags(env) { const v = await cachedDoGet(env, FEATURE_FLAGS_KEY, featureFlagsCache, {}); return v && typeof v === "object" ? v : {}; }
 async function featureEnabled(env, flag) { const flags = await featureFlags(env); return flags[flag] !== false; } // default ON unless explicitly false
-async function setFeatureFlag(env, flag, on) { const flags = await featureFlags(env); flags[flag] = !!on; if (env.USERS) await storeCall(env, { op: "put", key: FEATURE_FLAGS_KEY, value: flags }); invalidateCache(featureFlagsCache); }
+async function setFeatureFlag(env, flag, on) {
+  const flags = await featureFlags(env); flags[flag] = !!on;
+  if (env.USERS) await storeCall(env, { op: "put", key: FEATURE_FLAGS_KEY, value: flags });
+  invalidateCache(featureFlagsCache);
+  // Turning the poller on must also start its alarm loop: a DO only wakes
+  // when an alarm is pending, and nothing else schedules one while idle.
+  // (2026-11-14: the cutover went silent because this kick was missing.)
+  if (flag === "poller" && on && env.USERS) {
+    try { await storeCall(env, { op: "pollkick" }); } catch { /* the flag is saved; the scheduled tick heals the loop */ }
+  }
+}
 async function blacklistedWords(env) { const v = await cachedDoGet(env, BLACKLIST_KEY, blacklistCache, []); return Array.isArray(v) ? v : []; }
 async function isBlacklistedWord(env, query) { const list = await blacklistedWords(env); const q = normalize(query); return list.some((w) => q === normalize(w) || q.includes(normalize(w))); }
 async function addBlacklist(env, word) { const list = await blacklistedWords(env); if (!list.includes(String(word))) list.push(String(word).slice(0, 80)); if (env.USERS) await storeCall(env, { op: "put", key: BLACKLIST_KEY, value: list.slice(-200) }); invalidateCache(blacklistCache); }
@@ -3150,12 +3160,20 @@ export class UserStore {
   // reports the remaining wait without running.
   async alarm() {
     let next = Infinity;
-    const syncDelay = await this.syncStep();
-    if (typeof syncDelay === "number" && syncDelay >= 0) next = Math.min(next, syncDelay);
-    const bcDelay = await this.broadcastStep();
-    if (typeof bcDelay === "number" && bcDelay >= 0) next = Math.min(next, bcDelay);
-    const pollDelay = await this.pollStep();
-    if (typeof pollDelay === "number" && pollDelay >= 0) next = Math.min(next, pollDelay);
+    try {
+      const syncDelay = await this.syncStep();
+      if (typeof syncDelay === "number" && syncDelay >= 0) next = Math.min(next, syncDelay);
+      const bcDelay = await this.broadcastStep();
+      if (typeof bcDelay === "number" && bcDelay >= 0) next = Math.min(next, bcDelay);
+      const pollDelay = await this.pollStep();
+      if (typeof pollDelay === "number" && pollDelay >= 0) next = Math.min(next, pollDelay);
+    } catch (error) {
+      // A throwing step must never kill the loop: retry at the idle
+      // cadence. The next alarm stops the loop by itself when nothing is
+      // due (all steps return null, so next stays Infinity).
+      console.error("alarm step failed, rescheduling at idle cadence", error);
+      next = Math.min(next, POLL_IDLE_MS);
+    }
     // Delay measured from when the steps finished (a broadcast batch sleeps
     // seconds between recipients); measuring from the start would schedule
     // the next wake in the past.
@@ -3393,6 +3411,15 @@ export class UserStore {
         lastRun: this.pollLastRun ?? 0,
         lastLagMs: this.pollLastLagMs ?? null,
       });
+    }
+    if (op === "pollkick") {
+      // Start (or heal) the alarm loop. getAlarm returns the pending alarm
+      // time, or null when none is scheduled. When one is already pending
+      // the loop is alive — alarm() reschedules itself — so this is a
+      // no-op, and calling it twice never stacks alarms.
+      const pending = typeof storage.getAlarm === "function" ? await storage.getAlarm().catch(() => null) : null;
+      if (pending == null) await storage.setAlarm(Date.now() + 100);
+      return Response.json({ kicked: pending == null });
     }
     if (op === "put") {
       await storage.put(key, value);
@@ -8912,6 +8939,10 @@ export default {
           await telegram(env, "deleteWebhook", { drop_pending_updates: false });
           console.log("Poller guard: removed a re-registered webhook; polling resumes");
         }
+        // Self-heal: if the alarm loop ever died (a crash before the
+        // reschedule, a deploy with no alarm pending), restart it within
+        // one 5-minute tick. pollkick is a no-op while the loop is alive.
+        await storeCall(env, { op: "pollkick" }).catch(() => null);
       }
     } catch { /* the guard must never break the tick */ }
   },

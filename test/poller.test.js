@@ -53,6 +53,7 @@ function fakeKv() {
       return new Map(limit ? entries.slice(0, limit) : entries);
     },
     setAlarm: async (when) => { alarms.push(when); },
+    getAlarm: async () => alarms.at(-1) ?? null,
   };
   const kv = {
     store, alarms, object: null,
@@ -166,6 +167,51 @@ test("getUpdates 409 (webhook still set) makes the poller idle instead of spinni
   const wait = kvEnv.USERS.alarms.at(-1) - Date.now();
   assert.ok(wait >= 4000 && wait <= 6000, `idle reschedule ~5s, got ${wait}ms`);
   assert.equal(kvEnv.USERS.store.get("poll:offset"), undefined);
+});
+
+test("pollkick starts the alarm loop only when no alarm is pending", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const kick = async () => {
+    const res = await kvEnv.USERS.object.fetch(new Request("https://user-store/", {
+      method: "POST",
+      body: JSON.stringify({ op: "pollkick" }),
+    }));
+    return res.json();
+  };
+  // 2026-11-14: the cutover went silent because nothing ever kicked the
+  // loop — no alarm was pending when the flag was enabled.
+  assert.deepEqual(await kick(), { kicked: true });
+  assert.equal(kvEnv.USERS.alarms.length, 1);
+  assert.deepEqual(await kick(), { kicked: false });
+  assert.equal(kvEnv.USERS.alarms.length, 1, "a second kick must not stack alarms");
+});
+
+test("/feature poller on schedules the first alarm (the kick)", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  kvEnv.USERS.store.set("user:813894692", { name: "admin" });
+  globalThis.fetch = async (url, options = {}) => {
+    if (isGeneratedAudio(url)) return fakeOgg();
+    return Response.json({ ok: true, result: { message_id: 900 } });
+  };
+  const req = new Request("https://bot.test/webhook", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-telegram-bot-api-secret-token": secret },
+    body: JSON.stringify(msg(1001, 813894692, "/feature poller on")),
+  });
+  const res = await worker.fetch(req, kvEnv);
+  assert.equal(res.status, 200);
+  assert.equal(kvEnv.USERS.store.get("admin:features")?.poller, true);
+  assert.ok(kvEnv.USERS.alarms.length >= 1, "enabling the poller must schedule an alarm");
+});
+
+test("alarm() reschedules at the idle cadence after a throwing step", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await enablePoller(kvEnv);
+  kvEnv.USERS.object.pollStep = async () => { throw new Error("boom"); };
+  await kvEnv.USERS.object.alarm();
+  assert.equal(kvEnv.USERS.alarms.length, 1);
+  const wait = kvEnv.USERS.alarms.at(-1) - Date.now();
+  assert.ok(wait >= 4000 && wait <= 6000, `idle reschedule ~5s after a crash, got ${wait}ms`);
 });
 
 test("pollStats op reports the poller state", async () => {
