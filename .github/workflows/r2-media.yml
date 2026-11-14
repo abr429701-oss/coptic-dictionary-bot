@@ -5,6 +5,10 @@ name: Upload lesson media to R2
 # serve them straight from R2 at ZERO Worker requests (the Worker's
 # /media/<id> proxy costs one Worker request per Range fetch).
 # This workflow NEVER deploys the Worker and NEVER touches the webhook.
+# NOTE: since 2026-11-14 the deploy workflow's sync job uploads changed
+# lesson media to R2 automatically whenever the learn manifest changes,
+# so this workflow is now only a manual repair/retry path (e.g. after a
+# failed auto-upload, or to re-upload everything from scratch).
 # The public URL is written into learn-app/r2-media.json by the upload
 # script (as "base"), so the app picks it up on the next deploy with no
 # manual paste; until then the app keeps using the /media/<id> proxy fallback.

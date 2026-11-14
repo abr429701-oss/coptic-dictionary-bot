@@ -51,10 +51,44 @@ jobs:
         continue-on-error: true
         run: node scripts/generate-learn-manifest.mjs
 
+      # The media id list derives from the manifest (via lessons.json), so
+      # it is regenerated here too — the R2 upload below is gated on it.
+      - name: Regenerate learn-app data from the manifest
+        continue-on-error: true
+        run: node scripts/generate-learn-app-data.mjs && node scripts/generate-media-ids.mjs
+
+      - name: Check whether lesson media changed
+        id: media
+        run: |
+          if git diff --quiet -- src/lesson-media.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # New/changed lesson media goes to R2 automatically: the upload
+      # script is idempotent (HEAD-skips ids already on R2), and the app
+      # falls back to the Worker /media proxy for anything not yet mapped,
+      # so a failed upload must never block the dictionary/manifest sync.
+      # Needs "Workers R2 Storage: Edit" on the same CLOUDFLARE_API_TOKEN
+      # the deploy job uses — without it this step fails and is skipped.
+      - name: Install dependencies for the R2 upload
+        if: ${{ steps.media.outputs.changed == 'true' }}
+        run: npm ci
+
+      - name: Upload changed lesson media to R2
+        if: ${{ steps.media.outputs.changed == 'true' }}
+        continue-on-error: true
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          R2_PUBLIC_BASE: https://pub-e39b5be260724e0ea1bbf6a7db089987.r2.dev
+        run: node scripts/upload-media-to-r2.mjs --allow-partial
+
       - name: Commit data if they changed
         id: commit
         run: |
-          git add -A data src/learn-manifest.js
+          git add -A data src/learn-manifest.js src/lesson-media.json learn-app/lessons.json learn-app/r2-media.json
           if git diff --cached --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else

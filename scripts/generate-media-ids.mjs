@@ -27,7 +27,11 @@ function main() {
       if (q.imageId) ids.add(q.imageId);
     }
   }
-  const data = { version: 1, generatedAt: new Date().toISOString(), ids: [...ids].sort() };
+  // No timestamp in the output: the file must be deterministic for a
+  // given id set, so the deploy workflow's sync job can gate the R2
+  // upload on `git diff -- src/lesson-media.json` (a new/changed id is
+  // the only reason the file changes).
+  const data = { version: 1, ids: [...ids].sort() };
   writeFileSync(OUT, JSON.stringify(data, null, 1) + "\n", "utf8");
   console.log(`media-ids: wrote ${data.ids.length} lesson media ids`);
 }
