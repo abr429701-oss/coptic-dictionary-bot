@@ -236,87 +236,6 @@ export function lessonText(id) {
 // ---------------------------------------------------------------------------
 // 6) Smarter search: "did you mean" on no-result (local Levenshtein)
 // ---------------------------------------------------------------------------
-// Arabic light stemming. A user types the word as they say it — conjugated
-// ("أشكرك" = أ + شكر + ك), with the definite article ("النور" for "نور"),
-// with a pronoun or plural suffix — while the dictionary stores the bare
-// lemma ("شكر", "نور"). Pure edit distance cannot see that: "أشكرك" is
-// distance 2 from "شكر" and also distance 2 from unrelated words like
-// "آشور" and "أشقر", so the real stem drowns in noise. These helpers
-// strip the common affixes so the stem can be compared directly.
-// Guards: a strip only applies when the remainder is >= 3 letters, so
-// roots that happen to start with ال ("الله" -> "له") are never touched.
-const AR_ARTICLE_PREFIXES = ["وال", "فال", "بال", "كال", "لل", "ال"];
-const AR_PREFIXES = ["و", "ف", "ب", "ل", "ك", "س"];
-const AR_VERB_PREFIXES = ["ا", "ت", "ي", "ن"];
-const AR_SUFFIXES = ["ات", "ون", "ين", "ان", "ها", "هم", "هن", "كم", "كن", "نا", "ك", "ه", "ي", "ت", "ة", "ا", "و"];
-function stripOnePrefix(word) {
-  for (const p of AR_ARTICLE_PREFIXES) {
-    if (word.startsWith(p) && word.length - p.length >= 3) return word.slice(p.length);
-  }
-  for (const p of AR_PREFIXES) {
-    if (word.startsWith(p) && word.length - 1 >= 3) return word.slice(1);
-  }
-  for (const p of AR_VERB_PREFIXES) {
-    if (word.startsWith(p) && word.length - 1 >= 3) return word.slice(1);
-  }
-  return null;
-}
-function stripOneSuffix(word) {
-  for (const s of AR_SUFFIXES) {
-    if (word.endsWith(s) && word.length - s.length >= 3) return word.slice(0, -s.length);
-  }
-  return null;
-}
-// The word itself plus every form reachable by stripping affixes (two
-// rounds so a prefix + a suffix come off together: "اشكرك" -> "شكر").
-// Capped: a word never yields more than 17 forms.
-export function arabicStemForms(word) {
-  const out = new Set([word]);
-  for (let round = 0; round < 2 && out.size <= 16; round += 1) {
-    for (const form of [...out]) {
-      const p = stripOnePrefix(form);
-      if (p) out.add(p);
-      const s = stripOneSuffix(form);
-      if (s) out.add(s);
-    }
-  }
-  return out;
-}
-// Definite article only, per word: "النور" -> "نور", "النور الساطع" ->
-// "نور ساطع". Used by the direct search so a query with ال behaves
-// exactly like the bare word. Verb prefixes and suffixes are NOT stripped
-// here — those stay in the "did you mean" suggestions only.
-export function stripDefiniteArticle(text) {
-  return String(text ?? "").split(/\s+/u).map((word) => {
-    for (const p of AR_ARTICLE_PREFIXES) {
-      if (word.startsWith(p) && word.length - p.length >= 3) return word.slice(p.length);
-    }
-    return word;
-  }).join(" ");
-}
-// Rank of an Arabic candidate label against the query's stem set, or null
-// when the stems do not match at all (the caller then falls back to
-// Levenshtein). 0 = a candidate word IS one of the query stems ("شكر" for
-// "أشكرك"), 1 = a candidate word stems to one ("شكرًا"), 2 = a candidate
-// word contains a query stem (or vice versa), both sides >= 3 letters.
-function arabicStemTier(normLabel, queryStems) {
-  const words = normLabel.split(/\s+/u).filter(Boolean);
-  for (const w of words) {
-    if (queryStems.has(w)) return 0;
-  }
-  for (const w of words) {
-    for (const s of arabicStemForms(w)) {
-      if (queryStems.has(s)) return 1;
-    }
-  }
-  for (const w of words) {
-    if (w.length < 3) continue;
-    for (const s of queryStems) {
-      if (s.length >= 3 && (w.includes(s) || s.includes(w))) return 2;
-    }
-  }
-  return null;
-}
 // Bounded Levenshtein distance; returns Infinity when beyond `max`.
 // Banded DP: D[i][j] >= |i - j|, so cells outside |i - j| <= max can
 // never finish within max and are skipped. Within the band the row
@@ -351,53 +270,29 @@ export function suggestSimilar(query, limit = 3) {
   const wanted = normalize(query);
   if (!wanted || wanted.length < 2) return [];
   const max = wanted.length <= 4 ? 1 : wanted.length <= 8 ? 2 : 3;
-  // Stem set of the query, one per word: "اشكرك" -> {"اشكرك","شكرك","اشكر","شكر"}.
-  const queryStems = new Set();
-  for (const w of wanted.split(/\s+/u).filter(Boolean)) {
-    for (const s of arabicStemForms(w)) queryStems.add(s);
-  }
-  const best = new Map(); // normalized candidate -> {label, dist, tier, index, lang}
-  const consider = (norm, label, lang, index) => {
-    if (!norm || norm === wanted) return;
-    // Arabic: a stem match outranks any edit distance — a conjugated form
-    // must surface its lemma ("أشكرك" -> "شكر") instead of drowning among
-    // unrelated words at the same Levenshtein distance.
-    if (lang === "ar") {
-      const tier = arabicStemTier(norm, queryStems);
-      if (tier !== null) {
-        const prev = best.get(norm);
-        // Same normalized form from different records (e.g. "نور" and
-        // "نوَّرَ" both normalize to "نور"): keep the shorter, plainer
-        // label so the suggestion reads like the word the user typed.
-        if (!prev || tier < prev.tier || (tier === prev.tier && label.length < prev.label.length)) best.set(norm, { label, dist: 0, tier, index, lang });
-        return;
-      }
-    }
-    const dist = levenshtein(norm, wanted, max);
-    if (dist === Infinity) return;
-    const prev = best.get(norm);
-    // A stem match (tier 0-2) always beats an edit-distance match for the
-    // same label; among edit-distance matches the closer one wins, then
-    // the shorter label.
-    if (!prev || (prev.tier === 3 && (dist < prev.dist || (dist === prev.dist && label.length < prev.label.length)))) best.set(norm, { label, dist, tier: 3, index, lang });
-  };
+  const best = new Map(); // normalized candidate -> {label, dist, index}
   for (let i = 0; i < records.length; i += 1) {
     const r = records[i];
     if (!r || r._deleted) continue;
     // Candidates in every search language, each tagged with its language so
     // the "did you mean" header can follow the closest suggestion.
-    consider(normalize(String(r.coptic ?? "").replace(/`/gu, "").trim()), String(r.coptic ?? "").replace(/`/gu, "").trim(), "cop", i);
-    for (const [field, lang] of [["english", "en"], ["translation_fr", "fr"], ["translation_de", "de"]]) {
-      const label = String(r[field] ?? "").split(/[,/]/u)[0]?.trim() ?? "";
-      consider(normalize(label), label, lang, i);
-    }
-    // Arabic: EVERY sense, not just the first — "شكر" lives as a later sense
-    // ("تقديم الشكر، شُكْر") and was never a candidate before.
-    for (const sense of splitMeaning(r.meaning ?? "")) {
-      consider(normalize(sense), sense, "ar", i);
+    const candidates = [
+      { label: String(r.coptic ?? "").replace(/`/gu, "").trim(), lang: "cop" },
+      { label: String(r.english ?? "").split(/[,/]/u)[0]?.trim() ?? "", lang: "en" },
+      { label: String(r.translation_fr ?? "").split(/[,/]/u)[0]?.trim() ?? "", lang: "fr" },
+      { label: String(r.translation_de ?? "").split(/[,/]/u)[0]?.trim() ?? "", lang: "de" },
+      { label: firstMeaning(r), lang: "ar" },
+    ];
+    for (const { label, lang } of candidates) {
+      const norm = normalize(label);
+      if (!norm || norm === wanted) continue;
+      const dist = levenshtein(norm, wanted, max);
+      if (dist === Infinity) continue;
+      const prev = best.get(norm);
+      if (!prev || dist < prev.dist) best.set(norm, { label, dist, index: i, lang });
     }
   }
-  return [...best.values()].sort((a, b) => a.tier - b.tier || a.dist - b.dist || a.label.length - b.label.length).slice(0, limit);
+  return [...best.values()].sort((a, b) => a.dist - b.dist || a.label.length - b.label.length).slice(0, limit);
 }
 
 // ---------------------------------------------------------------------------

@@ -604,15 +604,6 @@ test("Arabic search matches the word itself, never the inside of a longer word",
   assert.doesNotMatch(text, /الاستغراب/u);
 });
 
-test("Arabic search with ال finds the bare word (النور -> نور)", async () => {
-  const calls = [];
-  fakeTelegramApi(calls);
-  await worker.fetch(updateRequest({ message: { text: "النور", chat: { id: 171 } } }), env);
-  const text = calls.find((call) => call.url.endsWith("/sendMessage")).payload.text;
-  assert.match(stripDiacritics(text), /<b>الكلمة:<\/b> نور\n/u);
-  assert.doesNotMatch(text, /لا توجد نتائج/u);
-});
-
 test("Arabic search preserves the exact word typed, including ة, across meanings", async () => {
   const firstCalls = [];
   fakeTelegramApi(firstCalls);

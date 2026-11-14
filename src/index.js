@@ -1324,7 +1324,7 @@ function lazy(build) {
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
 import { audioUrl, audioVersion, fetchHumanSpeech, fetchPrebuiltSpeech, isSingleWordOgg, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 import { copticDateNow, alphabetText, letterStatsText, longestText, originsText, wordCountText, startsWithText, similarText, translateText, vocabText, startGuess, handleGuessReply } from "./features.js";
-import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, suggestSimilar, stripDefiniteArticle, helpText, retentionText, opsText, recordById, levenshtein } from "./new-features.js";
+import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, suggestSimilar, helpText, retentionText, opsText, recordById, levenshtein } from "./new-features.js";
 import { lookupCertificate, parseCertCsv } from "./certificates.js";
 import { extractCodePattern } from "./exam-pattern.js";
 import { getCodeFromMacro, buildGetCodeReply, buildGetCodeWhatsAppUrl, normalizeGetCodePhone, getCodePhoneValid, GET_CODE_SHEET_ID } from "./getcode.js";
@@ -1920,32 +1920,22 @@ async function findMatches(query, env) {
     // Arabic: match the sheet's meanings only, as whole words/phrases (never inside a longer word).
     const needle = tokens(normalizedQuery);
     if (!needle) return [];
-    const arabicRows = async (needleText) => {
-      const ws = needleText.split(" ");
-      const cKey = ws.slice(0, 2).join(" ");
-      const [ex, cand, ph] = await Promise.all([
-        indexedRows(env, "meaningExact", needleText),
-        indexedRows(env, "meaningFirst", ws[0]),
-        ws.length > 1 ? indexedRows(env, "meaningTwoGram", cKey) : Promise.resolve(null),
-      ]);
-      const exSet = new Set(ex);
-      const phSet = ph ? new Set(ph) : null;
-      const out = [];
-      for (const row of cand) {
-        if (exSet.has(row)) continue;
-        if (phSet && !phSet.has(row)) continue;
-        if (ws.length <= 2 || recordHasWholeWords(records[row], ["meaning"], needleText)) out.push(row);
-      }
-      return ex.concat(out);
-    };
-    let rows = await arabicRows(needle);
-    // Fallback: the same query without the definite article ("النور" ->
-    // "نور"), for words the sheet stores bare. Only when the first
-    // lookup found nothing, so a literal "الكتاب المقدس" still wins over
-    // its stripped form.
-    const stripped = stripDefiniteArticle(needle);
-    if (!rows.length && stripped !== needle) rows = await arabicRows(stripped);
-    return rows;
+    const words = needle.split(" ");
+    const candidateKey = words.slice(0, 2).join(" ");
+    const [exact, candidates, phraseRows] = await Promise.all([
+      indexedRows(env, "meaningExact", needle),
+      indexedRows(env, "meaningFirst", words[0]),
+      words.length > 1 ? indexedRows(env, "meaningTwoGram", candidateKey) : Promise.resolve(null),
+    ]);
+    const exactRows = new Set(exact);
+    const phraseSet = phraseRows ? new Set(phraseRows) : null;
+    const matches = [];
+    for (const row of candidates) {
+      if (exactRows.has(row)) continue;
+      if (phraseSet && !phraseSet.has(row)) continue;
+      if (words.length <= 2 || recordHasWholeWords(records[row], ["meaning"], needle)) matches.push(row);
+    }
+    return exact.concat(matches);
   }
   const needle = toTokens(normalizedQuery);
   if (!needle) return [];
@@ -2859,16 +2849,11 @@ async function prepareSearch(env, chatId, query, page = 0, messageId = undefined
   if (normalizedQuery) {
     const kind = await detectScriptKind(env, normalizedQuery);
     const isShortQuery = [...normalizedQuery.replace(/\s+/gu, "")].length <= SHORT_QUERY_MAX;
-    // Arabic: a query with the definite article behaves like the bare word
-    // ("النور" -> "نور") — the dictionary stores lemmas without ال. The
-    // original text is kept for display and callbacks; only the lookup key
-    // is stripped.
-    const searchKey = kind === "ar" ? stripDefiniteArticle(normalizedQuery) : normalizedQuery;
     if (messageId === undefined && !isShortQuery) {
-      const chain = await exactChain(env, kind, searchKey);
+      const chain = await exactChain(env, kind, normalizedQuery);
       if (chain.length) return () => sendOption(env, chatId, chain, chain[0].index, 0, undefined, chainCallback(cleanQuery), cleanQuery, true, ctx);
     }
-    const words = await prefixWords(env, kind, searchKey);
+    const words = await prefixWords(env, kind, normalizedQuery);
     if (words.length) {
       const view = renderWordSuggestions(cleanQuery, words, page);
       return () => deliver({ text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup });

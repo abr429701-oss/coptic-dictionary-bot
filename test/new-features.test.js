@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import worker, { UserStore } from "../src/index.js";
 import records from "../data/dictionary.json" with { type: "json" };
-import { deepLink, shareTextForRecord, sharePlainTextForRecord, shareButtonText, shareKeyboardForRecord, meaningInLanguage, translationInLanguage, wordStartParam, suggestSimilar, stripDefiniteArticle, levenshtein } from "../src/new-features.js";
+import { deepLink, shareTextForRecord, sharePlainTextForRecord, shareButtonText, shareKeyboardForRecord, meaningInLanguage, translationInLanguage, wordStartParam, suggestSimilar, levenshtein } from "../src/new-features.js";
 const token = "test-token";
 const secret = "test-secret-should-be-long-enough";
 const testRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -206,24 +206,6 @@ test("levenshtein (banded) matches a naive full DP on random strings", () => {
   assert.equal(levenshtein("", "", 1), 0);
   assert.equal(levenshtein("", "ab", 1), Infinity);
   assert.equal(levenshtein("abc", "abc", 0), 0);
-});
-
-// Arabic "did you mean" stems the query: a conjugated form ("أشكرك") and an
-// ال-prefixed form ("النور") must surface the bare lemma ("شكر", "نور")
-// first, instead of unrelated words at the same edit distance. Roots that
-// only look prefixed ("الله", "الذي") are never stripped.
-test("v2: Arabic did-you-mean stems conjugated and ال-prefixed words to the lemma", async () => {
-  const thanks = suggestSimilar("أشكرك", 3);
-  assert.equal(thanks[0]?.label, "شكر");
-  assert.equal(thanks[0]?.lang, "ar");
-  assert.ok(suggestSimilar("اشكرك", 3).some((s) => s.label === "شكر"), "شكر must be suggested for اشكرك");
-  const light = suggestSimilar("النور", 3);
-  assert.equal(light[0]?.label, "نور");
-  assert.ok(suggestSimilar("الشكر", 3).some((s) => s.label === "شكر"), "شكر must be suggested for الشكر");
-  assert.ok(suggestSimilar("الكتاب", 3).some((s) => s.label === "كتاب"), "كتاب must be suggested for الكتاب");
-  assert.equal(stripDefiniteArticle("الله"), "الله");
-  assert.equal(stripDefiniteArticle("الذي"), "الذي");
-  assert.equal(stripDefiniteArticle("النور الساطع"), "نور ساطع");
 });
 
 // "Did you mean" follows the closest suggestion's language, and French/German
