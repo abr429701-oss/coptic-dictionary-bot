@@ -92,7 +92,17 @@ jobs:
               git -C audio-out commit -q -m "Add word audio batch"
               git -C audio-out push -q "$REMOTE" HEAD:refs/heads/audio
             fi
-            node scripts/sync_audio_sheet.mjs audio-out/audio-index.json
+            # The sheet sync is a single Apps Script call and its network can
+            # time out (ETIMEDOUT) even while generation works fine. Retry it
+            # instead of killing the whole run: the full sync runs again in
+            # the "Update effective audio links" step at the end.
+            SYNC_OK=0
+            for ATTEMPT in 1 2 3; do
+              if node scripts/sync_audio_sheet.mjs audio-out/audio-index.json; then SYNC_OK=1; break; fi
+              echo "Audio sheet sync failed (attempt $ATTEMPT/3), retrying in 30s..."
+              sleep 30
+            done
+            if [ "$SYNC_OK" != "1" ]; then echo "::warning::Audio sheet sync failed after 3 attempts, continuing with the next batch"; fi
             if [ "$FATAL" = "1" ]; then echo "::error::generator stopped on a fatal error"; exit 1; fi
             if [ "$TOTAL" -le "$BATCH" ]; then echo "All words are done."; FINISHED=1; break; fi
           done
