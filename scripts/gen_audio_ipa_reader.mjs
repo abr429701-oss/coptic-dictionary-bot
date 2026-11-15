@@ -1,6 +1,8 @@
 // Generate dictionary audio by using ipa-reader.com itself.
 // The site selects Amazon Polly anonymously, with VoiceId Miguel and IPA input.
 // No AWS account, AWS keys, or paid API credentials are needed in this workflow.
+// Words whose Coptic spelling contains ϣ (Shai) are built with VoiceId Salli
+// [US English] instead (see IPA_VOICE_SHI below).
 // Usage: node scripts/gen_audio_ipa_reader.mjs <outDir> [limit]
 
 import { createHash } from "node:crypto";
@@ -17,6 +19,13 @@ import { SINGLE_WORD_MARKER } from "../src/ogg-repeat.js";
 const run = promisify(execFile);
 const SITE = "https://ipa-reader.com/";
 const VOICE = process.env.IPA_VOICE ?? "Miguel";
+// Voice for words whose Coptic spelling contains ϣ (Shai). Salli is the
+// site's own default voice (US English, standard Polly engine).
+const SHI_VOICE = process.env.IPA_VOICE_SHI ?? "Salli";
+const SHI_LETTER = "ϣ";
+function voiceForRecord(record) {
+  return String(record?.coptic ?? "").includes(SHI_LETTER) ? SHI_VOICE : VOICE;
+}
 const RATE = Number(process.env.IPA_SLOW_FACTOR ?? 0.75);
 const REPEATS = Math.max(1, Number(process.env.IPA_REPEATS ?? 3));
 const BREAK_MS = Math.max(0, Number(process.env.IPA_BREAK_MS ?? 700));
@@ -52,10 +61,10 @@ function audioFileName(record, id) {
   const coptic = truncateUtf8(safeFilePart(record?.coptic) || "word", 96);
   return `${arabic}-${coptic}-${id}.ogg`;
 }
-function makeHash(ipa, fileName) {
+function makeHash(ipa, fileName, voice) {
   return createHash("sha1").update(JSON.stringify({
     site: SITE,
-    voice: VOICE,
+    voice,
     rate: RATE,
     repeats: REPEATS,
     breakMs: BREAK_MS,
@@ -83,19 +92,20 @@ for (const record of records) {
   const fileName = oldOutput && existsSync(oldOutput)
     ? old.fileName
     : audioFileName(record, record.id);
-  const hash = makeHash(ipa, fileName);
+  const voice = voiceForRecord(record);
+  const hash = makeHash(ipa, fileName, voice);
   if (old?.hash === hash && old?.fileName === fileName && existsSync(path.join(outDir, fileName))) continue;
-  jobsById.set(String(record.id), { id: record.id, ipa, fileName, hash });
+  jobsById.set(String(record.id), { id: record.id, ipa, fileName, hash, voice });
 }
 const jobs = [...jobsById.values()];
 const todo = jobs.slice(0, limit);
-console.log(`${todo.length} pending (of ${jobs.length}); site=${SITE}; voice=${VOICE}; slow=${RATE}; repeats=${REPEATS}; pause=${BREAK_MS}ms; workers=${WORKERS}`);
+console.log(`${todo.length} pending (of ${jobs.length}); site=${SITE}; voice=${VOICE}; shiVoice=${SHI_VOICE} (words with ϣ); slow=${RATE}; repeats=${REPEATS}; pause=${BREAK_MS}ms; workers=${WORKERS}`);
 
-async function downloadFromReader(page, ipa) {
+async function downloadFromReader(page, ipa, voice) {
   await page.goto(SITE, { waitUntil: "domcontentloaded", timeout: 60000 });
-  await page.locator(`#polly-voice option[value="${VOICE}"]`).waitFor({ state: "attached", timeout: 60000 });
+  await page.locator(`#polly-voice option[value="${voice}"]`).waitFor({ state: "attached", timeout: 60000 });
   await page.locator(".select-styled").click();
-  await page.locator(`li[rel="${VOICE}"]`).click();
+  await page.locator(`li[rel="${voice}"]`).click();
   await page.fill("#ipa-text", ipa);
   await page.click("#submit");
   const audio = page.locator("audio").last();
@@ -141,8 +151,8 @@ async function worker() {
       const job = todo[next++];
       if (!job) break;
       try {
-        console.log(`Generating ${job.id}: ${job.ipa}`);
-        const mp3 = await downloadFromReader(page, job.ipa);
+        console.log(`Generating ${job.id}: ${job.ipa} (voice=${job.voice})`);
+        const mp3 = await downloadFromReader(page, job.ipa, job.voice);
         const ogg = await toTelegramOgg(mp3, job.id);
         await writeFile(path.join(outDir, job.fileName), ogg);
         manifest[job.id] = { hash: job.hash, fileName: job.fileName };

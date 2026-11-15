@@ -1,4 +1,4 @@
-name: Build word audio (IPA Reader Miguel)
+name: Build word audio (IPA Reader Miguel + Salli)
 
 on:
   workflow_dispatch:
@@ -58,6 +58,7 @@ jobs:
         id: gen
         env:
           IPA_VOICE: Miguel
+          IPA_VOICE_SHI: Salli
           IPA_SLOW_FACTOR: "0.75"
           IPA_REPEATS: "1"
           IPA_BREAK_MS: "700"
