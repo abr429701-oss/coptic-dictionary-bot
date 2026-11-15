@@ -1424,6 +1424,50 @@ test("/voice-drive stores the Drive link of the compressed recording and needs t
   assert.equal(kvEnv.USERS.store.get(key).drive.url, "https://drive.example/new");
 });
 
+test("/export-voices lists recorded voice ids behind the shared secret", async () => {
+  const kvEnv = { ...env, USERS: fakeKv(), CALLBACK_SECRET: "cb-secret" };
+  kvEnv.USERS.store.set("voiceid:12", { fileId: "TG-12", duration: 2 });
+  kvEnv.USERS.store.set("voiceid:34", { fileId: "TG-34", duration: 3 });
+  const call = (secret) => worker.fetch(new Request(
+    `https://bot.example/export-voices${secret ? `?secret=${secret}` : ""}`,
+  ), kvEnv);
+  assert.equal((await call(null)).status, 403);
+  assert.equal((await call("wrong")).status, 403);
+  const ok = await call("cb-secret");
+  assert.equal(ok.status, 200);
+  assert.deepEqual((await ok.json()).voices, [{ id: 12 }, { id: 34 }]);
+  // No secret configured at all: also 403, never 200.
+  const noSecretEnv = { ...env, USERS: fakeKv() };
+  noSecretEnv.USERS.store.set("voiceid:12", { fileId: "TG-12", duration: 2 });
+  assert.equal((await worker.fetch(new Request("https://bot.example/export-voices?secret=cb-secret"), noSecretEnv)).status, 403);
+});
+
+test("/export-voice serves the recording bytes behind the shared secret", async () => {
+  const kvEnv = { ...env, USERS: fakeKv(), CALLBACK_SECRET: "cb-secret" };
+  kvEnv.USERS.store.set("voiceid:12", { fileId: "TG-12", duration: 2 });
+  const ogg = new Uint8Array([79, 103, 103, 83, 9, 9, 9]);
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("/getFile")) return Response.json({ ok: true, result: { file_path: "voice/file_12.oga" } });
+    if (String(url).includes("/file/bot")) return new Response(ogg, { headers: { "content-type": "audio/ogg" } });
+    return Response.json({ ok: true, result: {} });
+  };
+  try {
+    const call = (id, secret) => worker.fetch(new Request(
+      `https://bot.example/export-voice/${id}${secret ? `?secret=${secret}` : ""}`,
+    ), kvEnv);
+    assert.equal((await call(12, null)).status, 403);
+    assert.equal((await call(12, "wrong")).status, 403);
+    const ok = await call(12, "cb-secret");
+    assert.equal(ok.status, 200);
+    assert.equal(ok.headers.get("content-type"), "audio/ogg");
+    assert.deepEqual(new Uint8Array(await ok.arrayBuffer()), ogg);
+    assert.equal((await call(99, "cb-secret")).status, 404);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test("uploading runs after the reply when the platform provides waitUntil", async () => {
   const kvEnv = driveEnv();
   const { calls } = driveWorld();

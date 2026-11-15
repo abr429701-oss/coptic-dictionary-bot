@@ -4851,6 +4851,7 @@ const USAGE_PATH_LABELS = {
   webhook: "ويبهوك",
   api: "API القاموس",
   voice: "رفع صوت",
+  export: "تصدير الأصوات",
   import: "استيراد الدروس",
   setup: "إعداد",
   root: "الصفحة الرئيسية",
@@ -4867,6 +4868,7 @@ function usageKindForPath(pathname) {
   if (path === "/webhook") return "webhook";
   if (path === "/api/dictionary") return "api";
   if (path === "/voice-drive") return "voice";
+  if (path === "/export-voices" || path.startsWith("/export-voice/")) return "export";
   if (path === "/__learn-import") return "import";
   if (path === "/__setup") return "setup";
   if (path === "/") return "root";
@@ -8998,6 +9000,48 @@ export default {
         drive: { url: body.drive.url ?? null, fileId: body.drive.fileId ?? null, at: new Date().toISOString() },
       });
       return Response.json(result ?? { ok: true });
+    }
+
+    // One-off admin migration tool for the WhatsApp port (2026-11-15):
+    // exports the admin-recorded human voices (stored in the Durable
+    // Object as voiceid:<wordId>) so they can be downloaded and served
+    // by the WhatsApp bot, where Telegram file_ids are not portable.
+    // Guarded by CALLBACK_SECRET as a ?secret= query param; the secret,
+    // file ids and bytes are never logged. Remove these routes once the
+    // migration is done.
+    if (request.method === "GET" && url.pathname === "/export-voices") {
+      if (!env.CALLBACK_SECRET || !sameSecret(url.searchParams.get("secret") ?? "", env.CALLBACK_SECRET)) {
+        return Response.json({ ok: false }, { status: 403 });
+      }
+      const result = await storeCall(env, { op: "voiceIds" });
+      const voices = (Array.isArray(result?.ids) ? result.ids : [])
+        .map((id) => ({ id: Number(id) }))
+        .filter((entry) => Number.isFinite(entry.id));
+      return Response.json({ ok: true, voices });
+    }
+    const exportVoice = /^\/export-voice\/(\d+)$/u.exec(url.pathname);
+    if (request.method === "GET" && exportVoice) {
+      if (!env.CALLBACK_SECRET || !sameSecret(url.searchParams.get("secret") ?? "", env.CALLBACK_SECRET)) {
+        return Response.json({ ok: false }, { status: 403 });
+      }
+      const id = Number(exportVoice[1]);
+      const files = await storeCall(env, { op: "voiceFiles", ids: [id] });
+      const fileId = files?.files?.[String(id)] ?? null;
+      if (!fileId) return Response.json({ ok: false, error: "not-found" }, { status: 404 });
+      const info = await telegram(env, "getFile", { file_id: fileId });
+      const filePath = info?.ok ? info.result?.file_path : null;
+      if (!filePath) return Response.json({ ok: false, error: "unavailable" }, { status: 502 });
+      let upstream;
+      try {
+        upstream = await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${filePath}`, { signal: AbortSignal.timeout(30000) });
+      } catch {
+        return Response.json({ ok: false, error: "unavailable" }, { status: 502 });
+      }
+      if (!upstream.ok) return Response.json({ ok: false, error: "unavailable" }, { status: 502 });
+      const headers = new Headers();
+      headers.set("content-type", "audio/ogg");
+      headers.set("content-disposition", `attachment; filename="${id}.ogg"`);
+      return new Response(upstream.body, { headers });
     }
 
     if (request.method === "POST" && url.pathname === "/__learn-import") {
