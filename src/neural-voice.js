@@ -15,12 +15,6 @@ import { isSingleWordOgg, repeatSingleWordOgg } from "./ogg-repeat.js";
 export { isSingleWordOgg };
 import audioManifest from "../data/audio-manifest.json" with { type: "json" };
 import audioVersions from "../data/audio-versions.json" with { type: "json" };
-// Admin-recorded human voices: word id -> file name. The recordings live in
-// Telegram as file_ids (DO voice:<id>) and as local files in the WhatsApp
-// port's data/recorded-voices/; this snapshot is the URL-addressable index
-// for them. Update it when the admin records a new word (same export step
-// that drops the .ogg into the WhatsApp port's recorded dir).
-import recordedVoices from "../data/recorded-voices.json" with { type: "json" };
 
 export const NEURAL_VOICE_VERSION = "ipa-miguel-salli-once-v1";
 // Bump this whenever the external human-audio files are regenerated. This
@@ -337,39 +331,12 @@ export const audioUrl = (env, id, { bust = false } = {}) => {
   ).replace(/\/+$/u, "")}/${encodeURIComponent(fileName)}${bust && audioVersion(id) ? `?v=${audioVersion(id)}` : ""}`;
 };
 
-// Messenger voice: only words with a prebuilt file on the audio branch get a
+// Prebuilt voice: only words with a prebuilt file on the audio branch get a
 // voice attachment (the file is served by URL, never synthesized live). Null
 // when the manifest has no entry for the word.
 export const prebuiltAudioUrl = (env, id) => {
   if (id == null || !Object.hasOwn(audioManifest, String(id))) return null;
   return audioUrl(env, id, { bust: true });
-};
-
-// Admin-recorded human voice, URL form. The recordings have NO public URL
-// today — Telegram serves them by file_id, the WhatsApp port from local
-// disk — so this tier applies only once the files are hosted and
-// RECORDED_AUDIO_BASE_URL is set (the R2 public bucket is the intended
-// host; the deploy token currently lacks R2 Edit, so nothing is hosted
-// yet). Without the base this returns null, never a dead URL: a word with
-// a recording but no host falls through to its prebuilt voice.
-export const recordedAudioUrl = (env, id) => {
-  if (id == null || !Object.hasOwn(recordedVoices, String(id))) return null;
-  const base = env?.RECORDED_AUDIO_BASE_URL;
-  if (!base) return null;
-  return `${String(base).replace(/\/+$/u, "")}/${encodeURIComponent(recordedVoices[String(id)])}`;
-};
-
-// Messenger voice resolution — Telegram's prepareWordVoice priority, URL
-// form: recorded human first, then prebuilt Polly (Miguel/Salli), then
-// Joanna (audio-human branch) only when HUMAN_AUDIO is on and there is no
-// prebuilt file. In practice the prebuilt manifest covers every record
-// that has an id, so the Joanna tier only fires for ids outside the
-// dictionary. Null when the word has no voice at all.
-export const messengerVoiceUrl = (env, record) => {
-  if (!record || record.id == null) return null;
-  return recordedAudioUrl(env, record.id)
-    ?? prebuiltAudioUrl(env, record.id)
-    ?? (humanAudioEnabled(env) ? humanAudioUrl(env, record.id) : null);
 };
 
 // -----------------------------------------------------------------------------
