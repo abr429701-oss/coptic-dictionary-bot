@@ -13,13 +13,29 @@
 // Rules carried over from the WhatsApp port (hard-won, do not re-litigate):
 // - Quick replies are a supplement only: the full text list is always sent.
 // - Text goes first, voice second, as two separate messages: an audio
-//   message cannot carry the word card.
+//   message cannot carry the word card. The voice goes out 3× with 700ms
+//   gaps (Telegram's rule), the repeats reusing Meta's attachment_id.
+// - A list's quick replies live on the Page's LATEST message, so the list
+//   (with its quick replies) is always the last message of its turn:
+//   nothing is ever sent after a list in the same turn.
 // - Secrets (App Secret, Page Token, verify token) are never logged.
 
 export const MESSENGER_SEND_URL = "https://graph.facebook.com/v21.0/me/messages";
 export const MESSENGER_PICK_PREFIX = "pick|";
 export const MESSENGER_QUICK_REPLY_MAX = 13; // Meta's limit per message
 export const MESSENGER_QUICK_REPLY_TITLE_MAX = 20; // Meta's limit, in characters
+// Telegram plays the word 3× with 700ms gaps (one repeated OGG); Messenger
+// has no in-message repeat, so the audio message itself goes out 3×.
+export const MESSENGER_VOICE_REPEATS = 3;
+export const MESSENGER_VOICE_REPEAT_GAP_MS = 700;
+// A send slower than this gets ONE warn line (diagnosis, not noise): the
+// user reports the voice arriving very late, and a slow audio send is
+// Meta fetching the file from GitHub raw on every send.
+export const MESSENGER_SLOW_SEND_MS = 3000;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 // -----------------------------------------------------------------------------
 // Signature verification (X-Hub-Signature-256)
@@ -129,18 +145,46 @@ export function messengerAudioMessage(audioUrl) {
   };
 }
 
+// Generic media attachment by public URL (lesson photo/video from R2):
+// the same shape as the audio message, with the caller's attachment type.
+export function messengerAttachmentMessage(type, url) {
+  const safeType = ["image", "video", "audio"].includes(type) ? type : "image";
+  return {
+    attachment: {
+      type: safeType,
+      payload: { url: String(url), is_reusable: true },
+    },
+  };
+}
+
+// Audio by Meta's reusable attachment id (returned when a send used
+// is_reusable): sending by id never makes Meta re-fetch the file.
+export function messengerAudioIdMessage(attachmentId) {
+  return {
+    attachment: {
+      type: "audio",
+      payload: { attachment_id: String(attachmentId) },
+    },
+  };
+}
+
 // -----------------------------------------------------------------------------
 // Send API
 // -----------------------------------------------------------------------------
 
 // POST https://graph.facebook.com/v21.0/me/messages with the Page token.
-// Returns { ok, messageId } on success, { ok: false, error } otherwise.
-// The token is never logged; failures log only the HTTP status and Meta's
-// error message (which contains no secret).
+// Returns { ok, messageId, attachmentId } on success, { ok: false, error }
+// otherwise. attachmentId is Meta's reusable id for the sent asset (only
+// present when the send used is_reusable); the caller reuses it so Meta
+// does not re-fetch the file. The token is never logged; failures log only
+// the HTTP status and Meta's error message (which contains no secret).
+// A send slower than MESSENGER_SLOW_SEND_MS logs one warn line with its
+// duration — the voice-delay diagnostic — and nothing else.
 export async function sendMessengerMessage(env, recipientId, message, fetchImpl = globalThis.fetch) {
   const token = env?.MESSENGER_PAGE_TOKEN;
   if (!token) return { ok: false, error: "missing-page-token" };
   let response;
+  const started = Date.now();
   try {
     response = await fetchImpl(MESSENGER_SEND_URL, {
       method: "POST",
@@ -168,6 +212,58 @@ export async function sendMessengerMessage(env, recipientId, message, fetchImpl 
     console.error("Messenger send failed", response.status, result?.error?.message ?? "unknown");
     return { ok: false, error: result?.error?.message ?? `http-${response.status}` };
   }
+  const elapsedMs = Date.now() - started;
+  if (elapsedMs > MESSENGER_SLOW_SEND_MS) {
+    console.warn(`Messenger slow send (${elapsedMs}ms, ${message?.attachment?.type ?? "text"})`);
+  }
+  return { ok: true, messageId: result.message_id, attachmentId: result.attachment_id ?? null, recipientId: result.recipient_id ?? String(recipientId) };
+}
+
+// Multipart photo upload (a ready certificate arrives as bytes, not a URL):
+// POST the same Send API endpoint with recipient + message as JSON fields
+// and the bytes as `filedata`. Meta answers the same { message_id } shape.
+// Returns { ok, messageId } on success, { ok: false, error } otherwise.
+export async function sendMessengerPhotoBytes(env, recipientId, photoBytes, fetchImpl = globalThis.fetch) {
+  const token = env?.MESSENGER_PAGE_TOKEN;
+  if (!token) return { ok: false, error: "missing-page-token" };
+  const bytes = photoBytes?.bytes;
+  if (!bytes || (typeof bytes === "object" && "length" in bytes && bytes.length === 0)) {
+    return { ok: false, error: "missing-bytes" };
+  }
+  const form = new FormData();
+  form.append("recipient", JSON.stringify({ id: String(recipientId) }));
+  form.append("message", JSON.stringify({ attachment: { type: "image", payload: {} } }));
+  form.append(
+    "filedata",
+    new Blob([bytes], { type: photoBytes.contentType || "image/png" }),
+    photoBytes.fileName || "image.png",
+  );
+  let response;
+  const started = Date.now();
+  try {
+    response = await fetchImpl(MESSENGER_SEND_URL, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+      body: form,
+    });
+  } catch (error) {
+    console.error("Messenger photo send failed (network)", error instanceof Error ? error.message : "unknown");
+    return { ok: false, error: "network" };
+  }
+  let result = null;
+  try {
+    result = await response.json();
+  } catch {
+    /* Meta answers JSON; a non-JSON body is a failure */
+  }
+  if (!response.ok || !result?.message_id) {
+    console.error("Messenger photo send failed", response.status, result?.error?.message ?? "unknown");
+    return { ok: false, error: result?.error?.message ?? `http-${response.status}` };
+  }
+  const elapsedMs = Date.now() - started;
+  if (elapsedMs > MESSENGER_SLOW_SEND_MS) {
+    console.warn(`Messenger slow send (${elapsedMs}ms, image-upload)`);
+  }
   return { ok: true, messageId: result.message_id, recipientId: result.recipient_id ?? String(recipientId) };
 }
 
@@ -175,11 +271,27 @@ export async function sendMessengerMessage(env, recipientId, message, fetchImpl 
 // Event handling
 // -----------------------------------------------------------------------------
 
-// One messaging event. planFor.text(query) / planFor.pick(recordIndex) return
-// a plan { texts: [{ text, quickReplies }], voiceUrl } or null to stay
-// silent. Texts go out in order first, then the voice attachment (text
-// before voice — the WhatsApp port's proven order). Returns true when at
-// least one message was sent.
+// One messaging event. planFor.text(query, senderId) /
+// planFor.pick(indexOrPayload, senderId) return a plan
+// { texts: [{ text, quickReplies }], voiceUrl, attachments?, photoBytes?, task? }
+// or null to stay silent. planFor.pick receives a record index for a
+// `pick|<index>` quick reply, or the raw payload string for a parity quick
+// reply (`learn|...` / `cert|...` / `admin|...`) — the owning agent routes
+// by prefix. planFor.executeTask?.(task, senderId, fetchImpl) runs a plan's
+// side effect (broadcast, DM, import job) after the reply is sent; the
+// transport never invents a task.
+// Send order per plan: attachments (lesson media by URL) first, then a
+// photo upload, then the texts in order, then the voice attachment, sent
+// MESSENGER_VOICE_REPEATS times with MESSENGER_VOICE_REPEAT_GAP_MS gaps
+// (text before voice — the WhatsApp port's proven order; the 3× repeat is
+// Telegram's rule, where one repeated OGG plays 3×). The first voice send
+// is by URL; when Meta returns a reusable attachment_id for it, the
+// repeats send by id so Meta does not re-fetch the file from GitHub twice
+// more. A failed voice send never blocks the remaining repeats. The last
+// text carries the quick replies, and nothing is ever sent after it in the
+// same turn — except the voice, so a plan must not combine quick replies
+// with a voice (no current plan does: word cards carry no replies, menus
+// carry no voice). Returns true when at least one message was sent.
 export async function handleMessengerMessaging(env, event, planFor, fetchImpl = globalThis.fetch) {
   const message = event?.message;
   if (!message || message.is_echo) return false;
@@ -190,9 +302,12 @@ export async function handleMessengerMessaging(env, event, planFor, fetchImpl = 
     const payload = message.quick_reply?.payload;
     if (typeof payload === "string" && payload.startsWith(MESSENGER_PICK_PREFIX)) {
       const index = Number(payload.slice(MESSENGER_PICK_PREFIX.length));
-      plan = Number.isInteger(index) && index >= 0 ? await planFor.pick(index) : null;
+      plan = Number.isInteger(index) && index >= 0 ? await planFor.pick(index, senderId) : null;
+    } else if (typeof payload === "string" && payload) {
+      // A parity quick reply: route the raw payload to the owning agent.
+      plan = await planFor.pick(payload, senderId);
     } else if (typeof message.text === "string" && message.text.trim()) {
-      plan = await planFor.text(message.text);
+      plan = await planFor.text(message.text, senderId);
     }
   } catch (error) {
     console.error("Messenger plan failed", error instanceof Error ? error.message : "unknown");
@@ -200,13 +315,39 @@ export async function handleMessengerMessaging(env, event, planFor, fetchImpl = 
   }
   if (!plan) return false;
   let sent = false;
+  for (const attachment of plan.attachments ?? []) {
+    if (!attachment?.url) continue;
+    const result = await sendMessengerMessage(env, senderId, messengerAttachmentMessage(attachment.type ?? "image", attachment.url), fetchImpl);
+    if (result.ok) sent = true;
+  }
+  if (plan.photoBytes) {
+    const result = await sendMessengerPhotoBytes(env, senderId, plan.photoBytes, fetchImpl);
+    if (result.ok) sent = true;
+  }
   for (const item of plan.texts ?? []) {
     const result = await sendMessengerMessage(env, senderId, messengerTextMessage(item.text, item.quickReplies), fetchImpl);
     if (result.ok) sent = true;
   }
   if (plan.voiceUrl) {
-    const result = await sendMessengerMessage(env, senderId, messengerAudioMessage(plan.voiceUrl), fetchImpl);
-    if (result.ok) sent = true;
+    let attachmentId = null;
+    for (let attempt = 0; attempt < MESSENGER_VOICE_REPEATS; attempt += 1) {
+      if (attempt > 0) await sleep(MESSENGER_VOICE_REPEAT_GAP_MS);
+      const audioMessage = attachmentId
+        ? messengerAudioIdMessage(attachmentId)
+        : messengerAudioMessage(plan.voiceUrl);
+      const result = await sendMessengerMessage(env, senderId, audioMessage, fetchImpl);
+      if (result.ok) {
+        sent = true;
+        if (result.attachmentId) attachmentId = result.attachmentId;
+      }
+    }
+  }
+  if (plan.task && typeof planFor.executeTask === "function") {
+    try {
+      await planFor.executeTask(plan.task, senderId, fetchImpl);
+    } catch (error) {
+      console.error("Messenger task failed", error instanceof Error ? error.message : "unknown");
+    }
   }
   return sent;
 }

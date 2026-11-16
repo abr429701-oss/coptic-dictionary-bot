@@ -1322,7 +1322,7 @@ function lazy(build) {
 }
 
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
-import { audioUrl, audioVersion, prebuiltAudioUrl, fetchHumanSpeech, fetchPrebuiltSpeech, isSingleWordOgg, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
+import { audioUrl, audioVersion, prebuiltAudioUrl, messengerVoiceUrl, fetchHumanSpeech, fetchPrebuiltSpeech, isSingleWordOgg, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 import { copticDateNow, alphabetText, letterStatsText, longestText, originsText, wordCountText, startsWithText, similarText, translateText, vocabText, startGuess, handleGuessReply } from "./features.js";
 import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, suggestSimilar, helpText, retentionText, opsText, recordById, levenshtein } from "./new-features.js";
 import { lookupCertificate, parseCertCsv } from "./certificates.js";
@@ -1331,7 +1331,8 @@ import { getCodeFromMacro, buildGetCodeReply, buildGetCodeWhatsAppUrl, normalize
 import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VIDEO_MENU_ID, cleanMenuTitle, cleanMenuText, cleanButtonLabel, cleanUrl, cleanCommand, normalizeMenus, findMenu, findButton, rootMenus, descendantMenuIds, menuOpenText, menuAdminListText, menuAdminDetailText, parseMenuTarget, parseButtonTarget, addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton, ensureVideoMenu } from "./menu-builder.js";
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 import { getHiddenUi, setHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
-import { verifyMessengerSignature, handleMessengerWebhookBody, plainTextCard, buildQuickReplies, MESSENGER_PICK_PREFIX } from "./messenger.js";
+import { verifyMessengerSignature, handleMessengerWebhookBody, plainTextCard, buildQuickReplies, sendMessengerMessage, messengerTextMessage, MESSENGER_PICK_PREFIX } from "./messenger.js";
+import { createMessengerParity, MESSENGER_PARITY_PAYLOAD_PREFIXES } from "./messenger-parity.js";
 import { LEARN_LEVELS } from "./learn-manifest.js";
 import { LEARN_IMPORT_KEY, LEARN_GET_CODE_TEXT, learnUploadItems, emptyImportState, normalizeImportState, importProgress, learnPendingItems, learnManifestHash, isImportStateTrusted, findLearnLesson, learnLessonSendPlan, buildLearnMenus, mergeMenus, uploadLearnFile, runImportUploads, parseImportLearnArg, learnImportStartText, learnProgressText } from "./learn-import.js";
 
@@ -8850,6 +8851,88 @@ async function fetchLiveExamPattern(formId) {
   return entry;
 }
 
+// ---------------------------------------------------------------------------
+// Messenger task execution (src/messenger-parity.js returns plans with a
+// `task` side effect; the transport runs it after the reply is sent).
+// Only Messenger users (stored as `msgr:<PSID>`) can receive a Page
+// message: Telegram numeric ids are not Page-scoped ids and Meta rejects
+// them, so broadcast recipients are filtered to `msgr:` ids, blocked
+// users skipped. Job tasks (sync/import/rebuild) have no Messenger entry
+// point — they already run automatically (30-min Sheet sync + 5-min
+// tick) and their manual triggers live in the Telegram bot — except
+// /importlearn, which reuses the Telegram-side handler (lock-protected;
+// progress goes to the Telegram admin, the same human).
+// ---------------------------------------------------------------------------
+
+const MESSENGER_BROADCAST_GAP_MS = 2000;
+const MESSENGER_BROADCAST_MAX_FAILURES = 5;
+
+async function messengerBroadcastRecipients(env) {
+  const out = [];
+  if (!env.USERS) return out;
+  let cursor = null;
+  for (;;) {
+    const page = await storeCall(env, { op: "userpage", limit: 200, ...(cursor ? { cursor } : {}) }).catch(() => null);
+    if (!page) break;
+    for (const { id, record } of page.users ?? []) {
+      if (!String(id).startsWith("msgr:")) continue;
+      if (record?.blocked) continue;
+      out.push(String(id).slice("msgr:".length));
+    }
+    cursor = page.next;
+    if (!cursor) break;
+  }
+  return out;
+}
+
+export async function executeMessengerTask(env, task, from, fetchImpl = globalThis.fetch, { gapMs = MESSENGER_BROADCAST_GAP_MS, ctx } = {}) {
+  const sendText = (to, text) => sendMessengerMessage(env, to, messengerTextMessage(text), fetchImpl);
+  const type = task?.type;
+  if (type === "send-dm") {
+    if (!task.to || !task.text) return false;
+    return (await sendText(task.to, task.text)).ok;
+  }
+  if (type === "test-broadcast") {
+    return (await sendText(task.from ?? from, task.text ?? "رسالة تجريبية من البث.")).ok;
+  }
+  if (type === "broadcast") {
+    const control = await broadcastControlState(env).catch(() => ({ paused: false }));
+    if (control?.paused) {
+      await sendText(from, "⏸️ البث متوقف مؤقتًا (استخدم /bcresume لاستئنافه).");
+      return false;
+    }
+    const recipients = await messengerBroadcastRecipients(env);
+    let sent = 0;
+    let consecutiveFailures = 0;
+    for (const psid of recipients) {
+      if (consecutiveFailures >= MESSENGER_BROADCAST_MAX_FAILURES) break;
+      if (sent > 0 && gapMs > 0) await new Promise((resolve) => setTimeout(resolve, gapMs));
+      const result = await sendText(psid, task.text);
+      if (result.ok) {
+        sent += 1;
+        consecutiveFailures = 0;
+      } else {
+        consecutiveFailures += 1;
+      }
+    }
+    await sendText(from, `📢 تم إرسال البث إلى ${sent} من ${recipients.length}.`);
+    return true;
+  }
+  if (type === "importlearn") {
+    try {
+      await handleImportLearn(env, DEFAULT_ADMIN_IDS, DEFAULT_ADMIN_IDS, "/importlearn", ctx);
+    } catch (error) {
+      console.error("Messenger importlearn failed", error instanceof Error ? error.message : "unknown");
+      await sendText(from, "❌ تعذّر بدء الاستيراد. جرّب من بوت تيليجرام.");
+      return false;
+    }
+    await sendText(from, "⏳ بدأ استيراد الدروس — تابع التقدم في بوت تيليجرام.");
+    return true;
+  }
+  await sendText(from, `ℹ️ مهمة /${type} تُشغَّل من بوت تيليجرام (وتعمل تلقائيًا كل 30 دقيقة أيضًا).`);
+  return false;
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -9090,59 +9173,340 @@ export default {
     // MESSENGER_PAGE_TOKEN) are unset. Secrets are never logged.
     // ========================================================================
     const MESSENGER_WELCOME_TEXT = "📖 القاموس القبطي — ابعت أي كلمة بالقبطي أو العربي أو الإنجليزي أو الفرنسي أو الألماني، وأنا أجيب معناها ونطقها.";
+    // Search lists show ALL matches on one page (WhatsApp MAX_MATCHES).
+    const MESSENGER_SEARCH_LIMIT = 200;
+    // Meta caps one text message at 2000 characters; a long list splits
+    // into several text messages instead of dropping results.
+    const MESSENGER_TEXT_MAX = 2000;
+    // A numbered list stays pickable for 10 minutes (WhatsApp LIST_TTL_MS).
+    const MESSENGER_LAST_LIST_TTL_MS = 10 * 60 * 1000;
+    // WhatsApp's pick instruction: above the items, directly under the
+    // title — never below the list. Bare-number picks work (see below),
+    // so this line is true; quick replies stay the tap path.
+    const MESSENGER_PICK_INSTRUCTION = "أرسل رقمًا للاختيار.";
 
-    // One word card as plain text, plus its prebuilt voice URL when the word
-    // has one (null when it does not — the voice step is then skipped).
+    // Arabic-Indic / Eastern Arabic-Indic / fullwidth digits, folded to
+    // ASCII before any number is parsed (WhatsApp digits.js): an Arabic
+    // keyboard types "٢", not "2".
+    const MESSENGER_DIGIT_FOLD = (() => {
+      const map = {};
+      for (let i = 0; i <= 9; i += 1) {
+        map[String.fromCharCode(0x660 + i)] = String(i);
+        map[String.fromCharCode(0x6f0 + i)] = String(i);
+        map[String.fromCharCode(0xff10 + i)] = String(i);
+      }
+      return map;
+    })();
+    function messengerNormalizeDigits(value) {
+      return String(value ?? "").replace(/[٠-٩۰-۹０-９]/gu, (ch) => MESSENGER_DIGIT_FOLD[ch] ?? ch);
+    }
+
+    // -- Messenger parity wiring (src/messenger-parity.js) -----------------
+    // Learn / certs / get-code / admin run in that module; this section
+    // only connects it to the live sources Telegram already uses. Parity
+    // per-user state lives in the same UserStore record Telegram uses,
+    // keyed `msgr:<PSID>` (never a bare PSID: a Messenger id must not
+    // collide with a Telegram numeric id), with the parity fields under
+    // `.parity`. menuListAt stamps when the live menu was sent, so a bare
+    // number can be routed to whichever list (parity menu vs dictionary
+    // list) was sent most recently — see planFor below.
+    async function messengerParityLoadState(env, psid) {
+      try {
+        return (await getUser(env, `msgr:${psid}`))?.parity ?? {};
+      } catch {
+        return {};
+      }
+    }
+    async function messengerParitySaveState(env, psid, next) {
+      const stamped = { ...next };
+      if (next.menuList) stamped.menuListAt = Date.now();
+      else delete stamped.menuListAt;
+      try {
+        const u = (await getUser(env, `msgr:${psid}`)) ?? {};
+        await saveUser(env, `msgr:${psid}`, { ...u, parity: stamped });
+      } catch {
+        /* state loss degrades to "ask again", never to a crash */
+      }
+    }
+
+    // Messenger users only (keys `user:msgr:<PSID>`), bare PSIDs for
+    // display: Telegram users belong to the Telegram /users, and a
+    // Telegram numeric id is not a Page-scoped id — messaging it from
+    // Messenger would fail, and banning it from here would be wrong.
+    async function messengerListUsers(env, { limit = 60, query } = {}) {
+      const page = await storeCall(env, { op: "userpage", limit }).catch(() => null);
+      const bans = await bannedSet(env).catch(() => ({}));
+      const q = normalize(String(query ?? "").trim());
+      const users = (page?.users ?? [])
+        .filter(({ id }) => String(id).startsWith("msgr:"))
+        .map(({ id, record }) => ({
+          id: String(id).slice("msgr:".length),
+          name: record?.name ?? record?.tgName ?? null,
+          username: record?.username ?? null,
+          blocked: Boolean(bans[String(id).slice("msgr:".length)] || record?.blocked),
+        }))
+        .filter((u) => !q || normalize(`${u.name ?? ""} ${u.username ?? ""} ${u.id}`).includes(q));
+      const total = ((await storeCall(env, { op: "get", key: "users:total" }).catch(() => null))?.value ?? null);
+      return { users, total: typeof total === "number" ? total : users.length };
+    }
+
+    // Admin stats from the real sources (no dedicated search counter
+    // exists: searchesToday is deliberately left unset — the usage
+    // counter counts Worker requests, and the poller path is 0 requests,
+    // so it would undercount searches badly; the module renders "—").
+    async function messengerParityStats(env) {
+      const out = { recordCount: records.length, status: "يعمل" };
+      try {
+        const report = await readAnalyticsReport(env);
+        out.totalSearches = report.searches ?? 0;
+        out.topWords = (report.topWords ?? []).map(([word, count]) => ({ word, count }));
+      } catch { /* analytics unavailable: fields stay unset ("—") */ }
+      try {
+        out.misses = ((await readMisses(env)) ?? []).map(([word, count]) => ({ word, count }));
+      } catch { /* leave unset */ }
+      try {
+        const total = ((await storeCall(env, { op: "get", key: "users:total" })).value ?? null);
+        if (typeof total === "number") out.users = total;
+      } catch { /* leave unset */ }
+      try {
+        out.bans = Object.keys(await bannedSet(env)).length;
+      } catch { /* leave unset */ }
+      try {
+        const page = await storeCall(env, { op: "userpage", limit: 200 });
+        out.topUsers = (page.users ?? [])
+          .map(({ id, record }) => ({ id: String(id).replace(/^msgr:/u, ""), name: record?.name ?? record?.tgName ?? null, searches: Number(record?.searches ?? record?.searchCount ?? 0) }))
+          .filter((u) => u.searches > 0)
+          .sort((a, b) => b.searches - a.searches)
+          .slice(0, 20);
+      } catch { /* leave unset */ }
+      try {
+        const voiceIds = env.USERS ? new Set((await storeCall(env, { op: "voiceIds" })).ids ?? []) : new Set();
+        const ds = dictionaryStats(voiceIds);
+        out.voicedWords = ds.withVoice;
+        out.emptyMeaning = records.filter((r) => !r._deleted && !String(r.meaning ?? "").trim()).length;
+      } catch { /* leave unset */ }
+      return out;
+    }
+
+    async function messengerParityUsage(env) {
+      if (!env.USERS) return null;
+      const report = await storeCall(env, { op: "usageReport", limit: 8 }).catch(() => null);
+      if (!report) return null;
+      const today = utcDay();
+      const row = (report.days ?? []).find((d) => d.day === today);
+      const total = (report.days ?? []).reduce((n, d) => n + Number(d.count ?? 0), 0);
+      return { today: row?.count ?? 0, total, limit: DAILY_REQUEST_LIMIT };
+    }
+
+    async function messengerDictAudit(env) {
+      const dups = findDuplicates();
+      const voiceIds = env.USERS ? new Set((await storeCall(env, { op: "voiceIds" })).ids ?? []) : new Set();
+      const ds = dictionaryStats(voiceIds);
+      return {
+        duplicateWords: dups.flatMap((g) => g.map((x) => x.coptic)).slice(0, 15),
+        emptyWords: records.filter((r) => !r._deleted && !String(r.meaning ?? "").trim()).map((r) => r.coptic).slice(0, 15),
+        duplicates: dups.length,
+        emptyMeaning: records.filter((r) => !r._deleted && !String(r.meaning ?? "").trim()).length,
+        voicedWords: ds.withVoice,
+        recordCount: ds.total,
+      };
+    }
+
+    // Bans keyed by bare PSID (the parity module's identifier), with the
+    // blocked flag on the `msgr:` user record — NOT the shared banUser/
+    // unbanUser, which key Telegram-style user records (`user:<id>`) and
+    // would leave a phantom record under the bare PSID. Temp bans set
+    // `until`; the shared isBanned() check lifts them on first sight.
+    async function messengerParityBanUser(env, psid, opts) {
+      const set = await bannedSet(env);
+      const entry = { at: new Date().toISOString(), reason: String(opts?.reason ?? "").slice(0, 120) };
+      const hours = Number(opts?.hours ?? 0);
+      if (Number.isFinite(hours) && hours > 0) entry.until = new Date(Date.now() + hours * 3600 * 1000).toISOString();
+      set[String(psid)] = entry;
+      if (env.USERS) await storeCall(env, { op: "put", key: "bans:list", value: set });
+      invalidateCache(bansCache);
+      const u = (await getUser(env, `msgr:${psid}`)) ?? {};
+      await saveUser(env, `msgr:${psid}`, { ...u, blocked: true, bannedAt: entry.at });
+      return true;
+    }
+    async function messengerParityUnbanUser(env, psid) {
+      const set = await bannedSet(env);
+      delete set[String(psid)];
+      if (env.USERS) await storeCall(env, { op: "put", key: "bans:list", value: set });
+      invalidateCache(bansCache);
+      const u = (await getUser(env, `msgr:${psid}`)) ?? {};
+      if (u && ("blocked" in u || "bannedAt" in u)) {
+        const { blocked, blockedReason, bannedAt, ...rest } = u;
+        await saveUser(env, `msgr:${psid}`, rest);
+      }
+      return true;
+    }
+
+    // The sender's last numbered list (PSID -> record indices, in displayed
+    // order), kept in the existing UserStore Durable Object via the same
+    // storeCall get/put pattern the rest of the bot uses — no second store.
+    // A bare number picks from it; without it a number is just a search.
+    // The key is namespaced so a Messenger PSID can never collide with a
+    // Telegram user id. A storage failure never breaks the reply: the list
+    // text is already on its way, only the number pick is lost.
+    function messengerLastListKey(psid) {
+      return `messenger:lastlist:${String(psid)}`;
+    }
+    async function getMessengerLastList(env, psid) {
+      if (!env?.USERS || psid == null) return null;
+      try {
+        const stored = (await storeCall(env, { op: "get", key: messengerLastListKey(psid) })).value;
+        if (!stored || !Array.isArray(stored.indices) || !stored.indices.length) return null;
+        if (Date.now() - Number(stored.at ?? 0) > MESSENGER_LAST_LIST_TTL_MS) return null;
+        return stored;
+      } catch {
+        return null;
+      }
+    }
+    async function setMessengerLastList(env, psid, indices) {
+      if (!env?.USERS || psid == null) return;
+      try {
+        await storeCall(env, { op: "put", key: messengerLastListKey(psid), value: { indices: [...indices], at: Date.now() } });
+      } catch (error) {
+        console.error("Messenger last-list save failed", error instanceof Error ? error.message : "unknown");
+      }
+    }
+
+    // Word-only labels (WhatsApp rule): the shared suggestionLabel returns
+    // the WHOLE translation field for Latin/Greek queries, so Messenger
+    // takes its first segment only — "fill with water", not
+    // "fill with water, water, draw water". Arabic/Coptic labels are
+    // already one word/part and pass through untouched.
+    function messengerSuggestionLabel(record, normalizedQuery) {
+      const label = suggestionLabel(record, normalizedQuery);
+      const kind = scriptKind(normalizedQuery);
+      if (kind === "ar" || kind === "cop") return label;
+      return String(label).split(/[,/،]/u)[0]?.trim() || label;
+    }
+
+    // Labels starting with the query come first (WhatsApp search(): a
+    // stable partition, tier order kept inside each group) — the list
+    // starts with the word the user typed instead of hiding it mid-list.
+    function messengerOrderItems(items, normalizedQuery) {
+      const starts = [];
+      const rest = [];
+      for (const item of items) {
+        (normalize(item.label).startsWith(normalizedQuery) ? starts : rest).push(item);
+      }
+      return [...starts, ...rest];
+    }
+
+    // One word card as plain text, plus its voice URL when the word has
+    // one (null when it does not — the voice step is then skipped). Voice
+    // priority is Telegram's: recorded human first, then prebuilt Polly,
+    // then Joanna (see messengerVoiceUrl in neural-voice.js). The ×3
+    // repeat in the transport applies to whichever voice is served.
     function messengerCardPlan(env, record, searchedWord, partIndex = -1) {
       if (!record) return { texts: [], voiceUrl: null };
       return {
         texts: [{ text: plainTextCard(formatRecord(record, partIndex, searchedWord)) }],
-        voiceUrl: record.id != null ? prebuiltAudioUrl(env, record.id) : null,
+        voiceUrl: record.id != null ? messengerVoiceUrl(env, record) : null,
       };
     }
 
     // A numbered word-only list (labels only — meanings appear on the card
     // after a pick, the same rule as the WhatsApp port) with quick replies
-    // for tapping. The text list is always sent in full.
+    // for tapping. The text list is always sent in full: quick replies cap
+    // at Meta's 13, but the text shows every item. The numbered lines are
+    // NOT tappable in Messenger — only quick replies are — and quick
+    // replies show in the composer only while the Page's LATEST message
+    // carries them, so they go on the LAST text chunk and nothing is ever
+    // sent after the list in the same turn. A list longer than Meta's
+    // 2000-char text limit splits into several text messages; it is still
+    // one list, with no paging. listIndices (displayed order) is what a
+    // bare-number pick resolves against.
     function messengerListPlan(items, titleText) {
-      const lines = [titleText, ...items.map((item, i) => `${i + 1}. ${item.label}`)];
+      const quickReplies = buildQuickReplies(items.map((item) => ({ title: item.label, payload: `${MESSENGER_PICK_PREFIX}${item.index}` })));
+      const allLines = [titleText, MESSENGER_PICK_INSTRUCTION, ...items.map((item, i) => `${i + 1}. ${item.label}`)];
+      const texts = [];
+      let chunk = [];
+      let chunkLen = 0;
+      for (const line of allLines) {
+        const nextLen = chunk.length ? chunkLen + 1 + line.length : line.length;
+        if (chunk.length && nextLen > MESSENGER_TEXT_MAX) {
+          texts.push({ text: chunk.join("\n") });
+          chunk = [line];
+          chunkLen = line.length;
+        } else {
+          chunk.push(line);
+          chunkLen = nextLen;
+        }
+      }
+      if (chunk.length) texts.push({ text: chunk.join("\n") });
+      texts[texts.length - 1].quickReplies = quickReplies;
       return {
-        texts: [{
-          text: lines.join("\n"),
-          quickReplies: buildQuickReplies(items.map((item) => ({ title: item.label, payload: `${MESSENGER_PICK_PREFIX}${item.index}` }))),
-        }],
+        texts,
         voiceUrl: null,
+        listIndices: items.map((item) => item.index),
       };
     }
 
     // The Telegram bot's own search, adapted: one exact match -> the card
     // (with voice); several -> the list; none -> did-you-mean, then the
     // no-result text. localDictionaryCandidates is exact -> partial
-    // (contains) -> fuzzy, over the same in-memory records.
-    function messengerSearchPlan(env, query) {
+    // (contains) -> fuzzy, over the same in-memory records. A bare number
+    // first tries the sender's last list (WhatsApp: a bare number picks
+    // from the live list); in range it behaves exactly like a quick-reply
+    // pick, out of range or with no live list it falls through to a
+    // normal search for the number.
+    async function messengerSearchPlan(env, query, senderId) {
       const text = String(query ?? "").trim();
       if (!text) return { texts: [], voiceUrl: null };
       if (text === "/start" || text === "/help") return { texts: [{ text: MESSENGER_WELCOME_TEXT }], voiceUrl: null };
+      const folded = messengerNormalizeDigits(text);
+      if (/^\d+$/u.test(folded) && senderId != null) {
+        const live = await getMessengerLastList(env, senderId);
+        if (live) {
+          const n = Number(folded);
+          if (Number.isInteger(n) && n >= 1 && n <= live.indices.length) {
+            return messengerPickPlan(env, live.indices[n - 1]);
+          }
+        }
+      }
       const normalized = normalize(text);
-      const result = localDictionaryCandidates(text, 10);
+      const result = localDictionaryCandidates(text, MESSENGER_SEARCH_LIMIT);
       if (result.ok && result.candidates.length) {
-        if (result.candidates.length === 1) {
+        // Exact short-circuit, exactly like Telegram (candidates.length
+        // === 1 || exactCount === 1) and WhatsApp (same-spelling rows
+        // collapse to one word): one exact match opens its card directly
+        // instead of a list. The same word in several rows (exactCount >
+        // 1, one normalized headword) still opens its card; different
+        // words sharing one spelling show the list.
+        const exacts = result.candidates.filter((candidate) => candidate.matchType === "exact");
+        const sameWord = exacts.length > 1 && exacts.length === result.exactCount &&
+          exacts.every((candidate) => normalize(String(records[candidate.row - 2]?.coptic ?? "")) ===
+            normalize(String(records[exacts[0].row - 2]?.coptic ?? "")));
+        if (result.candidates.length === 1 || result.exactCount === 1 || sameWord) {
           const candidate = result.candidates[0];
           const record = records[candidate.row - 2];
           return messengerCardPlan(env, record, text, matchedPartIndex(record, normalized));
         }
-        const items = result.candidates
-          .map((candidate) => ({ index: candidate.row - 2, label: suggestionLabel(records[candidate.row - 2], normalized) }))
-          .filter((item) => item.index >= 0 && item.label);
+        const items = messengerOrderItems(
+          result.candidates
+            .map((candidate) => ({ index: candidate.row - 2, label: messengerSuggestionLabel(records[candidate.row - 2], normalized) }))
+            .filter((item) => item.index >= 0 && item.label),
+          normalized,
+        );
         if (!items.length) return { texts: [{ text: uiTextFor(text).noResult }], voiceUrl: null };
-        return messengerListPlan(items, uiTextFor(text).choose);
+        const plan = messengerListPlan(items, uiTextFor(text).choose);
+        await setMessengerLastList(env, senderId, plan.listIndices);
+        return plan;
       }
       const suggestions = suggestSimilar(text, 3);
       if (suggestions.length) {
         const items = suggestions
           .map((s) => ({ index: s.index, label: s.label }))
           .filter((item) => item.index >= 0 && item.label);
-        if (items.length) return messengerListPlan(items, uiTextFor(text).didYouMean);
+        if (items.length) {
+          const plan = messengerListPlan(items, uiTextFor(text).didYouMean);
+          await setMessengerLastList(env, senderId, plan.listIndices);
+          return plan;
+        }
       }
       return { texts: [{ text: uiTextFor(text).noResult }], voiceUrl: null };
     }
@@ -9187,9 +9551,111 @@ export default {
         return new Response("Bad request", { status: 400 });
       }
       if (body?.object !== "page") return new Response("EVENT_RECEIVED", { status: 200 });
+      // Parity (learn / certs / get-code / admin) answers first; the
+      // dictionary search is the fall-through. The parity handler is
+      // built per request (cheap factory) so it closes over this env.
+      // MESSENGER_ADMIN_PSID is the admin's page-scoped id, read from a
+      // real admin message to the Page; unset, admin stays fail-closed.
+      const macroConfig = await driveConfig(env).catch(() => null);
+      const messengerParity = createMessengerParity({
+        adminPsids: (env.MESSENGER_ADMIN_PSID ?? "").split(","),
+        macroUrl: macroConfig?.url ?? null,
+        fetchLiveExamPattern,
+        lookupCodeName,
+        loadState: (psid) => messengerParityLoadState(env, psid),
+        saveState: (psid, next) => messengerParitySaveState(env, psid, next),
+        isBanned: (psid) => isBanned(env, psid),
+        adminStore: {
+          get: async (key) => (await storeCall(env, { op: "get", key })).value ?? null,
+          put: async (key, value) => { await storeCall(env, { op: "put", key, value }); return true; },
+          del: async (key) => { await storeCall(env, { op: "put", key, value: null }); return true; },
+        },
+        getUserRecord: async (psid) => {
+          // Messenger users live under `user:msgr:<PSID>`; a bare-PSID
+          // lookup would miss (or hit a Telegram user).
+          const record = await getUser(env, `msgr:${psid}`);
+          if (!record) return null;
+          return { record, history: await getUserHistory(env, `msgr:${psid}`) };
+        },
+        updateUserRecord: async (psid, patch) => {
+          const u = (await getUser(env, `msgr:${psid}`)) ?? {};
+          return saveUser(env, `msgr:${psid}`, { ...u, ...patch });
+        },
+        deleteUserRecord: async (psid) => {
+          // Messenger users live under `user:msgr:<PSID>` (see loadState);
+          // deleting bare `user:<PSID>` would miss (or hit a Telegram user).
+          await storeCall(env, { op: "put", key: `user:msgr:${psid}`, value: null });
+          return true;
+        },
+        listUserPage: (opts) => messengerListUsers(env, opts),
+        listUsers: () => messengerListUsers(env, {}),
+        listBans: () => bannedSet(env),
+        banUser: (psid, opts) => messengerParityBanUser(env, psid, opts),
+        unbanUser: (psid) => messengerParityUnbanUser(env, psid),
+        listRecipients: () => messengerBroadcastRecipients(env),
+        getStats: () => messengerParityStats(env),
+        getUsage: () => messengerParityUsage(env),
+        listErrors: async () => {
+          const entries = env.USERS ? ((await storeCall(env, { op: "get", key: "errors:recent" }).catch(() => null))?.value ?? []) : [];
+          return (Array.isArray(entries) ? entries : []).slice(-30).reverse().map((e) => ({ at: e?.at ?? null, where: e?.where ?? e?.kind ?? "?", message: e?.message ?? String(e ?? "") }));
+        },
+        listAuditLog: () => readAdminAudit(env),
+        listSecurityLog: null, // no security-log reader exists on this path
+        getDriveConfig: () => driveConfig(env).catch(() => null),
+        setMacroUrl: async (url) => {
+          await storeCall(env, { op: "put", key: DRIVE_CONFIG_KEY, value: { url } });
+          invalidateCache(perStoreCache(driveConfigCaches, env));
+          return true;
+        },
+        listTickets: null, // no ticket store exists on this path
+        getTicket: null,
+        closeTicket: null,
+        createTicket: null,
+        runUserCommand: null, // dispatch commands fall through to search
+        getDictAudit: () => messengerDictAudit(env),
+        deleteVoice: null, // voice files live on the audio branch / DO
+        getBroadcastControl: () => broadcastControlState(env),
+        setBroadcastControl: async (patch) => { await setBroadcastControl(env, patch); return true; },
+        getBroadcastStats: () => storeCall(env, { op: "bcstatus" }),
+        editDictionary: null, // Apps Script dictionary-admin route, unwired
+        runTask: null, // job tasks run via plan.task (see executeTask)
+      });
       const planFor = {
-        text: (query) => messengerSearchPlan(env, query),
-        pick: (index) => messengerPickPlan(env, index),
+        // Parity first: flows (cert/get-code/exam), menus, commands.
+        // A bare number is routed by recency — whichever list (parity
+        // menu vs dictionary list) was sent most recently wins — so a
+        // number typed after a word search picks the word, not a stale
+        // menu, and vice versa. While a parity flow is active (a cert
+        // code, a get-code step, an exam code, a broadcast/confirm
+        // pending), the number belongs to the flow, not to any list.
+        text: async (query, senderId) => {
+          const folded = messengerNormalizeDigits(String(query ?? "").trim());
+          if (/^\d+$/u.test(folded) && senderId != null) {
+            const parityState = await messengerParityLoadState(env, senderId);
+            const flowActive = Boolean(parityState?.certAwaiting || parityState?.getcodeStep || parityState?.examAwaiting || parityState?.pendingBroadcast || parityState?.pendingConfirm);
+            if (!flowActive) {
+              const dictList = await getMessengerLastList(env, senderId);
+              const menuAt = parityState?.menuList ? Number(parityState.menuListAt ?? 0) : 0;
+              const dictAt = dictList ? Number(dictList.at ?? 0) : 0;
+              if (parityState?.menuList && menuAt >= dictAt) {
+                const parityPlan = await messengerParity.handleText(senderId, query);
+                if (parityPlan) return parityPlan;
+              }
+              return messengerSearchPlan(env, query, senderId);
+            }
+          }
+          const parity = await messengerParity.handleText(senderId, query);
+          if (parity) return parity;
+          return messengerSearchPlan(env, query, senderId);
+        },
+        pick: async (payload, senderId) => {
+          if (typeof payload === "string" && MESSENGER_PARITY_PAYLOAD_PREFIXES.some((p) => payload.startsWith(p))) {
+            return messengerParity.handlePick(senderId, payload);
+          }
+          const index = Number(payload);
+          return messengerPickPlan(env, index);
+        },
+        executeTask: (task, senderId, fetchImpl) => executeMessengerTask(env, task, senderId, fetchImpl, { ctx }),
       };
       // Fast-ack like the Telegram webhook: answer Meta 200 immediately and
       // keep processing in the background (Meta re-delivers after ~20s).
