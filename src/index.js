@@ -1322,7 +1322,7 @@ function lazy(build) {
 }
 
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
-import { audioUrl, audioVersion, fetchHumanSpeech, fetchPrebuiltSpeech, isSingleWordOgg, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
+import { audioUrl, audioVersion, prebuiltAudioUrl, fetchHumanSpeech, fetchPrebuiltSpeech, isSingleWordOgg, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 import { copticDateNow, alphabetText, letterStatsText, longestText, originsText, wordCountText, startsWithText, similarText, translateText, vocabText, startGuess, handleGuessReply } from "./features.js";
 import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, suggestSimilar, helpText, retentionText, opsText, recordById, levenshtein } from "./new-features.js";
 import { lookupCertificate, parseCertCsv } from "./certificates.js";
@@ -1331,6 +1331,7 @@ import { getCodeFromMacro, buildGetCodeReply, buildGetCodeWhatsAppUrl, normalize
 import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VIDEO_MENU_ID, cleanMenuTitle, cleanMenuText, cleanButtonLabel, cleanUrl, cleanCommand, normalizeMenus, findMenu, findButton, rootMenus, descendantMenuIds, menuOpenText, menuAdminListText, menuAdminDetailText, parseMenuTarget, parseButtonTarget, addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton, ensureVideoMenu } from "./menu-builder.js";
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 import { getHiddenUi, setHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
+import { verifyMessengerSignature, handleMessengerWebhookBody, plainTextCard, buildQuickReplies, MESSENGER_PICK_PREFIX } from "./messenger.js";
 import { LEARN_LEVELS } from "./learn-manifest.js";
 import { LEARN_IMPORT_KEY, LEARN_GET_CODE_TEXT, learnUploadItems, emptyImportState, normalizeImportState, importProgress, learnPendingItems, learnManifestHash, isImportStateTrusted, findLearnLesson, learnLessonSendPlan, buildLearnMenus, mergeMenus, uploadLearnFile, runImportUploads, parseImportLearnArg, learnImportStartText, learnProgressText } from "./learn-import.js";
 
@@ -4849,6 +4850,7 @@ const USAGE_PATH_LABELS = {
   media: "وسائط عبر الووركر",
   health: "فحص الصحة",
   webhook: "ويبهوك",
+  messenger: "ماسنجر",
   api: "API القاموس",
   voice: "رفع صوت",
   export: "تصدير الأصوات",
@@ -4866,6 +4868,7 @@ function usageKindForPath(pathname) {
   if (path === "/health") return "health";
   if (path.startsWith("/media/") || path.startsWith("/video/")) return "media";
   if (path === "/webhook") return "webhook";
+  if (path === "/messenger-webhook") return "messenger";
   if (path === "/api/dictionary") return "api";
   if (path === "/voice-drive") return "voice";
   if (path === "/export-voices" || path.startsWith("/export-voice/")) return "export";
@@ -6278,7 +6281,7 @@ const DICTIONARY_LOCAL_HEADERS = ["coptic", "ipa", "meaning", "english", "french
 // Local, in-memory candidate search (instant). Returns up to ~8 candidates ranked:
 // exact match first, then partial (contains/contained), then fuzzy (bounded Levenshtein).
 // Each candidate: { row, matched_column, headers, values, score, matchType }.
-function localDictionaryCandidates(word, limit = 8) {
+export function localDictionaryCandidates(word, limit = 8) {
   const wanted = normalize(word);
   if (!wanted) return { ok: false, error: "word is required", candidates: [] };
   const exact = [];
@@ -9071,6 +9074,137 @@ export default {
         allowed_updates: ["message", "callback_query", "inline_query"],
       });
       return Response.json(result, { status: result.ok ? 200 : 502 });
+    }
+
+    // ========================================================================
+    // Facebook Messenger webhook (2026-11-16) — core loop only: webhook +
+    // dictionary search + voice. Learn, exams, certificates and get-code are
+    // NOT built here; they come later. Transport, signature verification and
+    // payload shaping live in src/messenger.js; this section wires them to
+    // the Telegram bot's own search (localDictionaryCandidates), word card
+    // (formatRecord) and did-you-mean (suggestSimilar). Quick replies are a
+    // supplement only: the full text list is always sent, and a pick is
+    // stateless — the payload carries the record index, so no per-user state
+    // is needed. No feature flag: the routes 403 while the Messenger env
+    // vars (MESSENGER_VERIFY_TOKEN, MESSENGER_APP_SECRET,
+    // MESSENGER_PAGE_TOKEN) are unset. Secrets are never logged.
+    // ========================================================================
+    const MESSENGER_WELCOME_TEXT = "📖 القاموس القبطي — ابعت أي كلمة بالقبطي أو العربي أو الإنجليزي أو الفرنسي أو الألماني، وأنا أجيب معناها ونطقها.";
+
+    // One word card as plain text, plus its prebuilt voice URL when the word
+    // has one (null when it does not — the voice step is then skipped).
+    function messengerCardPlan(env, record, searchedWord, partIndex = -1) {
+      if (!record) return { texts: [], voiceUrl: null };
+      return {
+        texts: [{ text: plainTextCard(formatRecord(record, partIndex, searchedWord)) }],
+        voiceUrl: record.id != null ? prebuiltAudioUrl(env, record.id) : null,
+      };
+    }
+
+    // A numbered word-only list (labels only — meanings appear on the card
+    // after a pick, the same rule as the WhatsApp port) with quick replies
+    // for tapping. The text list is always sent in full.
+    function messengerListPlan(items, titleText) {
+      const lines = [titleText, ...items.map((item, i) => `${i + 1}. ${item.label}`)];
+      return {
+        texts: [{
+          text: lines.join("\n"),
+          quickReplies: buildQuickReplies(items.map((item) => ({ title: item.label, payload: `${MESSENGER_PICK_PREFIX}${item.index}` }))),
+        }],
+        voiceUrl: null,
+      };
+    }
+
+    // The Telegram bot's own search, adapted: one exact match -> the card
+    // (with voice); several -> the list; none -> did-you-mean, then the
+    // no-result text. localDictionaryCandidates is exact -> partial
+    // (contains) -> fuzzy, over the same in-memory records.
+    function messengerSearchPlan(env, query) {
+      const text = String(query ?? "").trim();
+      if (!text) return { texts: [], voiceUrl: null };
+      if (text === "/start" || text === "/help") return { texts: [{ text: MESSENGER_WELCOME_TEXT }], voiceUrl: null };
+      const normalized = normalize(text);
+      const result = localDictionaryCandidates(text, 10);
+      if (result.ok && result.candidates.length) {
+        if (result.candidates.length === 1) {
+          const candidate = result.candidates[0];
+          const record = records[candidate.row - 2];
+          return messengerCardPlan(env, record, text, matchedPartIndex(record, normalized));
+        }
+        const items = result.candidates
+          .map((candidate) => ({ index: candidate.row - 2, label: suggestionLabel(records[candidate.row - 2], normalized) }))
+          .filter((item) => item.index >= 0 && item.label);
+        if (!items.length) return { texts: [{ text: uiTextFor(text).noResult }], voiceUrl: null };
+        return messengerListPlan(items, uiTextFor(text).choose);
+      }
+      const suggestions = suggestSimilar(text, 3);
+      if (suggestions.length) {
+        const items = suggestions
+          .map((s) => ({ index: s.index, label: s.label }))
+          .filter((item) => item.index >= 0 && item.label);
+        if (items.length) return messengerListPlan(items, uiTextFor(text).didYouMean);
+      }
+      return { texts: [{ text: uiTextFor(text).noResult }], voiceUrl: null };
+    }
+
+    function messengerPickPlan(env, index) {
+      const record = records[index];
+      if (!record) return { texts: [{ text: "لم أجد هذه الكلمة، ابحث عنها مرة أخرى." }], voiceUrl: null };
+      return messengerCardPlan(env, record, "", -1);
+    }
+
+    // Meta verification: GET /messenger-webhook?hub.mode=subscribe&
+    // hub.verify_token=<MESSENGER_VERIFY_TOKEN>&hub.challenge=<challenge>
+    // answers the challenge as plain text; anything else is 403.
+    if (url.pathname === "/messenger-webhook" && request.method === "GET") {
+      const mode = url.searchParams.get("hub.mode");
+      const token = url.searchParams.get("hub.verify_token");
+      const challenge = url.searchParams.get("hub.challenge");
+      if (!env.MESSENGER_VERIFY_TOKEN || mode !== "subscribe" || !challenge ||
+          !sameSecret(token ?? "", env.MESSENGER_VERIFY_TOKEN)) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      return new Response(challenge, { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } });
+    }
+    if (url.pathname === "/messenger-webhook" && request.method === "POST") {
+      if (!env.MESSENGER_APP_SECRET || !env.MESSENGER_PAGE_TOKEN) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      // The signature covers the raw body, so read it once as text and
+      // parse the same bytes — request.json() would hide the raw form.
+      let rawBody;
+      try {
+        rawBody = await request.text();
+      } catch {
+        return new Response("Bad request", { status: 400 });
+      }
+      const signatureOk = await verifyMessengerSignature(rawBody, request.headers.get("x-hub-signature-256"), env.MESSENGER_APP_SECRET);
+      if (!signatureOk) return new Response("Forbidden", { status: 403 });
+      let body;
+      try {
+        body = JSON.parse(rawBody);
+      } catch {
+        return new Response("Bad request", { status: 400 });
+      }
+      if (body?.object !== "page") return new Response("EVENT_RECEIVED", { status: 200 });
+      const planFor = {
+        text: (query) => messengerSearchPlan(env, query),
+        pick: (index) => messengerPickPlan(env, index),
+      };
+      // Fast-ack like the Telegram webhook: answer Meta 200 immediately and
+      // keep processing in the background (Meta re-delivers after ~20s).
+      // Tests call fetch without a Workers ctx, so there we still await to
+      // keep them deterministic.
+      const process = handleMessengerWebhookBody(env, body, planFor).catch((error) => {
+        logError(env, error, { where: "messenger-webhook" });
+        console.error("Messenger webhook failed", error instanceof Error ? error.message : "unknown error");
+      });
+      if (ctx?.waitUntil) {
+        ctx.waitUntil(process);
+        return new Response("EVENT_RECEIVED", { status: 200 });
+      }
+      await process;
+      return new Response("EVENT_RECEIVED", { status: 200 });
     }
 
     if (request.method !== "POST" || url.pathname !== "/webhook") {

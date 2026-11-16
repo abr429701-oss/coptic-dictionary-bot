@@ -331,6 +331,14 @@ export const audioUrl = (env, id, { bust = false } = {}) => {
   ).replace(/\/+$/u, "")}/${encodeURIComponent(fileName)}${bust && audioVersion(id) ? `?v=${audioVersion(id)}` : ""}`;
 };
 
+// Messenger voice: only words with a prebuilt file on the audio branch get a
+// voice attachment (the file is served by URL, never synthesized live). Null
+// when the manifest has no entry for the word.
+export const prebuiltAudioUrl = (env, id) => {
+  if (id == null || !Object.hasOwn(audioManifest, String(id))) return null;
+  return audioUrl(env, id, { bust: true });
+};
+
 // -----------------------------------------------------------------------------
 // Human-sounding audio (optional, built by scripts/gen_audio_fish.mjs into the
 // "audio-human" branch). Only used when the Worker variable HUMAN_AUDIO is "on".
