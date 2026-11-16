@@ -104,6 +104,22 @@ async function sendMessengerText(text, { senderId = SENDER_ID, envOverride = env
   }
 }
 
+// Tap a quick reply and capture the outbound Send API calls. The text
+// mirrors the button label (what the user would see); the payload is
+// what the bot routes on.
+async function tapQuickReply(payload, { senderId = SENDER_ID, envOverride = env } = {}) {
+  const calls = [];
+  const restore = stubMessengerApi(calls);
+  try {
+    const text = payload === "list|next" ? "التالي ⏭" : payload === "list|prev" ? "⏮ السابق" : "";
+    const response = await postSigned(messageEvent({ text, quick_reply: { payload } }, senderId), envOverride);
+    assert.equal(response.status, 200);
+    return calls;
+  } finally {
+    restore();
+  }
+}
+
 // Numbered "N. label" lines across every text message of a turn.
 function numberedLines(calls) {
   return calls
@@ -286,29 +302,34 @@ test("messenger search round-trip: one exact match sends the card text then the 
   }
 });
 
-test("messenger search round-trip: several matches send the full list with quick replies", async () => {
+test("messenger search round-trip: several matches send page 1 (15) with a Next quick reply", async () => {
   const calls = [];
   const restore = stubMessengerApi(calls);
   try {
     const response = await postSigned(messageEvent({ text: "نور" }));
     assert.equal(response.status, 200);
-    // "نور" has 45 candidates at the 200 limit (was 10): the whole list
-    // goes out in one text message, and the list message is the LAST (and
-    // only) message of the turn, so its quick replies stay visible.
+    // "نور" has 45 candidates at the 200 limit (was 10): page 1 shows
+    // the first 15 in one text message, and the list message is the LAST
+    // (and only) message of the turn, so its quick replies stay visible.
     assert.equal(calls.length, 2, "typing_on + one list text, no voice, nothing after the list");
     assert.equal(calls[0].payload.sender_action, "typing_on");
     const message = calls[1].payload.message;
     assert.match(message.text, /^اختر من الاقتراحات التالية:/u);
     const lines = message.text.split("\n");
     assert.equal(lines[1], "أرسل رقمًا للاختيار.", "the pick instruction sits above the items, under the title");
+    assert.equal(lines[2], "صفحة 1 من 3", "page indicator under the instruction");
     const items = lines.filter((line) => /^\d+\. /u.test(line));
-    assert.equal(items.length, localDictionaryCandidates("نور", 200).candidates.length);
-    assert.equal(items.length, 45);
+    assert.equal(items.length, 15, "page 1 shows the first 15 of 45");
     assert.match(message.text, /\n1\. /u);
     assert.doesNotMatch(message.text, /<b>|<\/b>| — /u, "labels are word-only: no meaning, no em-dash separator");
     assert.ok(Array.isArray(message.quick_replies) && message.quick_replies.length > 1);
-    assert.equal(message.quick_replies.length, 13, "quick replies cap at Meta's 13 while the text shows all 45");
-    for (const reply of message.quick_replies) {
+    // 1 nav + 12 picks: quick replies cap at Meta's 13, nav first so it
+    // always survives the cap.
+    assert.equal(message.quick_replies.length, 13, "quick replies cap at Meta's 13");
+    assert.equal(message.quick_replies[0].title, "التالي ⏭");
+    assert.equal(message.quick_replies[0].payload, "list|next");
+    assert.ok(!message.quick_replies.some((r) => r.payload === "list|prev"), "no Previous on page 1");
+    for (const reply of message.quick_replies.slice(1)) {
       assert.equal(reply.content_type, "text");
       assert.ok([...reply.title].length <= 20, `title over 20 chars: ${reply.title}`);
       assert.match(reply.payload, new RegExp(`^${MESSENGER_PICK_PREFIX}\\d+$`, "u"));
@@ -406,10 +427,20 @@ test("messenger list order: labels starting with the query come first", async ()
   // 'مال': WhatsApp's verified example — the first 38 labels all start
   // with "مال", the rest follow. The Messenger list must partition the
   // same way; localDictionaryCandidates alone does NOT (it sorts partials
-  // by length difference).
-  const calls = await sendMessengerText("مال");
-  const labels = numberedLines(calls).map((line) => line.replace(/^\d+\. /u, ""));
-  assert.equal(labels.length, 200, "all results, capped at the 200 search limit");
+  // by length difference). Lists are paginated (15 per page), so the
+  // partition is checked across the first three pages (45 labels: 38
+  // starters, then 7 contains).
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const page1 = await sendMessengerText("مال", { envOverride: kvEnv });
+  const labels1 = numberedLines(page1).map((line) => line.replace(/^\d+\. /u, ""));
+  assert.equal(labels1.length, 15, "page 1 shows 15");
+  const page2 = await tapQuickReply("list|next", { envOverride: kvEnv });
+  const labels2 = numberedLines(page2).map((line) => line.replace(/^\d+\. /u, ""));
+  assert.equal(labels2.length, 15, "page 2 shows 15");
+  const page3 = await tapQuickReply("list|next", { envOverride: kvEnv });
+  const labels3 = numberedLines(page3).map((line) => line.replace(/^\d+\. /u, ""));
+  assert.equal(labels3.length, 15, "page 3 shows 15");
+  const labels = [...labels1, ...labels2, ...labels3];
   assert.ok(labels.length > 0);
   const starts = labels.map((label) => foldArabic(label).startsWith(foldArabic("مال")));
   assert.ok(starts[0], `first label must start with the query, got: ${labels[0]}`);
@@ -421,22 +452,109 @@ test("messenger list order: labels starting with the query come first", async ()
   }
 });
 
-test("messenger long list splits into chunks with quick replies only on the last", async () => {
-  const calls = await sendMessengerText("مال");
-  assert.ok(calls.length > 2, "200 items do not fit Meta's 2000-char text limit in one message");
-  assert.equal(calls[0].payload.sender_action, "typing_on");
-  const textCalls = calls.filter((call) => call.payload.message);
-  for (const call of textCalls) {
-    assert.ok(call.payload.message.text.length <= 2000, `chunk over 2000 chars: ${call.payload.message.text.length}`);
-    assert.doesNotMatch(call.payload.message.text, /<b>|<\/b>/u);
-  }
-  assert.equal(numberedLines(calls).length, 200, "every result is still shown, across chunks");
-  assert.match(calls[1].payload.message.text, /^اختر من الاقتراحات التالية:\nأرسل رقمًا للاختيار\./u);
-  for (const call of textCalls.slice(0, -1)) {
-    assert.ok(!call.payload.message.quick_replies, "quick replies live only on the last message, or they vanish");
-  }
-  const last = calls[calls.length - 1].payload.message;
-  assert.ok(Array.isArray(last.quick_replies) && last.quick_replies.length === 13);
+test("messenger paginated list: Next/Prev quick replies turn pages, 15 per page", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  // Page 1: one text message, 15 items, Next only.
+  const page1 = await sendMessengerText("نور", { envOverride: kvEnv });
+  assert.equal(page1.length, 2, "typing_on + one list text: 15 items fit one message");
+  assert.equal(page1[0].payload.sender_action, "typing_on");
+  assert.ok(page1[1].payload.message.text.length <= 2000, "page fits Meta's 2000-char text limit");
+  assert.equal(numberedLines(page1).length, 15);
+  assert.match(page1[1].payload.message.text, /صفحة 1 من 3/u);
+  const qr1 = page1[1].payload.message.quick_replies;
+  assert.equal(qr1.length, 13, "1 nav + 12 picks");
+  assert.equal(qr1[0].payload, "list|next");
+  assert.ok(!qr1.some((r) => r.payload === "list|prev"), "no Previous on page 1");
+  // Page 2: different 15 items, Prev + Next.
+  const page2 = await tapQuickReply("list|next", { envOverride: kvEnv });
+  assert.equal(numberedLines(page2).length, 15);
+  assert.match(page2[1].payload.message.text, /صفحة 2 من 3/u);
+  assert.notDeepEqual(numberedLines(page2), numberedLines(page1), "page 2 shows different items");
+  const qr2 = page2[1].payload.message.quick_replies;
+  assert.equal(qr2[0].payload, "list|prev");
+  assert.equal(qr2[1].payload, "list|next");
+  // Page 3: last page, Prev only.
+  const page3 = await tapQuickReply("list|next", { envOverride: kvEnv });
+  assert.equal(numberedLines(page3).length, 15);
+  assert.match(page3[1].payload.message.text, /صفحة 3 من 3/u);
+  const qr3 = page3[1].payload.message.quick_replies;
+  assert.equal(qr3[0].payload, "list|prev");
+  assert.ok(!qr3.some((r) => r.payload === "list|next"), "no Next on the last page");
+  // Next on the last page: short end text, no list.
+  const end = await tapQuickReply("list|next", { envOverride: kvEnv });
+  assert.equal(end[1].payload.message.text, "لا توجد نتائج أخرى.");
+  // Prev returns to page 2.
+  const back = await tapQuickReply("list|prev", { envOverride: kvEnv });
+  assert.match(back[1].payload.message.text, /صفحة 2 من 3/u);
+  assert.equal(numberedLines(back).length, 15);
+});
+
+test("messenger typed التالي/السابق pages the list", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await sendMessengerText("نور", { envOverride: kvEnv });
+  const page2 = await sendMessengerText("التالي", { envOverride: kvEnv });
+  assert.match(page2[1].payload.message.text, /صفحة 2 من 3/u);
+  assert.equal(numberedLines(page2).length, 15);
+  const page1 = await sendMessengerText("السابق", { envOverride: kvEnv });
+  assert.match(page1[1].payload.message.text, /صفحة 1 من 3/u);
+  const end = await sendMessengerText("السابق", { envOverride: kvEnv });
+  assert.equal(end[1].payload.message.text, "لا توجد نتائج أخرى.");
+  // The emoji form of the button label navigates too.
+  const page2b = await sendMessengerText("التالي ⏭", { envOverride: kvEnv });
+  assert.match(page2b[1].payload.message.text, /صفحة 2 من 3/u);
+});
+
+test("messenger bare number on page 2 picks the correct global result", async () => {
+  const kv = fakeKv();
+  const kvEnv = { ...env, USERS: kv };
+  await sendMessengerText("نور", { envOverride: kvEnv });
+  await tapQuickReply("list|next", { envOverride: kvEnv });
+  const stored = kv.store.get(`messenger:lastlist:${SENDER_ID}`);
+  assert.ok(stored && Array.isArray(stored.indices) && stored.indices.length === 45, "full list stored with page 2");
+  assert.equal(stored.page, 1);
+  const expected = records[stored.indices[15]];
+  const pick1 = await sendMessengerText("1", { envOverride: kvEnv });
+  assert.ok(pick1[1].payload.message.text.includes(String(expected.coptic)), "page 2 number 1 opens the 16th result");
+  assert.doesNotMatch(pick1[1].payload.message.text, /^اختر من الاقتراحات التالية:/u, "a pick is a card, not another list");
+  const expected15 = records[stored.indices[29]];
+  const pick15 = await sendMessengerText("15", { envOverride: kvEnv });
+  assert.ok(pick15[1].payload.message.text.includes(String(expected15.coptic)), "page 2 number 15 opens the 30th result");
+  // And page 1's number 1 is a different word.
+  await tapQuickReply("list|prev", { envOverride: kvEnv });
+  const pick1Page1 = await sendMessengerText("1", { envOverride: kvEnv });
+  assert.ok(pick1Page1[1].payload.message.text.includes(String(records[stored.indices[0]].coptic)));
+  assert.notEqual(pick1Page1[1].payload.message.text, pick1[1].payload.message.text);
+});
+
+test("messenger Next on a single-page list does not appear", async () => {
+  assert.ok(TYPO, "expected a typo query with suggestions but no local match");
+  const kvEnv = { ...env, USERS: fakeKv() };
+  const calls = await sendMessengerText(TYPO.query, { envOverride: kvEnv });
+  const message = calls[1].payload.message;
+  assert.ok(Array.isArray(message.quick_replies));
+  assert.ok(!message.quick_replies.some((r) => r.payload === "list|next" || r.payload === "list|prev"), "single-page list has no nav buttons");
+  const end = await sendMessengerText("التالي", { envOverride: kvEnv });
+  assert.equal(end[1].payload.message.text, "لا توجد نتائج أخرى.");
+});
+
+test("messenger stale list state: expired list falls back, pre-paging list asks for a fresh search", async () => {
+  const kv = fakeKv();
+  const kvEnv = { ...env, USERS: kv };
+  const key = `messenger:lastlist:${SENDER_ID}`;
+  // Expired (11 minutes old): "التالي" behaves as today — no live list,
+  // so parity answers that there is no active list.
+  kv.store.set(key, { indices: [0, 1, 2], labels: ["a", "b", "c"], title: "اختر من الاقتراحات التالية:", at: Date.now() - 11 * 60 * 1000, page: 0 });
+  const expired = await sendMessengerText("التالي", { envOverride: kvEnv });
+  assert.match(expired[1].payload.message.text, /لا توجد قائمة نشطة/u);
+  // Pre-paging shape (indices but no labels/title): the list cannot be
+  // re-rendered, so the pager asks for a fresh search.
+  kv.store.set(key, { indices: [0, 1, 2], at: Date.now() });
+  const legacy = await tapQuickReply("list|next", { envOverride: kvEnv });
+  assert.equal(legacy[1].payload.message.text, "انتهت هذه القائمة، ابحث عن الكلمة مرة أخرى.");
+  // And a nav tap with no stored list at all says the same.
+  kv.store.delete(key);
+  const none = await tapQuickReply("list|next", { envOverride: kvEnv });
+  assert.equal(none[1].payload.message.text, "انتهت هذه القائمة، ابحث عن الكلمة مرة أخرى.");
 });
 
 test("messenger voice repeats reuse Meta's attachment id instead of re-fetching the URL", async () => {
@@ -569,7 +687,8 @@ test("messenger bare number picks from the last list, same card as the quick rep
   assert.equal(lines[1], "أرسل رقمًا للاختيار.");
   const label2 = lines.find((line) => line.startsWith("2. "))?.slice(3);
   assert.ok(label2, "expected a second list item");
-  const pickPayload = listCalls[1].payload.message.quick_replies[1].payload;
+  assert.equal(listCalls[1].payload.message.quick_replies[0].payload, "list|next", "page 1 carries the Next nav first");
+  const pickPayload = listCalls[1].payload.message.quick_replies[2].payload;
   assert.match(pickPayload, new RegExp(`^${MESSENGER_PICK_PREFIX}\\d+$`, "u"));
   const numCalls = await sendMessengerText("2", { envOverride: kvEnv });
   const numCard = numCalls[1].payload.message.text;

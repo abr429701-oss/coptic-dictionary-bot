@@ -9173,8 +9173,25 @@ export default {
     // MESSENGER_PAGE_TOKEN) are unset. Secrets are never logged.
     // ========================================================================
     const MESSENGER_WELCOME_TEXT = "📖 القاموس القبطي — ابعت أي كلمة بالقبطي أو العربي أو الإنجليزي أو الفرنسي أو الألماني، وأنا أجيب معناها ونطقها.";
-    // Search lists show ALL matches on one page (WhatsApp MAX_MATCHES).
+    // Dictionary lists are paginated: 15 results per page (a 200-result
+    // list used to go out as a burst of many chunk messages, which is
+    // suspected of re-triggering Meta's temporary send block). Page 1
+    // shows results 1–15 with a "التالي ⏭" quick reply; later pages add
+    // "⏮ السابق". A bare number picks from the shown page (1–15 relative
+    // to that page); the full ordered list + current page live in the
+    // last-list state, so a page turn re-renders without re-searching.
     const MESSENGER_SEARCH_LIMIT = 200;
+    const MESSENGER_LIST_PAGE_SIZE = 15;
+    // Quick-reply payloads for list paging (plain-text "التالي"/"السابق"
+    // take the same path via planFor.text). Distinct from the learn-nav
+    // payloads (learn|next:/learn|prev:) and the parity prefixes.
+    const MESSENGER_LIST_NAV_NEXT = "list|next";
+    const MESSENGER_LIST_NAV_PREV = "list|prev";
+    // Paging a list whose stored state is gone (pre-paging deploy, or a
+    // corrupted entry) asks for a fresh search instead of guessing.
+    const MESSENGER_LIST_EXPIRED_TEXT = "انتهت هذه القائمة، ابحث عن الكلمة مرة أخرى.";
+    // Next on the last page / Previous on the first page.
+    const MESSENGER_LIST_END_TEXT = "لا توجد نتائج أخرى.";
     // Meta caps one text message at 2000 characters; a long list splits
     // into several text messages instead of dropping results.
     const MESSENGER_TEXT_MAX = 2000;
@@ -9428,6 +9445,11 @@ export default {
     // The key is namespaced so a Messenger PSID can never collide with a
     // Telegram user id. A storage failure never breaks the reply: the list
     // text is already on its way, only the number pick is lost.
+    // Paging: the stored value also carries the displayed labels + title
+    // (so a page turn re-renders without re-searching) and the current
+    // page (bare numbers are relative to the shown page). A stored value
+    // from before paging (labels/title missing) still picks by index, but
+    // a page turn asks for a fresh search instead of guessing labels.
     function messengerLastListKey(psid) {
       return `messenger:lastlist:${String(psid)}`;
     }
@@ -9442,10 +9464,16 @@ export default {
         return null;
       }
     }
-    async function setMessengerLastList(env, psid, indices) {
+    async function setMessengerLastList(env, psid, indices, opts = {}) {
       if (!env?.USERS || psid == null) return;
       try {
-        await storeCall(env, { op: "put", key: messengerLastListKey(psid), value: { indices: [...indices], at: Date.now() } });
+        await storeCall(env, { op: "put", key: messengerLastListKey(psid), value: {
+          indices: [...indices],
+          labels: Array.isArray(opts.labels) ? [...opts.labels] : undefined,
+          title: typeof opts.title === "string" && opts.title ? opts.title : undefined,
+          page: Number.isInteger(opts.page) && opts.page >= 0 ? opts.page : 0,
+          at: Date.now(),
+        } });
       } catch (error) {
         console.error("Messenger last-list save failed", error instanceof Error ? error.message : "unknown");
       }
@@ -9490,18 +9518,34 @@ export default {
 
     // A numbered word-only list (labels only — meanings appear on the card
     // after a pick, the same rule as the WhatsApp port) with quick replies
-    // for tapping. The text list is always sent in full: quick replies cap
-    // at Meta's 13, but the text shows every item. The numbered lines are
-    // NOT tappable in Messenger — only quick replies are — and quick
-    // replies show in the composer only while the Page's LATEST message
-    // carries them, so they go on the LAST text chunk and nothing is ever
-    // sent after the list in the same turn. A list longer than Meta's
-    // 2000-char text limit splits into several text messages; it is still
-    // one list, with no paging. listIndices (displayed order) is what a
-    // bare-number pick resolves against.
-    function messengerListPlan(items, titleText) {
-      const quickReplies = buildQuickReplies(items.map((item) => ({ title: item.label, payload: `${MESSENGER_PICK_PREFIX}${item.index}` })));
-      const allLines = [titleText, MESSENGER_PICK_INSTRUCTION, ...items.map((item, i) => `${i + 1}. ${item.label}`)];
+    // for tapping. One page shows at most MESSENGER_LIST_PAGE_SIZE items
+    // (numbered 1–15 relative to the shown page); later pages are reached
+    // with the "التالي ⏭" / "⏮ السابق" quick replies (or the same words
+    // typed). The numbered lines are NOT tappable in Messenger — only
+    // quick replies are — and quick replies show in the composer only
+    // while the Page's LATEST message carries them, so they go on the
+    // LAST text chunk and nothing is ever sent after the list in the same
+    // turn. Nav buttons come FIRST in the quick replies: buildQuickReplies
+    // keeps the first 13, so the nav always survives and the item picks
+    // fill the rest (items 13–15 on a page are picked by typing their
+    // number). A page longer than Meta's 2000-char text limit still splits
+    // into several text messages. listIndices/listLabels/listTitle
+    // (displayed order, whole list) is what a bare-number pick resolves
+    // against and what a page turn re-renders from.
+    function messengerListPlan(items, titleText, page = 0) {
+      const totalPages = Math.max(1, Math.ceil(items.length / MESSENGER_LIST_PAGE_SIZE));
+      const safePage = Math.min(Math.max(0, Math.floor(page) || 0), totalPages - 1);
+      const pageItems = items.slice(safePage * MESSENGER_LIST_PAGE_SIZE, (safePage + 1) * MESSENGER_LIST_PAGE_SIZE);
+      const nav = [];
+      if (safePage > 0) nav.push({ title: "⏮ السابق", payload: MESSENGER_LIST_NAV_PREV });
+      if (safePage < totalPages - 1) nav.push({ title: "التالي ⏭", payload: MESSENGER_LIST_NAV_NEXT });
+      const quickReplies = buildQuickReplies([
+        ...nav,
+        ...pageItems.map((item) => ({ title: item.label, payload: `${MESSENGER_PICK_PREFIX}${item.index}` })),
+      ]);
+      const allLines = [titleText, MESSENGER_PICK_INSTRUCTION];
+      if (totalPages > 1) allLines.push(`صفحة ${safePage + 1} من ${totalPages}`);
+      allLines.push(...pageItems.map((item, i) => `${i + 1}. ${item.label}`));
       const texts = [];
       let chunk = [];
       let chunkLen = 0;
@@ -9522,7 +9566,41 @@ export default {
         texts,
         voiceUrl: null,
         listIndices: items.map((item) => item.index),
+        listLabels: items.map((item) => item.label),
+        listTitle: titleText,
       };
+    }
+
+    // Typed list navigation ("التالي" / "السابق", with or without the
+    // button emoji, "next" / "prev"): +1, -1, or 0 when the text is not a
+    // nav word. Never a name, a search, or a number pick.
+    function messengerListNavDirection(text) {
+      const t = String(text ?? "").replace(/[⏭⏮]/gu, "").trim();
+      if (t === "التالي" || t.toLowerCase() === "next") return 1;
+      if (t === "السابق" || t.toLowerCase() === "prev") return -1;
+      return 0;
+    }
+
+    // Turn the sender's stored dictionary list one page in the given
+    // direction and render it; out of range answers with the short
+    // end-of-list text instead of re-sending the page. A stored list
+    // without labels/title (written before paging existed) cannot be
+    // re-rendered, so it asks for a fresh search.
+    async function messengerListPagePlan(env, senderId, direction) {
+      const stored = await getMessengerLastList(env, senderId);
+      if (!stored || !Array.isArray(stored.labels) || stored.labels.length !== stored.indices.length || !stored.title) {
+        return { texts: [{ text: MESSENGER_LIST_EXPIRED_TEXT }], voiceUrl: null };
+      }
+      const totalPages = Math.max(1, Math.ceil(stored.indices.length / MESSENGER_LIST_PAGE_SIZE));
+      const current = Math.min(Math.max(0, Number(stored.page ?? 0)), totalPages - 1);
+      const next = current + direction;
+      if (next < 0 || next >= totalPages) {
+        return { texts: [{ text: MESSENGER_LIST_END_TEXT }], voiceUrl: null };
+      }
+      const items = stored.indices.map((index, i) => ({ index, label: stored.labels[i] }));
+      const plan = messengerListPlan(items, stored.title, next);
+      await setMessengerLastList(env, senderId, plan.listIndices, { labels: plan.listLabels, title: plan.listTitle, page: next });
+      return plan;
     }
 
     // The Telegram bot's own search, adapted: one exact match -> the card
@@ -9541,9 +9619,13 @@ export default {
       if (/^\d+$/u.test(folded) && senderId != null) {
         const live = await getMessengerLastList(env, senderId);
         if (live) {
+          // Numbers are relative to the SHOWN page (1–15): page 2's "1"
+          // is the 16th item of the stored list. Out of range falls
+          // through to a normal search for the number, as before.
           const n = Number(folded);
-          if (Number.isInteger(n) && n >= 1 && n <= live.indices.length) {
-            return messengerPickPlan(env, live.indices[n - 1]);
+          const globalAt = Number(live.page ?? 0) * MESSENGER_LIST_PAGE_SIZE + (n - 1);
+          if (Number.isInteger(n) && n >= 1 && n <= MESSENGER_LIST_PAGE_SIZE && live.indices[globalAt] !== undefined) {
+            return messengerPickPlan(env, live.indices[globalAt]);
           }
         }
       }
@@ -9573,7 +9655,7 @@ export default {
         );
         if (!items.length) return { texts: [{ text: uiTextFor(text).noResult }], voiceUrl: null };
         const plan = messengerListPlan(items, uiTextFor(text).choose);
-        await setMessengerLastList(env, senderId, plan.listIndices);
+        await setMessengerLastList(env, senderId, plan.listIndices, { labels: plan.listLabels, title: plan.listTitle, page: 0 });
         return plan;
       }
       const suggestions = suggestSimilar(text, 3);
@@ -9583,7 +9665,7 @@ export default {
           .filter((item) => item.index >= 0 && item.label);
         if (items.length) {
           const plan = messengerListPlan(items, uiTextFor(text).didYouMean);
-          await setMessengerLastList(env, senderId, plan.listIndices);
+          await setMessengerLastList(env, senderId, plan.listIndices, { labels: plan.listLabels, title: plan.listTitle, page: 0 });
           return plan;
         }
       }
@@ -9716,6 +9798,23 @@ export default {
             const namePlan = await messengerNameGate(env, senderId, query, ctx);
             if (namePlan) return namePlan;
           }
+          // Dictionary-list paging ("التالي ⏭" / "⏮ السابق", typed):
+          // a live list turns one page — unless a parity flow is active
+          // (a code/name/phone is expected), a lesson is open (lesson nav
+          // owns these words there), or a parity menu is newer than the
+          // list — then parity answers as today.
+          const navDir = messengerListNavDirection(query);
+          if (navDir !== 0 && senderId != null) {
+            const parityState = await messengerParityLoadState(env, senderId);
+            const flowActive = Boolean(parityState?.certAwaiting || parityState?.getcodeStep || parityState?.examAwaiting || parityState?.pendingBroadcast || parityState?.pendingConfirm);
+            if (!flowActive && !parityState?.lastLessonId) {
+              const dictList = await getMessengerLastList(env, senderId);
+              const menuAt = parityState?.menuList ? Number(parityState.menuListAt ?? 0) : 0;
+              if (dictList && Number(dictList.at ?? 0) >= menuAt) {
+                return messengerListPagePlan(env, senderId, navDir);
+              }
+            }
+          }
           const folded = messengerNormalizeDigits(String(query ?? "").trim());
           if (/^\d+$/u.test(folded) && senderId != null) {
             const parityState = await messengerParityLoadState(env, senderId);
@@ -9739,6 +9838,11 @@ export default {
           if (typeof payload === "string" && MESSENGER_PARITY_PAYLOAD_PREFIXES.some((p) => payload.startsWith(p))) {
             return messengerParity.handlePick(senderId, payload);
           }
+          // Dictionary-list paging quick replies ("التالي ⏭" / "⏮ السابق"):
+          // the payload carries no record index, so it turns the stored
+          // list instead of picking. Bypasses the name gate like picks do.
+          if (payload === MESSENGER_LIST_NAV_NEXT) return messengerListPagePlan(env, senderId, 1);
+          if (payload === MESSENGER_LIST_NAV_PREV) return messengerListPagePlan(env, senderId, -1);
           const index = Number(payload);
           return messengerPickPlan(env, index);
         },
