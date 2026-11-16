@@ -847,3 +847,87 @@ test("wiring: admin /broadcast confirms, then the task sends to Messenger recipi
   assert.ok(texts.some((t) => t.includes("hello from the bot")), "broadcast text reaches recipients");
   assert.ok(texts.some((t) => /تم إرسال البث إلى 2 من 2/u.test(t)), "admin gets the done report");
 });
+
+// ---------------------------------------------------------------------------
+// First-time name registration (Telegram parity: FIRST_TIME_TEXT /
+// isValidFullName / name capture in src/index.js). The gate asks ONLY on
+// /start; while waiting, plain text is the name attempt, commands keep
+// working, /cancel never clears the gate, and a valid name registers
+// the user (welcome + help) and notifies the admin.
+// ---------------------------------------------------------------------------
+
+const FIRST_TIME_TEXT = "مرحبًا بك! يبدو أنك تستخدم البوت لأول مرة، الرجاء إدخال اسمك بدون رموز للبدء في استخدام القاموس القبطي الناطق.";
+const NAME_RETRY_TEXT = "الرجاء إدخال اسمك صحيحاً بالحروف فقط بدون رموز ولا أرقام.";
+
+test("wiring: first /start asks for the name; invalid names retry; a valid name registers and lifts the gate", async () => {
+  const kv = fakeKv();
+  const kvEnv = { ...env, USERS: kv };
+  // New user: /start asks for the name, nothing else.
+  let calls = await sendMessengerText("/start", { envOverride: kvEnv });
+  assert.equal(calls.length, 2, "typing_on + the first-time prompt");
+  assert.equal(calls[0].payload.sender_action, "typing_on");
+  assert.equal(calls[1].payload.message.text, FIRST_TIME_TEXT);
+  // A word while waiting is a name attempt, not a search: digits fail
+  // validation, so the retry text comes back and no card/list is sent.
+  calls = await sendMessengerText("123", { envOverride: kvEnv });
+  assert.equal(calls.length, 2, "typing_on + retry text");
+  assert.equal(calls[1].payload.message.text, NAME_RETRY_TEXT);
+  assert.doesNotMatch(calls[1].payload.message.text, /المعنى|نتائج/u);
+  // Symbols/digits mixed into a name fail the same way, gate stays.
+  calls = await sendMessengerText("أحمد123", { envOverride: kvEnv });
+  assert.equal(calls[1].payload.message.text, NAME_RETRY_TEXT);
+  // A valid name registers: welcome caption + help, quick replies on
+  // the last text — Telegram's welcome + commands list, plain text.
+  calls = await sendMessengerText("أحمد محمد علي", { envOverride: kvEnv });
+  assert.equal(calls.length, 3, "typing_on + welcome + help");
+  assert.match(calls[1].payload.message.text, /مرحبًا بك أحمد محمد علي، في القاموس القبطي الناطق/u);
+  assert.match(calls[2].payload.message.text, /القاموس القبطي — المساعدة/u);
+  assert.ok(Array.isArray(calls[2].payload.message.quick_replies), "menu quick replies on the last text");
+  const stored = kv.store.get("user:msgr:987654321");
+  assert.equal(stored?.name, "أحمد محمد علي");
+  assert.equal(stored?.awaitingName, undefined);
+  assert.equal(typeof stored?.registeredAt, "string");
+  // The gate is lifted: a search works, and /start shows the welcome.
+  calls = await sendMessengerText("نور", { envOverride: kvEnv });
+  assert.match(calls.map((c) => c.payload.message?.text ?? "").join("\n"), /أرسل رقمًا للاختيار/u);
+  calls = await sendMessengerText("/start", { envOverride: kvEnv });
+  assert.match(calls.at(-1).payload.message.text, /ابعت أي كلمة/u, "registered /start shows the parity welcome, not the name prompt");
+  assert.doesNotMatch(calls.map((c) => c.payload.message?.text ?? "").join("\n"), /لأول مرة/u);
+});
+
+test("wiring: registering notifies the admin by Messenger DM, but not when the sender is the admin", async () => {
+  const kv = fakeKv();
+  const adminEnv = { ...env, USERS: kv, MESSENGER_ADMIN_PSID: "111222333" };
+  await sendMessengerText("/start", { envOverride: adminEnv });
+  const calls = await sendMessengerText("ليلى أحمد حسن", { envOverride: adminEnv });
+  const adminDm = calls.find((c) => c.payload.recipient?.id === "111222333");
+  assert.ok(adminDm, "an admin DM is sent on registration");
+  assert.match(adminDm.payload.message.text, /أكمل التسجيل: ليلى أحمد حسن/u);
+  assert.match(adminDm.payload.message.text, /987654321/u);
+  // The admin registering themself gets no DM (Telegram skips the
+  // notify for admins).
+  const kv2 = fakeKv();
+  const selfAdminEnv = { ...env, USERS: kv2, MESSENGER_ADMIN_PSID: SENDER_ID };
+  await sendMessengerText("/start", { envOverride: selfAdminEnv });
+  const selfCalls = await sendMessengerText("منى أحمد علي", { envOverride: selfAdminEnv });
+  assert.equal(selfCalls.length, 3, "typing_on + welcome + help, no admin DM");
+  assert.doesNotMatch(selfCalls.map((c) => c.payload.message?.text ?? "").join("\n"), /أكمل التسجيل/u);
+});
+
+test("wiring: /cancel while waiting for the name does not clear the gate; /menu still works", async () => {
+  const kv = fakeKv();
+  const kvEnv = { ...env, USERS: kv };
+  await sendMessengerText("/start", { envOverride: kvEnv });
+  // /menu is a command: it works while waiting (Telegram: commands
+  // keep working) and the gate stays.
+  let calls = await sendMessengerText("/menu", { envOverride: kvEnv });
+  assert.match(calls.at(-1).payload.message.text, /القاموس القبطي\* — القائمة/u);
+  // /cancel while waiting: Telegram's fallback text, gate stays.
+  calls = await sendMessengerText("/cancel", { envOverride: kvEnv });
+  assert.equal(calls.at(-1).payload.message.text, "اكتب الكلمة مباشرة للبحث أو استخدم /start للبدء.");
+  // /start re-prompts, and the name still registers afterwards.
+  calls = await sendMessengerText("/start", { envOverride: kvEnv });
+  assert.equal(calls.at(-1).payload.message.text, FIRST_TIME_TEXT);
+  calls = await sendMessengerText("منى علي حسن", { envOverride: kvEnv });
+  assert.match(calls[1].payload.message.text, /مرحبًا بك منى علي حسن/u);
+});

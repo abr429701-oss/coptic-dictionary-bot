@@ -1332,7 +1332,7 @@ import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VI
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 import { getHiddenUi, setHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
 import { verifyMessengerSignature, handleMessengerWebhookBody, plainTextCard, buildQuickReplies, sendMessengerMessage, messengerTextMessage, MESSENGER_PICK_PREFIX } from "./messenger.js";
-import { createMessengerParity, MESSENGER_PARITY_PAYLOAD_PREFIXES } from "./messenger-parity.js";
+import { createMessengerParity, MESSENGER_PARITY_PAYLOAD_PREFIXES, parityHelpText, MAIN_MENU_ITEMS } from "./messenger-parity.js";
 import { LEARN_LEVELS } from "./learn-manifest.js";
 import { LEARN_IMPORT_KEY, LEARN_GET_CODE_TEXT, learnUploadItems, emptyImportState, normalizeImportState, importProgress, learnPendingItems, learnManifestHash, isImportStateTrusted, findLearnLesson, learnLessonSendPlan, buildLearnMenus, mergeMenus, uploadLearnFile, runImportUploads, parseImportLearnArg, learnImportStartText, learnProgressText } from "./learn-import.js";
 
@@ -9229,6 +9229,85 @@ export default {
       }
     }
 
+    // First-time name registration (Telegram parity: FIRST_TIME_TEXT,
+    // /start gate at 8306, name capture at 8492-8504). Telegram asks for
+    // the name ONLY on /start, never on a first word: a new user who
+    // searches directly gets results, and is prompted the first time
+    // they send /start. While awaitingName, plain text is the name
+    // attempt (validated by isValidFullName, the same rule); commands
+    // keep working, /cancel never clears the gate (it clears an open
+    // cert/get-code flow, or falls back to Telegram's "write the word"
+    // text), and quick-reply picks are never gated — planFor.pick
+    // bypasses this entirely, like Telegram's menu handler running
+    // before its name check. A banned user stays silent: the ban check
+    // runs first and the gate returns null so parity silences them.
+    // The name lives on the `user:msgr:<PSID>` record root (name /
+    // awaitingName / registeredAt), exactly like Telegram's user
+    // record, so /users shows it; the sheet push uses the
+    // `msgr:<PSID>` id, the same id /syncusers already writes for
+    // Messenger users. Returns a plan, or null to fall through.
+    async function messengerNameGate(env, senderId, trimmed, ctx) {
+      if (!env?.USERS || senderId == null) return null;
+      const text = String(trimmed ?? "").trim();
+      try {
+        if (await isBanned(env, senderId)) return null;
+      } catch {
+        /* a failed ban check never blocks the message */
+      }
+      const record = await getUser(env, `msgr:${senderId}`);
+      const isStart = text === "/start" || text.startsWith("/start ");
+      // /start: a user with a stored name falls through to the parity
+      // welcome; a user without one is asked, and any open cert /
+      // get-code / exam flow is cleared first (Telegram's /start clears
+      // certAwaiting/getcodeStep before the name check).
+      if (isStart) {
+        if (record?.name) return null;
+        const parity = record?.parity ?? {};
+        const next = { ...(record ?? {}), awaitingName: true };
+        if (parity.certAwaiting || parity.getcodeStep || parity.getcodeName || parity.examAwaiting) {
+          next.parity = { ...parity, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, examAwaiting: undefined };
+        }
+        await saveUser(env, `msgr:${senderId}`, next);
+        return { texts: [{ text: FIRST_TIME_TEXT }], voiceUrl: null };
+      }
+      if (!record?.awaitingName) return null;
+      // /cancel while waiting: Telegram clears an open cert/get-code
+      // flow with its own confirmation, otherwise falls through to the
+      // "write the word" text — and never clears awaitingName.
+      if (text === "/cancel") {
+        const parity = record?.parity ?? {};
+        if (parity.certAwaiting) {
+          await saveUser(env, `msgr:${senderId}`, { ...record, parity: { ...parity, certAwaiting: undefined } });
+          return { texts: [{ text: "✅ تم إلغاء إدخال الرقم الكودي." }], voiceUrl: null };
+        }
+        if (parity.getcodeStep) {
+          await saveUser(env, `msgr:${senderId}`, { ...record, parity: { ...parity, getcodeStep: undefined, getcodeName: undefined } });
+          return { texts: [{ text: "✅ تم إلغاء الحصول على الرقم الكودي." }], voiceUrl: null };
+        }
+        return { texts: [{ text: "اكتب الكلمة مباشرة للبحث أو استخدم /start للبدء." }], voiceUrl: null };
+      }
+      if (!text || text.startsWith("/")) return null; // commands keep working
+      if (!isValidFullName(text)) {
+        return { texts: [{ text: NAME_RETRY_TEXT }], voiceUrl: null };
+      }
+      const name = text.replace(/\s+/gu, " ").trim();
+      const completed = { ...record, name, awaitingName: undefined, registeredAt: new Date().toISOString() };
+      await saveUser(env, `msgr:${senderId}`, completed);
+      // Sheet push, like Telegram's name completion (line 8500).
+      await inBackground(ctx, pushUsers(env, [userSheetRow(`msgr:${senderId}`, completed, {})]));
+      const caption = plainTextCard(await getWelcomeCaption(env, name));
+      const replies = buildQuickReplies(MAIN_MENU_ITEMS.map((item) => ({ title: item.label, payload: item.payload })));
+      const plan = {
+        texts: [{ text: caption }, { text: parityHelpText(), quickReplies: replies }],
+        voiceUrl: null,
+      };
+      const adminPsids = String(env.MESSENGER_ADMIN_PSID ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+      if (adminPsids.length && !adminPsids.includes(String(senderId))) {
+        plan.task = { type: "send-dm", to: adminPsids[0], text: `✅ أكمل التسجيل: ${name} (🆔 ${senderId})` };
+      }
+      return plan;
+    }
+
     // Messenger users only (keys `user:msgr:<PSID>`), bare PSIDs for
     // display: Telegram users belong to the Telegram /users, and a
     // Telegram numeric id is not a Page-scoped id — messaging it from
@@ -9629,6 +9708,14 @@ export default {
         // code, a get-code step, an exam code, a broadcast/confirm
         // pending), the number belongs to the flow, not to any list.
         text: async (query, senderId) => {
+          // First-time name registration (Telegram parity): the gate
+          // runs before flows and search; a plan means the turn is
+          // answered here, null means normal routing (commands, flows,
+          // dictionary search) proceeds untouched.
+          if (senderId != null) {
+            const namePlan = await messengerNameGate(env, senderId, query, ctx);
+            if (namePlan) return namePlan;
+          }
           const folded = messengerNormalizeDigits(String(query ?? "").trim());
           if (/^\d+$/u.test(folded) && senderId != null) {
             const parityState = await messengerParityLoadState(env, senderId);
