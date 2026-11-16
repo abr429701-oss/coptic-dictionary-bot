@@ -11,6 +11,7 @@ import {
   buildQuickReplies,
   sendMessengerMessage,
   sendMessengerPhotoBytes,
+  sendMessengerSenderAction,
   messengerAudioMessage,
   messengerAttachmentMessage,
   handleMessengerMessaging,
@@ -254,8 +255,11 @@ test("messenger search round-trip: one exact match sends the card text then the 
   try {
     const response = await postSigned(messageEvent({ text: SINGLE.query }));
     assert.equal(response.status, 200);
-    assert.equal(calls.length, 1 + MESSENGER_VOICE_REPEATS, `expected text + ${MESSENGER_VOICE_REPEATS} audio, got ${JSON.stringify(calls.map((c) => c.payload?.message))}`);
-    const [textCall, ...audioCalls] = calls;
+    // typing_on first, then the card text, then the voice 3 times.
+    assert.equal(calls.length, 2 + MESSENGER_VOICE_REPEATS, `expected typing + text + ${MESSENGER_VOICE_REPEATS} audio, got ${JSON.stringify(calls.map((c) => c.payload?.message ?? c.payload?.sender_action))}`);
+    const [typingCall, textCall, ...audioCalls] = calls;
+    assert.equal(typingCall.payload.sender_action, "typing_on", "the user must see 'typing...' while the card is computed");
+    assert.equal(typingCall.payload.message, undefined, "a sender action carries no message");
     assert.equal(audioCalls.length, MESSENGER_VOICE_REPEATS);
     for (const call of calls) {
       assert.equal(call.url, MESSENGER_SEND_URL);
@@ -291,8 +295,9 @@ test("messenger search round-trip: several matches send the full list with quick
     // "نور" has 45 candidates at the 200 limit (was 10): the whole list
     // goes out in one text message, and the list message is the LAST (and
     // only) message of the turn, so its quick replies stay visible.
-    assert.equal(calls.length, 1, "a list sends text only, no voice, nothing after the list");
-    const message = calls[0].payload.message;
+    assert.equal(calls.length, 2, "typing_on + one list text, no voice, nothing after the list");
+    assert.equal(calls[0].payload.sender_action, "typing_on");
+    const message = calls[1].payload.message;
     assert.match(message.text, /^اختر من الاقتراحات التالية:/u);
     const lines = message.text.split("\n");
     assert.equal(lines[1], "أرسل رقمًا للاختيار.", "the pick instruction sits above the items, under the title");
@@ -323,8 +328,9 @@ test("messenger no-result search offers did-you-mean suggestions", async () => {
   try {
     const response = await postSigned(messageEvent({ text: TYPO.query }));
     assert.equal(response.status, 200);
-    assert.equal(calls.length, 1);
-    const message = calls[0].payload.message;
+    assert.equal(calls.length, 2, "typing_on + the suggestions text");
+    assert.equal(calls[0].payload.sender_action, "typing_on");
+    const message = calls[1].payload.message;
     // Header language follows the query's UI language (the Telegram bot's
     // own uiTextFor: Latin queries get the English header on a cold cache).
     assert.match(message.text, /^🤔 (هل تقصد|Did you mean|Meinten Sie|Vouliez-vous dire)/u);
@@ -350,12 +356,13 @@ test("messenger quick-reply pick sends the full word card and the voice 3 times"
       quick_reply: { payload: `${MESSENGER_PICK_PREFIX}${suggestion.index}` },
     }));
     assert.equal(response.status, 200);
-    assert.equal(calls.length, 1 + MESSENGER_VOICE_REPEATS, "text + 3 audio sends");
-    const text = calls[0].payload.message.text;
+    assert.equal(calls.length, 2 + MESSENGER_VOICE_REPEATS, "typing_on + text + 3 audio sends");
+    assert.equal(calls[0].payload.sender_action, "typing_on");
+    const text = calls[1].payload.message.text;
     assert.ok(text.includes(String(record.coptic)), "card must carry the Coptic headword");
     assert.ok(text.includes(suggestion.label), "card must carry the picked word's meaning");
     assert.doesNotMatch(text, /<b>|<\/b>/u);
-    for (const audioCall of calls.slice(1)) {
+    for (const audioCall of calls.slice(2)) {
       assert.equal(audioCall.payload.message.attachment.type, "audio");
       assert.equal(audioCall.payload.message.attachment.payload.url, prebuiltAudioUrl(env, record.id));
       assert.equal(audioCall.payload.message.attachment.payload.is_reusable, true);
@@ -371,13 +378,14 @@ test("messenger exact match among many candidates sends the card directly, not t
   assert.equal(localDictionaryCandidates("ⲁⲑⲙⲟϣⲓ", 10).exactCount, 1);
   assert.equal(localDictionaryCandidates("ⲁⲑⲙⲟϣⲓ", 10).candidates.length, 10);
   const calls = await sendMessengerText("ⲁⲑⲙⲟϣⲓ");
-  assert.equal(calls.length, 1 + MESSENGER_VOICE_REPEATS, "card text + voice 3 times");
-  const text = calls[0].payload.message.text;
+  assert.equal(calls.length, 2 + MESSENGER_VOICE_REPEATS, "typing_on + card text + voice 3 times");
+  assert.equal(calls[0].payload.sender_action, "typing_on");
+  const text = calls[1].payload.message.text;
   assert.ok(text.includes("ⲁⲑⲙⲟϣⲓ"), "card must carry the exact word");
   assert.doesNotMatch(text, /^اختر من الاقتراحات التالية:/u, "must not be the suggestions list");
-  assert.ok(!calls[0].payload.message.quick_replies, "a card carries no quick replies");
+  assert.ok(!calls[1].payload.message.quick_replies, "a card carries no quick replies");
   const record = records.find((r) => r.coptic === "ⲁⲑⲙⲟϣⲓ");
-  for (const audioCall of calls.slice(1)) {
+  for (const audioCall of calls.slice(2)) {
     assert.equal(audioCall.payload.message.attachment.payload.url, prebuiltAudioUrl(env, record.id));
   }
 });
@@ -387,8 +395,9 @@ test("messenger same-spelling exact matches in several rows open the card", asyn
   // same-spelling rows to one word, so the card opens directly.
   assert.ok(localDictionaryCandidates("ⲁⲃⲁϫⲏⲓⲛⲓ", 200).exactCount > 1);
   const calls = await sendMessengerText("ⲁⲃⲁϫⲏⲓⲛⲓ");
-  assert.ok(calls.length >= 1);
-  const text = calls[0].payload.message.text;
+  assert.ok(calls.length >= 2);
+  assert.equal(calls[0].payload.sender_action, "typing_on");
+  const text = calls[1].payload.message.text;
   assert.ok(text.includes("ⲁⲃⲁϫⲏⲓⲛⲓ"));
   assert.doesNotMatch(text, /^اختر من الاقتراحات التالية:/u, "same word, several rows: card, not list");
 });
@@ -414,14 +423,16 @@ test("messenger list order: labels starting with the query come first", async ()
 
 test("messenger long list splits into chunks with quick replies only on the last", async () => {
   const calls = await sendMessengerText("مال");
-  assert.ok(calls.length > 1, "200 items do not fit Meta's 2000-char text limit in one message");
-  for (const call of calls) {
+  assert.ok(calls.length > 2, "200 items do not fit Meta's 2000-char text limit in one message");
+  assert.equal(calls[0].payload.sender_action, "typing_on");
+  const textCalls = calls.filter((call) => call.payload.message);
+  for (const call of textCalls) {
     assert.ok(call.payload.message.text.length <= 2000, `chunk over 2000 chars: ${call.payload.message.text.length}`);
     assert.doesNotMatch(call.payload.message.text, /<b>|<\/b>/u);
   }
   assert.equal(numberedLines(calls).length, 200, "every result is still shown, across chunks");
-  assert.match(calls[0].payload.message.text, /^اختر من الاقتراحات التالية:\nأرسل رقمًا للاختيار\./u);
-  for (const call of calls.slice(0, -1)) {
+  assert.match(calls[1].payload.message.text, /^اختر من الاقتراحات التالية:\nأرسل رقمًا للاختيار\./u);
+  for (const call of textCalls.slice(0, -1)) {
     assert.ok(!call.payload.message.quick_replies, "quick replies live only on the last message, or they vanish");
   }
   const last = calls[calls.length - 1].payload.message;
@@ -445,8 +456,9 @@ test("messenger voice repeats reuse Meta's attachment id instead of re-fetching 
   try {
     const response = await postSigned(messageEvent({ text: SINGLE.query }));
     assert.equal(response.status, 200);
-    assert.equal(calls.length, 1 + MESSENGER_VOICE_REPEATS);
-    const [first, second, third] = calls.slice(1);
+    assert.equal(calls.length, 2 + MESSENGER_VOICE_REPEATS);
+    assert.equal(calls[0].payload.sender_action, "typing_on");
+    const [first, second, third] = calls.slice(2);
     assert.equal(first.payload.message.attachment.payload.url, prebuiltAudioUrl(env, SINGLE.record.id));
     assert.equal(first.payload.message.attachment.payload.is_reusable, true);
     for (const repeat of [second, third]) {
@@ -468,6 +480,55 @@ test("sendMessengerMessage returns Meta's attachment id", async () => {
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+test("sendMessengerSenderAction posts typing_on / typing_off with no message payload", async () => {
+  const calls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), payload: JSON.parse(options.body), auth: options.headers?.authorization });
+    return Response.json({ recipient_id: SENDER_ID });
+  };
+  try {
+    const on = await sendMessengerSenderAction(env, SENDER_ID, "typing_on");
+    assert.equal(on.ok, true);
+    assert.equal(on.recipientId, SENDER_ID);
+    const off = await sendMessengerSenderAction(env, SENDER_ID, "typing_off");
+    assert.equal(off.ok, true);
+    assert.equal(calls.length, 2);
+    for (const [i, action] of ["typing_on", "typing_off"].entries()) {
+      assert.equal(calls[i].url, MESSENGER_SEND_URL);
+      assert.equal(calls[i].auth, `Bearer ${PAGE_TOKEN}`);
+      assert.equal(calls[i].payload.recipient.id, SENDER_ID);
+      assert.equal(calls[i].payload.sender_action, action);
+      assert.equal(calls[i].payload.messaging_type, "RESPONSE");
+      assert.equal(calls[i].payload.message, undefined, "a sender action carries no message");
+    }
+    assert.equal((await sendMessengerSenderAction({}, SENDER_ID, "typing_on")).error, "missing-page-token");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("messenger plan failure turns typing off and stays silent", async () => {
+  const calls = [];
+  const fetchImpl = async (url, options = {}) => {
+    calls.push({ payload: JSON.parse(options.body) });
+    return Response.json({ recipient_id: SENDER_ID, message_id: "mid.test-1" });
+  };
+  const planFor = {
+    text: async () => { throw new Error("boom"); },
+    pick: async () => null,
+  };
+  const event = {
+    sender: { id: SENDER_ID },
+    recipient: { id: PAGE_ID },
+    timestamp: 1794791000000,
+    message: { mid: "mid.1", text: "hello" },
+  };
+  assert.equal(await handleMessengerMessaging(env, event, planFor, fetchImpl), false);
+  assert.deepEqual(calls.map((c) => c.payload.sender_action), ["typing_on", "typing_off"]);
+  assert.ok(calls.every((c) => c.payload.message === undefined));
 });
 
 test("messengerVoiceUrl priority: recorded human, then prebuilt, then Joanna, then none", () => {
@@ -502,15 +563,16 @@ test("messengerVoiceUrl priority: recorded human, then prebuilt, then Joanna, th
 test("messenger bare number picks from the last list, same card as the quick reply", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   const listCalls = await sendMessengerText("نور", { envOverride: kvEnv });
-  assert.equal(listCalls.length, 1);
-  const lines = listCalls[0].payload.message.text.split("\n");
+  assert.equal(listCalls.length, 2, "typing_on + the list text");
+  assert.equal(listCalls[0].payload.sender_action, "typing_on");
+  const lines = listCalls[1].payload.message.text.split("\n");
   assert.equal(lines[1], "أرسل رقمًا للاختيار.");
   const label2 = lines.find((line) => line.startsWith("2. "))?.slice(3);
   assert.ok(label2, "expected a second list item");
-  const pickPayload = listCalls[0].payload.message.quick_replies[1].payload;
+  const pickPayload = listCalls[1].payload.message.quick_replies[1].payload;
   assert.match(pickPayload, new RegExp(`^${MESSENGER_PICK_PREFIX}\\d+$`, "u"));
   const numCalls = await sendMessengerText("2", { envOverride: kvEnv });
-  const numCard = numCalls[0].payload.message.text;
+  const numCard = numCalls[1].payload.message.text;
   assert.ok(numCard.includes(label2), "the number pick must open item 2's card");
   assert.doesNotMatch(numCard, /^اختر من الاقتراحات التالية:/u, "a pick is a card, not another list");
   // The quick-reply tap itself, by payload, opens the same card.
@@ -522,7 +584,7 @@ test("messenger bare number picks from the last list, same card as the quick rep
   } finally {
     restore();
   }
-  assert.equal(tapCalls[0].payload.message.text, numCard);
+  assert.equal(tapCalls[1].payload.message.text, numCard);
 });
 
 test("messenger Arabic-Indic digits pick from the last list", async () => {
@@ -530,8 +592,8 @@ test("messenger Arabic-Indic digits pick from the last list", async () => {
   await sendMessengerText("نور", { envOverride: kvEnv });
   const western = await sendMessengerText("2", { envOverride: kvEnv });
   const arabicIndic = await sendMessengerText("٢", { envOverride: kvEnv });
-  assert.equal(arabicIndic[0].payload.message.text, western[0].payload.message.text);
-  assert.doesNotMatch(arabicIndic[0].payload.message.text, /^اختر من الاقتراحات التالية:/u);
+  assert.equal(arabicIndic[1].payload.message.text, western[1].payload.message.text);
+  assert.doesNotMatch(arabicIndic[1].payload.message.text, /^اختر من الاقتراحات التالية:/u);
 });
 
 test("messenger out-of-range number falls back to search", async () => {
@@ -541,14 +603,14 @@ test("messenger out-of-range number falls back to search", async () => {
   const freshCalls = await sendMessengerText("46", { senderId: otherSender, envOverride: kvEnv });
   const rangedCalls = await sendMessengerText("46", { envOverride: kvEnv });
   assert.equal(rangedCalls.length, freshCalls.length, "out of range (نور has 45 items): same reply as a fresh search for 46");
-  assert.equal(rangedCalls[0].payload.message.text, freshCalls[0].payload.message.text);
+  assert.equal(rangedCalls[1].payload.message.text, freshCalls[1].payload.message.text);
 });
 
 test("messenger number with no stored list is a search, per sender", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   await sendMessengerText("نور", { envOverride: kvEnv });
   const calls = await sendMessengerText("2", { senderId: "999888777", envOverride: kvEnv });
-  assert.match(calls[0].payload.message.text, /^اختر من الاقتراحات التالية:/u, "another sender has no list: 2 is searched, not picked");
+  assert.match(calls[1].payload.message.text, /^اختر من الاقتراحات التالية:/u, "another sender has no list: 2 is searched, not picked");
 });
 
 test("messenger /start returns the welcome text", async () => {
@@ -557,8 +619,9 @@ test("messenger /start returns the welcome text", async () => {
   try {
     const response = await postSigned(messageEvent({ text: "/start" }));
     assert.equal(response.status, 200);
-    assert.equal(calls.length, 1);
-    assert.match(calls[0].payload.message.text, /القاموس القبطي/u);
+    assert.equal(calls.length, 2, "typing_on + welcome text");
+    assert.equal(calls[0].payload.sender_action, "typing_on");
+    assert.match(calls[1].payload.message.text, /القاموس القبطي/u);
   } finally {
     restore();
   }
@@ -635,8 +698,9 @@ test("messenger parity quick reply routes the raw payload to planFor.pick", asyn
   };
   assert.equal(await handleMessengerMessaging(env, event, planFor, fetchImpl), true);
   assert.deepEqual(seen, [["learn|level:m_learn_l1", SENDER_ID]]);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].payload.message.text, "ok");
+  assert.equal(calls.length, 2, "typing_on + the reply text");
+  assert.equal(calls[0].payload.sender_action, "typing_on");
+  assert.equal(calls[1].payload.message.text, "ok");
 });
 
 test("messenger plan sends attachments, then photo, then texts, then runs the task", async () => {
@@ -673,13 +737,13 @@ test("messenger plan sends attachments, then photo, then texts, then runs the ta
   };
   assert.equal(await handleMessengerMessaging(env, event, planFor, fetchImpl), true);
   assert.deepEqual(
-    calls.map((c) => (c.kind === "form" ? "form" : (c.payload.message.attachment?.type ?? "text"))),
-    ["video", "image", "form", "text", "text"],
-    "attachments, then photo upload, then texts — nothing after the last text",
+    calls.map((c) => (c.kind === "form" ? "form" : (c.payload.sender_action ?? c.payload.message.attachment?.type ?? "text"))),
+    ["typing_on", "video", "image", "form", "text", "text"],
+    "typing first, then attachments, then photo upload, then texts — nothing after the last text",
   );
-  assert.equal(calls[3].payload.message.text, "caption");
-  assert.equal(calls[4].payload.message.text, "nav");
-  assert.ok(Array.isArray(calls[4].payload.message.quick_replies), "quick replies stay on the last text");
+  assert.equal(calls[4].payload.message.text, "caption");
+  assert.equal(calls[5].payload.message.text, "nav");
+  assert.ok(Array.isArray(calls[5].payload.message.quick_replies), "quick replies stay on the last text");
   assert.deepEqual(tasks, [[{ type: "broadcast", text: "hi", from: SENDER_ID }, SENDER_ID]]);
 });
 
@@ -719,17 +783,23 @@ test("sendMessengerPhotoBytes posts multipart with recipient, message and fileda
 test("wiring: /learn returns the levels menu with quick replies (parity wired)", async () => {
   const kv = fakeKv();
   const calls = await sendMessengerText("/learn", { envOverride: { ...env, USERS: kv } });
-  assert.ok(calls.length >= 1, "one text should be sent");
-  const body = calls[0].payload.message.text;
+  assert.ok(calls.length >= 2, "typing_on + one text should be sent");
+  assert.equal(calls[0].payload.sender_action, "typing_on");
+  const body = calls[1].payload.message.text;
   assert.match(body, /🎓 \*التعلم\* — اختر المستوى:/u);
   assert.match(body, /1\. .*\(17 درسًا\)/u, "level 1 lists 17 lessons");
   assert.match(body, /2\. .*\(10 درسًا\)/u, "level 2 lists 10 lessons");
-  assert.ok(Array.isArray(calls[0].payload.message.quick_replies), "quick replies on the last text");
+  assert.ok(Array.isArray(calls[1].payload.message.quick_replies), "quick replies on the last text");
 });
 
 test("wiring: non-admin /admin stays silent (fail-closed, no admin PSID configured)", async () => {
   const calls = await sendMessengerText("/admin", { envOverride: env });
-  assert.equal(calls.length, 0, "a non-admin must get no reply at all");
+  // Typing on, then off again: no message is ever sent, and no stale
+  // "typing..." lingers for the stranger.
+  assert.equal(calls.length, 2, "a non-admin must get no reply at all, only typing on/off");
+  assert.equal(calls[0].payload.sender_action, "typing_on");
+  assert.equal(calls[1].payload.sender_action, "typing_off");
+  assert.ok(calls.every((c) => c.payload.message === undefined), "no message payload in either call");
 });
 
 test("wiring: bare number routes to the most recent list — dictionary list beats a stale menu", async () => {
@@ -738,7 +808,7 @@ test("wiring: bare number routes to the most recent list — dictionary list bea
   await sendMessengerText("/learn", { envOverride: kvEnv });
   await sendMessengerText("نور", { envOverride: kvEnv });
   const calls = await sendMessengerText("1", { envOverride: kvEnv });
-  const texts = calls.map((c) => c.payload.message.text ?? "").join("\n");
+  const texts = calls.map((c) => c.payload.message?.text ?? "").join("\n");
   assert.match(texts, /المعنى/u, "number 1 picks the first dictionary word, not lesson 1");
 });
 
@@ -748,7 +818,7 @@ test("wiring: bare number routes to the parity menu when the menu is newest", as
   await sendMessengerText("نور", { envOverride: kvEnv });
   await sendMessengerText("/learn", { envOverride: kvEnv });
   const calls = await sendMessengerText("1", { envOverride: kvEnv });
-  const texts = calls.map((c) => c.payload.message.text ?? "").join("\n");
+  const texts = calls.map((c) => c.payload.message?.text ?? "").join("\n");
   assert.match(texts, /درس/u, "number 1 opens the first level's lessons");
 });
 
@@ -773,7 +843,7 @@ test("wiring: admin /broadcast confirms, then the task sends to Messenger recipi
   const confirmCalls = await sendMessengerText("/broadcast hello from the bot", { envOverride: adminEnv });
   assert.ok(confirmCalls.length >= 1, "confirm prompt is sent");
   const calls = await sendMessengerText("نعم", { envOverride: adminEnv });
-  const texts = calls.map((c) => c.payload.message.text ?? "");
+  const texts = calls.map((c) => c.payload.message?.text ?? "");
   assert.ok(texts.some((t) => t.includes("hello from the bot")), "broadcast text reaches recipients");
   assert.ok(texts.some((t) => /تم إرسال البث إلى 2 من 2/u.test(t)), "admin gets the done report");
 });

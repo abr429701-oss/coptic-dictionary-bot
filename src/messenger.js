@@ -219,6 +219,46 @@ export async function sendMessengerMessage(env, recipientId, message, fetchImpl 
   return { ok: true, messageId: result.message_id, attachmentId: result.attachment_id ?? null, recipientId: result.recipient_id ?? String(recipientId) };
 }
 
+// Typing indicator ("يكتب..."): POST sender_action typing_on / typing_off
+// to the same Send API endpoint. The user sees "typing..." while the plan
+// is computed (dictionary search, Sheets lookups) — Telegram shows it,
+// Messenger must too. A missing token or a failed send never blocks the
+// reply: the indicator is best effort, the message is the contract. Meta
+// answers a sender action with { recipient_id } and no message_id.
+export async function sendMessengerSenderAction(env, recipientId, action, fetchImpl = globalThis.fetch) {
+  const token = env?.MESSENGER_PAGE_TOKEN;
+  if (!token) return { ok: false, error: "missing-page-token" };
+  let response;
+  try {
+    response = await fetchImpl(MESSENGER_SEND_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        recipient: { id: String(recipientId) },
+        sender_action: action,
+        messaging_type: "RESPONSE",
+      }),
+    });
+  } catch (error) {
+    console.error("Messenger sender action failed (network)", error instanceof Error ? error.message : "unknown");
+    return { ok: false, error: "network" };
+  }
+  let result = null;
+  try {
+    result = await response.json();
+  } catch {
+    /* Meta answers JSON; a non-JSON body is a failure */
+  }
+  if (!response.ok || !result?.recipient_id) {
+    console.error("Messenger sender action failed", response.status, result?.error?.message ?? "unknown");
+    return { ok: false, error: result?.error?.message ?? `http-${response.status}` };
+  }
+  return { ok: true, recipientId: result.recipient_id };
+}
+
 // Multipart photo upload (a ready certificate arrives as bytes, not a URL):
 // POST the same Send API endpoint with recipient + message as JSON fields
 // and the bytes as `filedata`. Meta answers the same { message_id } shape.
@@ -280,7 +320,8 @@ export async function sendMessengerPhotoBytes(env, recipientId, photoBytes, fetc
 // by prefix. planFor.executeTask?.(task, senderId, fetchImpl) runs a plan's
 // side effect (broadcast, DM, import job) after the reply is sent; the
 // transport never invents a task.
-// Send order per plan: attachments (lesson media by URL) first, then a
+// Send order per plan: typing_on first (the user sees "يكتب..." while the
+// plan is computed), then attachments (lesson media by URL), then a
 // photo upload, then the texts in order, then the voice attachment, sent
 // MESSENGER_VOICE_REPEATS times with MESSENGER_VOICE_REPEAT_GAP_MS gaps
 // (text before voice — the WhatsApp port's proven order; the 3× repeat is
@@ -297,6 +338,11 @@ export async function handleMessengerMessaging(env, event, planFor, fetchImpl = 
   if (!message || message.is_echo) return false;
   const senderId = event?.sender?.id;
   if (!senderId) return false;
+  // The user sees "يكتب..." while the plan is computed — Telegram shows it,
+  // Messenger must too. A failed indicator never blocks the reply; when
+  // nothing is sent at all, turn it off again so no stale indicator lingers.
+  // (The first real message turns it off automatically.)
+  await sendMessengerSenderAction(env, senderId, "typing_on", fetchImpl);
   let plan = null;
   try {
     const payload = message.quick_reply?.payload;
@@ -311,9 +357,13 @@ export async function handleMessengerMessaging(env, event, planFor, fetchImpl = 
     }
   } catch (error) {
     console.error("Messenger plan failed", error instanceof Error ? error.message : "unknown");
+    await sendMessengerSenderAction(env, senderId, "typing_off", fetchImpl);
     return false;
   }
-  if (!plan) return false;
+  if (!plan) {
+    await sendMessengerSenderAction(env, senderId, "typing_off", fetchImpl);
+    return false;
+  }
   let sent = false;
   for (const attachment of plan.attachments ?? []) {
     if (!attachment?.url) continue;
@@ -349,6 +399,7 @@ export async function handleMessengerMessaging(env, event, planFor, fetchImpl = 
       console.error("Messenger task failed", error instanceof Error ? error.message : "unknown");
     }
   }
+  if (!sent) await sendMessengerSenderAction(env, senderId, "typing_off", fetchImpl);
   return sent;
 }
 
