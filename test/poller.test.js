@@ -24,7 +24,7 @@ const fakeAssets = {
     }
   },
 };
-const env = { TELEGRAM_BOT_TOKEN: "tok", WEBHOOK_SECRET: secret, HUMAN_AUDIO: "on", VOICE_CAPTION: "on", ASSETS: fakeAssets };
+const env = { TELEGRAM_BOT_TOKEN: "tok", WEBHOOK_SECRET: secret, VOICE_CAPTION: "on", ASSETS: fakeAssets };
 const fakeOgg = () => new Response(new Uint8Array([79, 103, 103, 83, 1, 2, 3]), { headers: { "content-type": "audio/ogg" } });
 const isGeneratedAudio = (url) => String(url).includes("raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/audio/");
 const firstMeaning = (value) => String(value ?? "").split(/[،,]/u)[0].trim();

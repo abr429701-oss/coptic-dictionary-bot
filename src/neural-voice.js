@@ -17,9 +17,6 @@ import audioManifest from "../data/audio-manifest.json" with { type: "json" };
 import audioVersions from "../data/audio-versions.json" with { type: "json" };
 
 export const NEURAL_VOICE_VERSION = "ipa-miguel-salli-once-v1";
-// Bump this whenever the external human-audio files are regenerated. This
-// prevents Telegram file_ids from an older voice build being reused forever.
-export const HUMAN_AUDIO_VERSION = "ipa-reader-joanna-v1";
 
 // -----------------------------------------------------------------------------
 // IPA normalization
@@ -340,69 +337,18 @@ export const prebuiltAudioUrl = (env, id) => {
 };
 
 // -----------------------------------------------------------------------------
-// Human-sounding audio (optional, built by scripts/gen_audio_fish.mjs into the
-// "audio-human" branch). Only used when the Worker variable HUMAN_AUDIO is "on".
-// -----------------------------------------------------------------------------
-
-export const humanAudioEnabled = (env) => env?.HUMAN_AUDIO === "on";
-
-export const humanAudioUrl = (env, id) =>
-  `${(
-    env?.AUDIO_HUMAN_BASE_URL ||
-    "https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/audio-human"
-  ).replace(/\/+$/u, "")}/${encodeURIComponent(id)}.ogg?v=${encodeURIComponent(HUMAN_AUDIO_VERSION)}`;
-
-export async function fetchHumanSpeech(env, record) {
-  if (!humanAudioEnabled(env) || record?.id == null) return null;
-  const url = humanAudioUrl(env, record.id);
-  try {
-    // Same two-layer cache as fetchOgg: RAM of this isolate first, then the edge cache —
-    // raw.githubusercontent is touched at most once per word per colo.
-    const mem = audioMemGet(url);
-    if (mem) return mem;
-    try {
-      const cache = caches.default;
-      const hit = await cache.match(url);
-      if (hit) {
-        const cachedAudio = await hit.arrayBuffer();
-        if (cachedAudio.byteLength >= 4) { audioMemPut(url, cachedAudio); return cachedAudio; }
-      }
-    } catch { /* cache unavailable in this runtime */ }
-    const response = await fetch(url, {
-      signal: AbortSignal.timeout(3500),
-    });
-    if (!response.ok) return null;
-    if (response.body) {
-      try { await cachePutAudio(url, response.clone()); } catch { /* non-critical */ }
-    }
-    const audio = await response.arrayBuffer();
-    if (audio.byteLength < 4) return null;
-    const magic = new TextDecoder().decode(new Uint8Array(audio, 0, 4));
-    if (magic !== "OggS") return null;
-    audioMemPut(url, audio);
-    return audio;
-  } catch {
-    return null;
-  }
-}
-
-// -----------------------------------------------------------------------------
 // Fetch prebuilt audio
 // -----------------------------------------------------------------------------
 
-// Audio lives on two GitHub branches. A word may exist on either one, and GitHub raw
+// Audio lives on the prebuilt "audio" branch on GitHub, and GitHub raw
 // occasionally answers slowly or with a transient 5xx: one short attempt used to return
 // null, so the voice never arrived even though its link existed. Now every candidate URL
-// is retried, the branches are tried in order, and the timeout is long enough for a slow
-// cold fetch.
-const AUDIO_HUMAN_BASE = "https://raw.githubusercontent.com/abr429701-oss/coptic-dictionary-bot/audio-human";
-
+// is retried, and the timeout is long enough for a slow cold fetch.
 function audioCandidates(env, id) {
   const urls = [];
   const add = (url) => { if (url && !urls.includes(url)) urls.push(url); };
   add(audioUrl(env, id, { bust: true }));
   add(audioUrl(env, id));
-  add(`${(env?.AUDIO_HUMAN_BASE_URL || AUDIO_HUMAN_BASE).replace(/\/+$/u, "")}/${encodeURIComponent(`${id}.ogg`)}`);
   return urls;
 }
 

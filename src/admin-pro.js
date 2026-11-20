@@ -1048,7 +1048,7 @@ export function createAdminPro(api) {
     const samples = [];
     for (const id of ids.slice(0, 3000)) {
       const rec = records[id];
-      const hasVoice = rec && (rec.voiceKey || rec.neuralKey || rec.humanKey || rec.voice || rec.audio);
+      const hasVoice = rec && (rec.voiceKey || rec.neuralKey || rec.voice || rec.audio);
       if (!hasVoice) {
         missing += 1;
         if (samples.length < 10) samples.push(rec?.coptic || rec?.word || id);

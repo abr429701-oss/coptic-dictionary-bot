@@ -1322,7 +1322,7 @@ function lazy(build) {
 }
 
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
-import { audioUrl, audioVersion, prebuiltAudioUrl, fetchHumanSpeech, fetchPrebuiltSpeech, isSingleWordOgg, HUMAN_AUDIO_VERSION, NEURAL_VOICE_VERSION } from "./neural-voice.js";
+import { audioUrl, audioVersion, prebuiltAudioUrl, fetchPrebuiltSpeech, isSingleWordOgg, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 import { copticDateNow, alphabetText, letterStatsText, longestText, originsText, wordCountText, startsWithText, similarText, translateText, vocabText, startGuess, handleGuessReply } from "./features.js";
 import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, suggestSimilar, helpText, retentionText, opsText, recordById, levenshtein } from "./new-features.js";
 import { lookupCertificate, parseCertCsv } from "./certificates.js";
@@ -1416,7 +1416,6 @@ import { repeatSingleWordOgg } from "./ogg-repeat.js";
 const VOICE_PREFIX = "voiceid:";
 // The voice hash is part of the key, so a word whose voice was rebuilt is fetched and remembered again.
 const neuralKey = (id) => `ttsid:${NEURAL_VOICE_VERSION}:${id}:${audioVersion(id)}`;
-const humanKey = (id) => `ttsid:human:${HUMAN_AUDIO_VERSION}:${id}`;
 const voiceKey = (id) => `${VOICE_PREFIX}${id}`;
 const repeatedRecordingKey = (fileId) => `rep3:${fileId}`;
 const recordIndexById = lazy(() => {
@@ -2373,7 +2372,6 @@ async function repeatedRecording(env, fileId) {
 }
 
 // Starts the lookup (admin recording) or speech generation right away, so it is ready when the text is sent.
-// Generated Matthew audio from the audio-human branch is the default voice.
 function prepareWordVoice(env, record, media = null, { skipRecorded = false, ignoreCachedFileIds = false, voiceRepeats = null } = {}) {
   return (async () => {
     if (!skipRecorded && !ignoreCachedFileIds && env.USERS && record?.id != null) {
@@ -2401,32 +2399,16 @@ function prepareWordVoice(env, record, media = null, { skipRecorded = false, ign
     if (record?.id != null) {
       // In-memory file_id cache first (no DO round-trip), then DO, then fetch.
       const nKey = neuralKey(record.id);
-      const hKey = humanKey(record.id);
       const memNeural = voiceFileIdCache.get(nKey);
       if (memNeural) return { fileId: memNeural, neural: true };
-      const memHuman = voiceFileIdCache.get(hKey);
-      if (memHuman) return { fileId: memHuman, neural: true };
-      // Cached file_ids for both sources are read in PARALLEL (two DO reads), then both
-      // audio sources are fetched in PARALLEL too. The old code awaited the neural fetch
-      // fully before even starting the human fetch, doubling the wait on words that only
-      // have one of the two. Priority is unchanged: fresh single-word neural > human > older neural.
-      // Both fetches are .catch(() => null): a neural 404/throw still falls back to human audio.
-      const [cachedNeural, cachedHuman] = (!ignoreCachedFileIds && env.USERS) ? await Promise.all([
-        storeCall(env, { op: "get", key: nKey }).then((r) => r.value).catch(() => null),
-        storeCall(env, { op: "get", key: hKey }).then((r) => r.value).catch(() => null),
-      ]) : [null, null];
+      const cachedNeural = (!ignoreCachedFileIds && env.USERS)
+        ? await storeCall(env, { op: "get", key: nKey }).then((r) => r.value).catch(() => null)
+        : null;
       if (cachedNeural?.fileId) return { fileId: cachedNeural.fileId, neural: true };
-      if (cachedHuman?.fileId) return { fileId: cachedHuman.fileId, neural: true };
-      // Generated audio: fetch the neural file first (its candidates
-      // already include the human file); only fetch the human file when
-      // the neural fetch finds nothing. The old code fetched both in
-      // parallel, paying a wasted human fetch on every word that has a
-      // neural file. Priority is unchanged: fresh neural > human > stale neural.
+      // Generated audio: fetch the prebuilt neural file from the audio branch.
       const voiceEnv = voiceRepeats ? { ...env, VOICE_REPEATS: voiceRepeats } : env;
       const neural = await fetchPrebuiltSpeech(voiceEnv, record).catch(() => null);
       if (neural && isSingleWordOgg(neural)) return { audio: neural, neural: true, wordId: record.id, cacheable: true };
-      const human = await fetchHumanSpeech(env, record).catch(() => null);
-      if (human) return { audio: human, neural: true, human: true, wordId: record.id };
       if (neural) return { audio: neural, neural: true, wordId: record.id, cacheable: false };
     }
     // No Google fallback: generated audio must come from the Polly Miguel
@@ -2440,7 +2422,7 @@ function prepareWordVoice(env, record, media = null, { skipRecorded = false, ign
 // default env keeps "off" to exercise the two-message fallback path. Default is on.
 const voiceCaptionMode = (env) => String(env?.VOICE_CAPTION ?? "on") !== "off";
 
-// In-memory cache of Telegram file_ids for word voices (keyed by neuralKey/humanKey). Avoids
+// In-memory cache of Telegram file_ids for word voices (keyed by neuralKey). Avoids
 // a Durable Object round-trip on every lookup; populated after each successful send. Capped.
 const voiceFileIdCache = new Map();
 function rememberVoiceFileId(key, fileId) {
@@ -2536,11 +2518,11 @@ async function sendPreparedVoice(env, chatId, record, prepared, partIndex = -1, 
           rememberVoiceFileId(repeatedRecordingKey(voice.repeatFor), sentId);
         } else if (voice.neural && voice.cacheable !== false && voice.wordId != null && env.USERS && sentId) {
           // Remember Telegram's file_id so this word is uploaded once, then reused forever.
-          const fkey = voice.human ? humanKey(voice.wordId) : neuralKey(voice.wordId);
+          const fkey = neuralKey(voice.wordId);
           await storeCall(env, { op: "put", key: fkey, value: { fileId: sentId } }).catch(() => {});
           rememberVoiceFileId(fkey, sentId);
         } else if (sentId && voice.wordId != null) {
-          rememberVoiceFileId(voice.human ? humanKey(voice.wordId) : neuralKey(voice.wordId), sentId);
+          rememberVoiceFileId(neuralKey(voice.wordId), sentId);
         }
         return { ok: true, fileId: sentId, messageId: parsed.result?.message_id };
       }

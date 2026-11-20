@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import worker, { UserStore, resetVoiceFileIdCache, resetCodeSheetCache, resetExamPatternCache } from "../src/index.js";
 import { LEARN_LEVELS } from "../src/learn-manifest.js";
 import { translateFieldValue, VALUE_TRANSLATIONS } from "../src/field-translations.js";
-import { resetAudioCaches, HUMAN_AUDIO_VERSION } from "../src/neural-voice.js";
+import { resetAudioCaches, NEURAL_VOICE_VERSION, audioVersion } from "../src/neural-voice.js";
 import records from "../data/dictionary.json" with { type: "json" };
 
 // The in-isolate audio memory must never leak one test's fetched word into the next test.
@@ -2029,7 +2029,7 @@ test("VOICE_CAPTION on: the result text and the voice go out as a single message
   assert.equal(separateTexts.length, 0, "the result text must not be sent as its own message");
 });
 
-// Regression for the reported bug: ⲫⲱⲥ (id 9251) has audio on BOTH source branches, yet the
+// Regression for the reported bug: ⲫⲱⲥ (id 9251) has prebuilt audio, yet the
 // bot stayed silent when the remembered Telegram file_id went stale (older voice build).
 // The stale id must be discarded and the voice rebuilt from source bytes — never dropped silently.
 test("ⲫⲱⲥ regression: a stale cached file_id must not silence the voice", async () => {
@@ -2039,7 +2039,7 @@ test("ⲫⲱⲥ regression: a stale cached file_id must not silence the voice", 
   const calls = [];
   fakeTelegramApi(calls);
   const kvEnv = { ...env, USERS: fakeKv() };
-  kvEnv.USERS.store.set(`ttsid:human:${HUMAN_AUDIO_VERSION}:9251`, { fileId: "stale-file-id" });
+  kvEnv.USERS.store.set(`ttsid:${NEURAL_VOICE_VERSION}:9251:${audioVersion("9251")}`, { fileId: "stale-file-id" });
   const original = globalThis.fetch;
   globalThis.fetch = async (url, options = {}) => {
     const u = String(url);

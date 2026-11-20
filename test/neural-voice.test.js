@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ipaForSpeech, ipaToEspeak, audioUrl, audioVersion, fetchPrebuiltSpeech, fetchHumanSpeech, humanAudioUrl, resetAudioCaches } from "../src/neural-voice.js";
+import { ipaForSpeech, ipaToEspeak, audioUrl, audioVersion, fetchPrebuiltSpeech, resetAudioCaches } from "../src/neural-voice.js";
 
 // The in-isolate audio memory must never leak one test's fetched word into the next test.
 test.beforeEach(() => resetAudioCaches());
@@ -34,26 +34,6 @@ test("prebuilt audio is fetched by word id", async () => {
     // With the memory cleared, a broken network yields null exactly as before.
     assert.equal(await fetchPrebuiltSpeech({}, { id: 5 }), null);
   } finally { globalThis.fetch = original; }
-});
-
-test("human audio is opt-in and read from the audio-human branch", async () => {
-  assert.match(humanAudioUrl({}, 7), /\/audio-human\/7\.ogg\?v=/u);
-  const original = globalThis.fetch;
-  let calls = 0;
-  globalThis.fetch = async (url) => {
-    calls++;
-    return String(url).split("?", 1)[0].endsWith("/5.ogg")
-      ? new Response(new Uint8Array([79, 103, 103, 83, 1, 2]))
-      : new Response("", { status: 404 });
-  };
-  try {
-    assert.equal(await fetchHumanSpeech({}, { id: 5 }), null);
-    assert.equal(calls, 0);
-    assert.equal((await fetchHumanSpeech({ HUMAN_AUDIO: "on" }, { id: 5 })).byteLength, 6);
-    assert.equal(await fetchHumanSpeech({ HUMAN_AUDIO: "on" }, { id: 6 }), null);
-  } finally {
-    globalThis.fetch = original;
-  }
 });
 
 test("the audio URL carries the voice hash so a rebuilt word is never served from a stale cache", async () => {
