@@ -1087,14 +1087,14 @@ async function setWordOfTheDay(env, value) {
   invalidateCache(wodCache);
 }
 // Sends the configured word once per UTC day, then marks the day as sent.
-async function sendWordOfTheDay(env, chatId, config) {
+async function sendWordOfTheDay(env, chatId, config, reactMessageId = undefined) {
   const matches = await findMatches(config.word, env);
   if (matches[0] == null) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: `⚠️ كلمة اليوم «${escapeHtml(String(config.word).slice(0, 60))}» غير موجودة في القاموس. اضبطها بـ /setwod <كلمة>.`, parse_mode: "HTML" });
     return;
   }
   await setWordOfTheDay(env, { ...config, lastSent: utcDay() });
-  await sendRecord(env, chatId, matches[0], -1, "");
+  await sendRecord(env, chatId, matches[0], -1, "", reactMessageId);
 }
 async function autoWordOfTheDay(env, chatId, ctx) {
   try {
@@ -1664,31 +1664,59 @@ function truncateBytes(value, maxBytes) {
   return out;
 }
 
-function pageCallback(page, query) {
+// Word-card buttons carry the USER's original search message id as a
+// `~r<message_id>` suffix, so a tap can ❤️ that message: a Telegram
+// callback query carries only the bot's message, never the user's. `~r`
+// + digits is distinctive enough that no real button data ends with it
+// (no dictionary key contains `~`, and user queries essentially never
+// do). Buttons sent before this change have no suffix and keep working —
+// they just don't react.
+function reactIdSuffix(reactMessageId) {
+  if (!reactMessageId) return "";
+  return `~r${reactMessageId}`;
+}
+function withReactId(data, reactMessageId) {
+  const suffix = reactIdSuffix(reactMessageId);
+  if (!suffix) return data;
+  const suffixed = `${data}${suffix}`;
+  // Best-effort: when the button is already at the 64-byte cap, it goes
+  // out without the suffix (works, just doesn't react) rather than
+  // breaking the button.
+  return new TextEncoder().encode(suffixed).length <= CALLBACK_DATA_MAX_BYTES ? suffixed : data;
+}
+function splitReactId(data) {
+  const match = /^(.*)~r(\d+)$/su.exec(String(data ?? ""));
+  if (!match) return { data: String(data ?? ""), reactMessageId: undefined };
+  return { data: match[1], reactMessageId: Number(match[2]) };
+}
+
+function pageCallback(page, query, reactMessageId = undefined) {
   const prefix = `p|${page}|`;
-  return prefix + truncateBytes(query, CALLBACK_DATA_MAX_BYTES - prefix.length);
+  const suffix = reactIdSuffix(reactMessageId);
+  return prefix + truncateBytes(query, CALLBACK_DATA_MAX_BYTES - prefix.length - suffix.length) + suffix;
 }
 
 function equalizeSuggestionLabels(labels) {
   // Telegram centers inline-button labels by default; do not add invisible padding that enlarges them.
   return labels.map((label) => String(label));
 }
-function renderSuggestions(query, normalizedQuery, matches, requestedPage) {
+function renderSuggestions(query, normalizedQuery, matches, requestedPage, reactMessageId = undefined) {
   const ui = uiTextFor(query);
   const totalPages = Math.max(1, Math.ceil(matches.length / SUGGESTION_PAGE_SIZE));
   const page = Math.max(0, Math.min(requestedPage, totalPages - 1));
   const slice = matches.slice(page * SUGGESTION_PAGE_SIZE, (page + 1) * SUGGESTION_PAGE_SIZE);
-  const languageQuery = uiLanguage(query) === "ar" ? "" : truncateBytes(query, CALLBACK_DATA_MAX_BYTES - 18);
+  const languageQuery = uiLanguage(query) === "ar" ? "" : truncateBytes(query, CALLBACK_DATA_MAX_BYTES - 18 - reactIdSuffix(reactMessageId).length);
   const keyboard = slice.map((index) => {
     const part = matchedPartIndex(records[index], normalizedQuery);
+    const base = part >= 0 ? `s|${index}|${part}${languageQuery ? `|${languageQuery}` : ""}` : `s|${index}${languageQuery ? `|${languageQuery}` : ""}`;
     return [{
       text: suggestionLabel(records[index], normalizedQuery),
-      callback_data: part >= 0 ? `s|${index}|${part}${languageQuery ? `|${languageQuery}` : ""}` : `s|${index}${languageQuery ? `|${languageQuery}` : ""}`,
+      callback_data: withReactId(base, reactMessageId),
     }];
   });
   const navigation = [];
-  if (page > 0) navigation.push({ text: ui.previous, callback_data: pageCallback(page - 1, query) });
-  if (page < totalPages - 1) navigation.push({ text: ui.pageNext, callback_data: pageCallback(page + 1, query) });
+  if (page > 0) navigation.push({ text: ui.previous, callback_data: pageCallback(page - 1, query, reactMessageId) });
+  if (page < totalPages - 1) navigation.push({ text: ui.pageNext, callback_data: pageCallback(page + 1, query, reactMessageId) });
   if (navigation.length) keyboard.push(navigation);
   return { text: ui.choose, reply_markup: { inline_keyboard: keyboard } };
 }
@@ -1790,7 +1818,7 @@ function meaningOptions(index, normalizedQuery = "", preferredPart = -1) {
 
 // The button walks one fixed list of meanings: each meaning is shown once, and the last one has no button.
 // callback: n|<word row>|<first meaning part>|<step to show next>  (the list is rebuilt the same way every time).
-function moreMeaning(options, baseIndex, nextStep = 1, callbackFor = undefined, keepSize = false, language = "ar") {
+function moreMeaning(options, baseIndex, nextStep = 1, callbackFor = undefined, keepSize = false, language = "ar", reactMessageId = undefined) {
   // Keep a blank terminal button so the last result has the same visual footprint.
   if (options.length <= nextStep) {
     return { reply_markup: { inline_keyboard: [[{ text: "\u2007", callback_data: "noop" }]] } };
@@ -1798,7 +1826,7 @@ function moreMeaning(options, baseIndex, nextStep = 1, callbackFor = undefined, 
   const firstPart = Math.max(0, options[0].part);
   const data = callbackFor?.(nextStep) ?? `n|${baseIndex}|${firstPart}|${nextStep}`;
   return {
-    reply_markup: { inline_keyboard: [[{ text: MORE_BUTTON_TEXT[language] ?? MORE_BUTTON_TEXT.ar, callback_data: data }]] },
+    reply_markup: { inline_keyboard: [[{ text: MORE_BUTTON_TEXT[language] ?? MORE_BUTTON_TEXT.ar, callback_data: withReactId(data, reactMessageId) }]] },
   };
 }
 
@@ -1887,17 +1915,17 @@ function chainCallback(key) {
   };
 }
 
-function renderWordSuggestions(query, words, requestedPage) {
+function renderWordSuggestions(query, words, requestedPage, reactMessageId = undefined) {
   const ui = uiTextFor(query);
   const totalPages = Math.max(1, Math.ceil(words.length / SUGGESTION_PAGE_SIZE));
   const page = Math.max(0, Math.min(requestedPage, totalPages - 1));
   const keyboard = words.slice(page * SUGGESTION_PAGE_SIZE, (page + 1) * SUGGESTION_PAGE_SIZE).map((word) => [{
     text: word.label.slice(0, 48),
-    callback_data: `w|${truncateBytes(word.key, CALLBACK_DATA_MAX_BYTES - 2)}`,
+    callback_data: withReactId(`w|${truncateBytes(word.key, CALLBACK_DATA_MAX_BYTES - 2 - reactIdSuffix(reactMessageId).length)}`, reactMessageId),
   }]);
   const navigation = [];
-  if (page > 0) navigation.push({ text: ui.previous, callback_data: pageCallback(page - 1, query) });
-  if (page < totalPages - 1) navigation.push({ text: ui.pageNext, callback_data: pageCallback(page + 1, query) });
+  if (page > 0) navigation.push({ text: ui.previous, callback_data: pageCallback(page - 1, query, reactMessageId) });
+  if (page < totalPages - 1) navigation.push({ text: ui.pageNext, callback_data: pageCallback(page + 1, query, reactMessageId) });
   if (navigation.length) keyboard.push(navigation);
   return { text: ui.choose, reply_markup: { inline_keyboard: keyboard } };
 }
@@ -2161,14 +2189,14 @@ const COPTIC_KEYBOARD_ROWS = [
   ["\u2CAD", "\u2CAF", "\u2CB1", "\u03E3", "\u03E5", "\u03E7", "\u03E9"],
   ["\u03EB", "\u03ED", "\u03EF"],
 ];
-function copticKeyboardMarkup() {
-  const rows = COPTIC_KEYBOARD_ROWS.map((row) => row.map((ch) => ({ text: ch, callback_data: `kb|${ch}` })));
-  rows.push([{ text: "\u25CC\u0300 جِنكِيم", callback_data: "kb|j" }]);
+function copticKeyboardMarkup(reactMessageId = undefined) {
+  const rows = COPTIC_KEYBOARD_ROWS.map((row) => row.map((ch) => ({ text: ch, callback_data: withReactId(`kb|${ch}`, reactMessageId) })));
+  rows.push([{ text: "\u25CC\u0300 جِنكِيم", callback_data: withReactId("kb|j", reactMessageId) }]);
   rows.push([
-    { text: "\u232B", callback_data: "kb|bs" },
-    { text: "\uD83D\uDDD1 مسح", callback_data: "kb|cl" },
-    { text: "\u2705 بحث", callback_data: "kb|go" },
-    { text: "\u274C إغلاق", callback_data: "kb|xx" },
+    { text: "\u232B", callback_data: withReactId("kb|bs", reactMessageId) },
+    { text: "\uD83D\uDDD1 مسح", callback_data: withReactId("kb|cl", reactMessageId) },
+    { text: "\u2705 بحث", callback_data: withReactId("kb|go", reactMessageId) },
+    { text: "\u274C إغلاق", callback_data: withReactId("kb|xx", reactMessageId) },
   ]);
   return { inline_keyboard: rows };
 }
@@ -2182,7 +2210,7 @@ function extractKeyboardWord(text) {
   const word = line.slice(KEYBOARD_WORD_PREFIX.length).trim();
   return word === KEYBOARD_EMPTY ? "" : word;
 }
-async function handleKeyboardCallback(env, callback, action, ctx) {
+async function handleKeyboardCallback(env, callback, action, ctx, reactMessageId = undefined) {
   const message = callback.message;
   if (!message?.chat?.id || !message?.message_id) return;
   const chatId = message.chat.id;
@@ -2201,7 +2229,7 @@ async function handleKeyboardCallback(env, callback, action, ctx) {
   if (action === "go") {
     if (!current) return;
     await edit(`\uD83D\uDD0E جارٍ البحث عن: ${current}`, { inline_keyboard: [] });
-    await inBackground(ctx, sendSearch(env, chatId, current, 0, undefined, ctx));
+    await inBackground(ctx, sendSearch(env, chatId, current, 0, undefined, ctx, reactMessageId));
     return;
   }
   let next = current;
@@ -2211,7 +2239,7 @@ async function handleKeyboardCallback(env, callback, action, ctx) {
   else next = current + action;
   if (next.length > KEYBOARD_MAX_WORD) next = next.slice(0, KEYBOARD_MAX_WORD);
   const text = keyboardComposerText(next);
-  if (text !== message.text) await edit(text, copticKeyboardMarkup());
+  if (text !== message.text) await edit(text, copticKeyboardMarkup(reactMessageId));
 }
 async function ensureCommandMenu(env, userId) {
   const admin = isAdmin(env, userId);
@@ -2821,7 +2849,7 @@ function widenResultText(value, minimumWidth = 36) {
   const currentWidth = Math.max(...text.split("\n").map((line) => [...line].length), 0);
   return currentWidth >= minimumWidth ? text : `${text}\n${"\u2007".repeat(minimumWidth - currentWidth)}`;
 }
-async function prepareSearch(env, chatId, query, page = 0, messageId = undefined, ctx = undefined) {
+async function prepareSearch(env, chatId, query, page = 0, messageId = undefined, ctx = undefined, reactMessageId = undefined) {
   const cleanQuery = String(query ?? "").replace(/[\r\n]+/gu, " ").trim().slice(0, 160);
   const normalizedQuery = normalize(cleanQuery);
   const deliver = (payload) => messageId === undefined
@@ -2833,11 +2861,11 @@ async function prepareSearch(env, chatId, query, page = 0, messageId = undefined
     const isShortQuery = [...normalizedQuery.replace(/\s+/gu, "")].length <= SHORT_QUERY_MAX;
     if (messageId === undefined && !isShortQuery) {
       const chain = await exactChain(env, kind, normalizedQuery);
-      if (chain.length) return () => sendOption(env, chatId, chain, chain[0].index, 0, undefined, chainCallback(cleanQuery), cleanQuery, true, ctx);
+      if (chain.length) return () => sendOption(env, chatId, chain, chain[0].index, 0, undefined, chainCallback(cleanQuery), cleanQuery, true, ctx, reactMessageId);
     }
     const words = await prefixWords(env, kind, normalizedQuery);
     if (words.length) {
-      const view = renderWordSuggestions(cleanQuery, words, page);
+      const view = renderWordSuggestions(cleanQuery, words, page, reactMessageId);
       return () => deliver({ text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup });
     }
   }
@@ -2856,11 +2884,11 @@ async function prepareSearch(env, chatId, query, page = 0, messageId = undefined
     const uiLang = ["en", "fr", "de"].includes(suggestionLang) ? suggestionLang : uiLanguage(cleanQuery);
     const ui = UI_TEXT[uiLang] ?? UI_TEXT.ar;
     const text = `${ui.noResult}\n\n${ui.didYouMean}`;
-    const keyboard = suggestions.map((s) => [{ text: String(s.label).slice(0, 48), callback_data: `s|${s.index}` }]);
+    const keyboard = suggestions.map((s) => [{ text: String(s.label).slice(0, 48), callback_data: withReactId(`s|${s.index}`, reactMessageId) }]);
     return () => deliver({ text, parse_mode: "HTML", reply_markup: { inline_keyboard: keyboard } });
   }
   if (matches.length > 1) {
-    const view = renderSuggestions(cleanQuery, normalizedQuery, matches, page);
+    const view = renderSuggestions(cleanQuery, normalizedQuery, matches, page, reactMessageId);
     return () => deliver({ text: view.text, parse_mode: "HTML", reply_markup: view.reply_markup });
   }
   const matchIndex = matches[0];
@@ -2884,7 +2912,7 @@ async function prepareSearch(env, chatId, query, page = 0, messageId = undefined
     const resultLanguage = singleResultLanguage;
     const voiceRecord = singleVoiceRecord;
     const voice = singleVoice;
-    const more = withShareButton(env, record, moreMeaning(options, matchIndex, 1, undefined, true, uiLanguage(normalizedQuery)), singleResultLanguage);
+    const more = withShareButton(env, record, moreMeaning(options, matchIndex, 1, undefined, true, uiLanguage(normalizedQuery), reactMessageId), singleResultLanguage);
     const text = widenResultText(`${formatRecord(record, selected.part, normalizedQuery)}${more.notice ?? ""}`).slice(0, MAX_MESSAGE_LENGTH);
     // One message: the voice carries the result as its caption, so the text and the audio can never
     // arrive separately. Long results (over the 1024-character caption cap) still fall back to a
@@ -2912,38 +2940,60 @@ async function prepareSearch(env, chatId, query, page = 0, messageId = undefined
         if (text.length > CAPTION_MAX) {
           await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) }).catch(() => null);
         }
+        await reactHeartToUserMessage(env, chatId, reactMessageId);
         return { ok: true, result: { message_id: sent.messageId, caption } };
       }
       // Voice unavailable or failed: never block the user; fall through and deliver text now.
       if (sent.reason !== "no-audio") logError(env, new Error(`voice send failed: ${sent.reason ?? "unknown"}`), { where: "search-voice", word: String(record?.coptic ?? "").slice(0, 30) });
     }
     const response = await deliver({ text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
+    await reactHeartToUserMessage(env, chatId, reactMessageId);
     if (messageId === undefined && autoVoice && !voiceAttempted) await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, normalizedQuery, "", { textFallback: null });
     return response;
   };
 }
 
-async function sendSearch(env, chatId, query, page = 0, messageId = undefined, ctx = undefined) {
-  const sendPrepared = await prepareSearch(env, chatId, query, page, messageId, ctx);
+async function sendSearch(env, chatId, query, page = 0, messageId = undefined, ctx = undefined, reactMessageId = undefined) {
+  const sendPrepared = await prepareSearch(env, chatId, query, page, messageId, ctx, reactMessageId);
   return sendPrepared();
 }
 
-async function sendRecord(env, chatId, index, partIndex = -1, searchKey = "") {
+// ❤️ on the user's message when a word card is shown (search result,
+// /random, word_ deep link, /wod). Best-effort only: the card is always
+// sent first, and a failed reaction never blocks or breaks the reply.
+// reactMessageId is the USER's incoming message id. Callback paths (picks,
+// meaning steps, keyboard search, page turns) carry it in the button's
+// `~r<id>` suffix (see withReactId/splitReactId); buttons sent before
+// that suffix existed carry none and simply don't react.
+async function reactHeartToUserMessage(env, chatId, messageId) {
+  if (!chatId || !messageId) return;
+  try {
+    await telegram(env, "setMessageReaction", {
+      chat_id: chatId,
+      message_id: messageId,
+      reaction: [{ type: "emoji", emoji: "❤️" }],
+    });
+  } catch {
+    /* a failed reaction must never break the reply */
+  }
+}
+
+async function sendRecord(env, chatId, index, partIndex = -1, searchKey = "", reactMessageId = undefined) {
   if (searchKey) await detectScriptKind(env, searchKey);
   const options = searchKey && scriptKind(normalize(searchKey)) !== "cop"
     ? [{ key: String(index), index, part: -1 }]
     : meaningOptions(index, "", partIndex);
-  await sendOption(env, chatId, options, index, 0, { index, part: partIndex }, undefined, searchKey);
+  await sendOption(env, chatId, options, index, 0, { index, part: partIndex }, undefined, searchKey, true, undefined, reactMessageId);
 }
 
 // Step n of the next-meaning button: shows meaning number `step` of the word's fixed list.
-async function sendMeaningStep(env, chatId, baseIndex, firstPart, step) {
+async function sendMeaningStep(env, chatId, baseIndex, firstPart, step, reactMessageId = undefined) {
   const options = meaningOptions(baseIndex, "", firstPart);
   if (!options[step]) return;
   // Send the word voice for each meaning too (same word, consistent with every other result path).
-  await sendOption(env, chatId, options, baseIndex, step, undefined, undefined, "", true);
+  await sendOption(env, chatId, options, baseIndex, step, undefined, undefined, "", true, undefined, reactMessageId);
 }
-async function sendOption(env, chatId, options, baseIndex, step, fallback = undefined, callbackFor = undefined, searchKey = "", sendVoice = true, ctx = undefined) {
+async function sendOption(env, chatId, options, baseIndex, step, fallback = undefined, callbackFor = undefined, searchKey = "", sendVoice = true, ctx = undefined, reactMessageId = undefined) {
   if (searchKey) await detectScriptKind(env, searchKey);
   const selected = options[step] ?? fallback;
   const record = records[selected?.index];
@@ -2953,7 +3003,7 @@ async function sendOption(env, chatId, options, baseIndex, step, fallback = unde
   const voiceRecord = voiceRecordForSearch(record, searchKey);
   const isGreekSearch = scriptKind(normalize(searchKey)) === "el";
   const voice = prepareWordVoice(env, voiceRecord, null, { skipRecorded: isGreekSearch, voiceRepeats: await voiceRepeatCount(env, chatId) });
-  const more = withShareButton(env, record, moreMeaning(options, baseIndex, step + 1, callbackFor ?? (searchKey ? chainCallback(searchKey) : undefined), true, uiLanguage(searchKey)), resultLanguage);
+  const more = withShareButton(env, record, moreMeaning(options, baseIndex, step + 1, callbackFor ?? (searchKey ? chainCallback(searchKey) : undefined), true, uiLanguage(searchKey), reactMessageId), resultLanguage);
   const text = widenResultText(`${formatRecord(record, selected.part, searchKey)}${more.notice ?? ""}`).slice(0, MAX_MESSAGE_LENGTH);
   const wantVoice = sendVoice && await featureEnabled(env, "audio") && await voiceAutoOn(env, chatId);
   const captionMode = voiceCaptionMode(env); // on in production: voice+text travel as one message
@@ -2971,12 +3021,14 @@ async function sendOption(env, chatId, options, baseIndex, step, fallback = unde
       if (text.length > CAPTION_MAX) {
         await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) }).catch(() => null);
       }
+      await reactHeartToUserMessage(env, chatId, reactMessageId);
       return;
     }
     if (sent.reason !== "no-audio") logError(env, new Error(`voice send failed: ${sent.reason ?? "unknown"}`), { where: "option-voice", word: String(record?.coptic ?? "").slice(0, 30) });
   }
   // Voice unavailable or failed: deliver the text immediately, never block.
   await telegram(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", ...(more.reply_markup ? { reply_markup: more.reply_markup } : {}) });
+  await reactHeartToUserMessage(env, chatId, reactMessageId);
   if (wantVoice && !voiceAttempted) await sendPreparedVoice(env, chatId, voiceRecord, voice, selected.part, searchKey, "", { textFallback: text });
 }
 
@@ -4037,6 +4089,7 @@ async function buildCommandsHelpText(env, userId) {
     ["/menu", "/menu — القوائم والدروس"],
     ["/random", "/random — كلمة عشوائية من القاموس"],
     ["/contact", "/contact — تواصل مع إدارة البوت (أو زر «📞 تواصل مع الإدارة»)"],
+    ["/links", "/links — روابط المنصات: التطبيق والموقع والبوتات"],
   ];
   const lines = [
     "📖 <b>القاموس القبطي الناطق — الأوامر</b>",
@@ -6713,6 +6766,7 @@ const EXTRA_BOT_COMMANDS = [
   { command: "k", description: "لوحة مفاتيح قبطية (اختصار)" },
   { command: "kbd", description: "لوحة مفاتيح قبطية (اختصار)" },
   { command: "lang", description: "تغيير لغة الواجهة" },
+  { command: "links", description: "روابط المنصات: التطبيق والموقع والبوتات" },
   { command: "myfav", description: "كلماتك المفضلة" },
   { command: "mystats", description: "إحصاءاتك ونقاطك" },
   { command: "points", description: "منح أو خصم نقاط" },
@@ -6765,7 +6819,7 @@ function allBotCommands() {
 // بلا تأكيد من الكود نفسه) تطلب تأكيدًا أولًا قبل التشغيل.
 const ALL_COMMANDS_DANGEROUS = new Set(["resetstats", "purgeinactive", "resetsessions"]);
 const ALL_COMMANDS_CATEGORIES = [
-  { id: "main", title: "⭐ الأوامر الأساسية", commands: ["start", "keyboard", "learn", "menu", "search", "app", "contact", "random", "help", "admin", "dashboard", "about", "cancel", "k", "kbd", "lang"] },
+  { id: "main", title: "⭐ الأوامر الأساسية", commands: ["start", "keyboard", "learn", "menu", "search", "app", "contact", "random", "help", "admin", "dashboard", "about", "cancel", "k", "kbd", "lang", "links"] },
   { id: "stats", title: "📊 الإحصاءات والتقارير", commands: ["usage", "analytics", "topusers", "growth", "usercount", "searchstats", "topwords", "misses", "livewords", "hourly", "dictstats", "wordcount", "fieldreport", "statuspage", "digest", "weekly", "reports", "reportclose", "adminscore", "usertimeline", "trace", "searchcount", "liveusers", "conversations", "userchat", "livemon", "livesearch", "retention", "ops", "funnel", "cohorts", "reflinks", "searchhistory", "report"] },
   { id: "voices", title: "🎙 الأصوات", commands: ["record", "record_choose", "record_select", "record_stop", "record_voice", "voice_delete", "voice_delete_all", "voice_delete_many", "voicecoverage", "voiceoff", "voiceon", "voiceonce", "voicesettings", "voicethree", "noaudio", "nopronounce", "uploadaudio", "rebuildvoice", "voicegaps", "pronounce"] },
   { id: "drive", title: "☁️ Drive والمزامنة", commands: ["drive", "syncdrive", "syncusers", "syncall", "synccancel", "syncreset", "syncstatus", "synctest", "syncwatch", "importusers", "importsheet", "importlearn", "setdrive", "setarchive", "resync"] },
@@ -7242,11 +7296,17 @@ async function handleUpdate(update, env, ctx) {
       await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
       return;
     }
+    // Word-card buttons carry the user's original search message id as a
+    // `~r<id>` suffix (a callback query carries no user message id of its
+    // own). Strip it once here for the word-card handlers below; buttons
+    // sent before the suffix existed have none and keep working, they
+    // just don't react. Handlers above this point never see the suffix.
+    const { data: callbackData, reactMessageId } = splitReactId(callback.data);
     // Acknowledge the tap in the background so the answer is not delayed by a round trip.
     await inBackground(ctx, telegram(env, "answerCallbackQuery", { callback_query_id: callback.id }));
-    const kbAction = /^kb\|(.+)$/su.exec(callback.data ?? "");
+    const kbAction = /^kb\|(.+)$/su.exec(callbackData ?? "");
     if (kbAction) {
-      await handleKeyboardCallback(env, callback, kbAction[1], ctx);
+      await handleKeyboardCallback(env, callback, kbAction[1], ctx, reactMessageId);
       return;
     }
     const chatForPick = callback.message?.chat?.id;
@@ -7268,7 +7328,7 @@ async function handleUpdate(update, env, ctx) {
       }
       return;
     }
-    const chainPick = /^x\|(\d{1,3})\|(.+)$/su.exec(callback.data ?? "");
+    const chainPick = /^x\|(\d{1,3})\|(.+)$/su.exec(callbackData ?? "");
     if (chainPick) {
       const chainQuery = chainPick[2];
       const normalizedChainQuery = normalize(chainQuery);
@@ -7278,11 +7338,11 @@ async function handleUpdate(update, env, ctx) {
       if (chatForPick && chain[step]) {
         // Every result in the chain sends its voice (recorded if present, else TTS fallback),
         // exactly like the first result. ARABIC_LETTER.test() here wrongly silenced non-Arabic queries.
-        await inBackground(ctx, sendOption(env, chatForPick, chain, chain[0].index, step, undefined, chainCallback(chainQuery), chainQuery, true));
+        await inBackground(ctx, sendOption(env, chatForPick, chain, chain[0].index, step, undefined, chainCallback(chainQuery), chainQuery, true, undefined, reactMessageId));
       }
       return;
     }
-    const wordPick = /^w\|(.+)$/su.exec(callback.data ?? "");
+    const wordPick = /^w\|(.+)$/su.exec(callbackData ?? "");
     if (wordPick) {
       if (chatForPick) {
         let key = wordPick[1];
@@ -7297,36 +7357,36 @@ async function handleUpdate(update, env, ctx) {
           }
         }
         if (chain.length) {
-          await inBackground(ctx, sendOption(env, chatForPick, chain, chain[0].index, 0, undefined, chainCallback(key), key));
+          await inBackground(ctx, sendOption(env, chatForPick, chain, chain[0].index, 0, undefined, chainCallback(key), key, true, undefined, reactMessageId));
         }
       }
       return;
     }
-    const nextMeaning = /^n\|(\d{1,6})\|(\d{1,3})\|(\d{1,3})$/u.exec(callback.data ?? "");
+    const nextMeaning = /^n\|(\d{1,6})\|(\d{1,3})\|(\d{1,3})$/u.exec(callbackData ?? "");
     if (nextMeaning) {
       if (callback.message?.chat?.id) {
-        await inBackground(ctx, sendMeaningStep(env, callback.message.chat.id, Number(nextMeaning[1]), Number(nextMeaning[2]), Number(nextMeaning[3])));
+        await inBackground(ctx, sendMeaningStep(env, callback.message.chat.id, Number(nextMeaning[1]), Number(nextMeaning[2]), Number(nextMeaning[3]), reactMessageId));
       }
       return;
     }
     // Buttons already sitting in old chats (m|...) still work: show that meaning, then follow the fixed list.
-    const meaningPick = /^m\|(\d{1,6})\|(\d{1,6})\|(\d{1,3})$/u.exec(callback.data ?? "");
+    const meaningPick = /^m\|(\d{1,6})\|(\d{1,6})\|(\d{1,3})$/u.exec(callbackData ?? "");
     if (meaningPick) {
       if (callback.message?.chat?.id) {
-        await inBackground(ctx, sendRecord(env, callback.message.chat.id, Number(meaningPick[2]), Number(meaningPick[3]), callback.message.date));
+        await inBackground(ctx, sendRecord(env, callback.message.chat.id, Number(meaningPick[2]), Number(meaningPick[3]), callback.message.date, reactMessageId));
       }
       return;
     }
-    const pick = /^s\|(\d{1,6})(?:\|(\d{1,3}))?(?:\|(.+))?$/su.exec(callback.data ?? "");
+    const pick = /^s\|(\d{1,6})(?:\|(\d{1,3}))?(?:\|(.+))?$/su.exec(callbackData ?? "");
     if (pick) {
       if (callback.message?.chat?.id) {
-        await inBackground(ctx, sendRecord(env, callback.message.chat.id, Number(pick[1]), pick[2] === undefined ? -1 : Number(pick[2]), pick[3] ?? ""));
+        await inBackground(ctx, sendRecord(env, callback.message.chat.id, Number(pick[1]), pick[2] === undefined ? -1 : Number(pick[2]), pick[3] ?? "", reactMessageId));
       }
       return;
     }
-    const match = /^p\|(\d{1,6})\|(.+)$/su.exec(callback.data ?? "");
+    const match = /^p\|(\d{1,6})\|(.+)$/su.exec(callbackData ?? "");
     if (!match || !callback.message?.chat?.id || !callback.message?.message_id) return;
-    await inBackground(ctx, sendSearch(env, callback.message.chat.id, match[2], Number(match[1]), callback.message.message_id));
+    await inBackground(ctx, sendSearch(env, callback.message.chat.id, match[2], Number(match[1]), callback.message.message_id, ctx, reactMessageId));
     return;
   }
 
@@ -7469,7 +7529,7 @@ async function handleUpdate(update, env, ctx) {
     const hit = replies.find((r) => { const t = normalize(r.trigger); return t && (normalizedText === t || normalizedText.startsWith(`${t} `)); });
     if (hit) { await registerPromise.catch(() => null); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: String(hit.reply).slice(0, 3000) }); return; }
     const aliasTarget = (await aliasList(env))[normalizedText];
-    if (aliasTarget) { await registerPromise.catch(() => null); await sendSearch(env, message.chat.id, aliasTarget, 0, undefined, ctx); return; }
+    if (aliasTarget) { await registerPromise.catch(() => null); await sendSearch(env, message.chat.id, aliasTarget, 0, undefined, ctx, message.message_id); return; }
     const limit = await dailySearchLimit(env);
     if (limit) {
       const used = bumpSearchCount(userId);
@@ -7483,7 +7543,7 @@ async function handleUpdate(update, env, ctx) {
     !message.voice && !message.audio && text !== "⌨️ الكيبورد القبطي" && text !== "/keyboard" && text !== "/k" && !cacheIsFresh;
   // Search-index work can overlap the DO registration round trip, but its returned plan has no Telegram side effects.
   const searchPlanPromise = canPrepareSearch
-    ? prepareSearch(env, message.chat.id, text, 0, undefined, ctx).catch((error) => {
+    ? prepareSearch(env, message.chat.id, text, 0, undefined, ctx, message.message_id).catch((error) => {
       console.error("Parallel search preparation failed", error instanceof Error ? error.message : "unknown error");
       return null;
     })
@@ -7491,7 +7551,7 @@ async function handleUpdate(update, env, ctx) {
   const known = await registerPromise;
   if (text === "⌨️ الكيبورد القبطي" || text === "/keyboard" || text === "/kbd" || text === "/k") {
     if (!await featureEnabled(env, "keyboard")) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⌨️ لوحة المفاتيح القبطية معطلة حاليًا من قبل الأدمن." }); return; }
-    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: keyboardComposerText(""), reply_markup: copticKeyboardMarkup() });
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: keyboardComposerText(""), reply_markup: copticKeyboardMarkup(message.message_id) });
     return;
   }
   if (isAdmin(env, userId) && ["group", "supergroup"].includes(message.chat.type)
@@ -7897,7 +7957,7 @@ async function handleUpdate(update, env, ctx) {
     if (text === "/setwodtest") {
       const config = await wordOfTheDayConfig(env);
       if (!config?.word) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "☀️ كلمة اليوم غير مضبوطة. اضبطها أولًا بـ /setwod <كلمة>." }); return; }
-      await sendWordOfTheDay(env, message.chat.id, { ...config, lastSent: null });
+      await sendWordOfTheDay(env, message.chat.id, { ...config, lastSent: null }, message.message_id);
       return;
     }
     if (text === "/optout" || text === "/optoutstats") { await beginOptOutStats(env, message.chat.id); return; }
@@ -8261,7 +8321,7 @@ async function handleUpdate(update, env, ctx) {
       const index = recordIndexById().get(Number(wordLink[1])) ?? -1;
       if (index >= 0) {
         const key = wordLink[2] ? translationInLanguage(records[index], wordLink[2]) : "";
-        await sendRecord(env, message.chat.id, index, -1, key);
+        await sendRecord(env, message.chat.id, index, -1, key, message.message_id);
         return;
       }
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⚠️ هذه الكلمة غير موجودة في القاموس." });
@@ -8294,10 +8354,18 @@ async function handleUpdate(update, env, ctx) {
   }
   if (text === "/random" || text.startsWith("/random ")) {
     const index = Math.floor(Math.random() * records.length);
-    await sendRecord(env, message.chat.id, index, -1, "");
+    await sendRecord(env, message.chat.id, index, -1, "", message.message_id);
     return;
   }
   if (text === "/contact" || text.startsWith("/contact ")) { if (!await featureEnabled(env, "contact")) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "📭 خاصية التواصل مع الأدمن معطلة حاليًا." }); return; } await handleContactAdmin(env, message, userId, text); return; }
+  if (text === "/links") {
+    await telegram(env, "sendMessage", {
+      chat_id: message.chat.id,
+      text: "🔗 <b>روابط القاموس القبطي Ⲭⲏⲙⲓ</b>\n📲 التطبيق (أندرويد): https://is.gd/copticdictionary\n🌐 الموقع الإلكتروني: https://abr429701-oss.github.io/coptic-dictionary-web/\n📱 تيليجرام: https://t.me/Coptic_Dictionary_bot\n💬 ماسنجر: https://m.me/Copticdictionary\n🟢 واتساب: https://wa.me/message/WSYPILDL7WV7C1",
+      parse_mode: "HTML",
+    });
+    return;
+  }
   if (text === "/stopbroadcast") {
     await setOptOut(env, userId, true);
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🔕 تم تسجيل خروجك من الرسائل الجماعية. يمكنك العودة في أي وقت بأمر /startbroadcast." });
@@ -8434,7 +8502,7 @@ async function handleUpdate(update, env, ctx) {
     return;
   }
   // Batch 6 user features (self-contained module): games, GDPR, settings, etc.
-  if (await proUser2.handle({ env, chatId: message.chat.id, userId, text })) return;
+  if (await proUser2.handle({ env, chatId: message.chat.id, userId, text, messageId: message.message_id })) return;
   // ---- ميزات القاموس الـ12 (src/features.js) — موصولة هنا قبل اعتراض الأوامر المجهولة ----
   if (text === "/copticdate") { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: copticDateNow(new Date()), parse_mode: "HTML" }); return; }
   if (text === "/alphabet") { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: alphabetText() }); return; }
@@ -8529,7 +8597,7 @@ async function handleUpdate(update, env, ctx) {
     }
     const preparedSearch = searchPlanPromise ? await searchPlanPromise : null;
     if (preparedSearch) await preparedSearch();
-    else await sendSearch(env, message.chat.id, text, 0, undefined, ctx);
+    else await sendSearch(env, message.chat.id, text, 0, undefined, ctx, message.message_id);
   }
 }
 

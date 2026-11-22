@@ -105,8 +105,14 @@ test("v2: /start word_<id> opens the shared word", async () => {
 test("v2: search result carries a share button after the next-meaning row", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   kvEnv.USERS.store.set("user:32", { name: "مينا", registeredAt: nowIso(), firstSeen: nowIso(), lastSeen: nowIso() });
-  const calls = await say(kvEnv, 32, "ⲟⲩⲱ̀");
-  const msg = sent(calls).find((p) => p.text?.includes("ⲟⲩⲱ̀"));
+  // ⲁⲅⲁⲡⲏⲧⲟⲥ resolves to a card with a next-meaning (x|) row and a share
+  // button in the current data. (ⲟⲩⲱ̀ used to; the 2026-11-22 data change
+  // — 388 words removed — made it resolve to a different word instead.)
+  const calls = await say(kvEnv, 32, "ⲁⲅⲁⲡⲏⲧⲟⲥ");
+  // Find the word CARD itself, not any earlier message that happens to
+  // mention the word (the weekly summary, sent first, lists top-searched
+  // words and can contain it — that message has no share button).
+  const msg = sent(calls).find((p) => p.text?.startsWith("<b>الكلمة:</b>") && p.text?.includes("ⲁⲅⲁⲡⲏⲧⲟⲥ"));
   assert.ok(msg, "result message was sent");
   const rows = msg.reply_markup?.inline_keyboard ?? [];
   assert.ok(rows.some((r) => r.some((b) => String(b.text ?? "").includes("مشاركة"))), "share button present");

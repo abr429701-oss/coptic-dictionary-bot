@@ -77,10 +77,14 @@ export function createProUser2({ telegram, storeCall, getUser, saveUser, isAdmin
       await send(env, chatId, ex.length ? `📝 كلمات من نفس النوع (${escapeHtml(kind || "عام")}) كأمثلة:\n${ex.map((r) => `• <b>${escapeHtml(stripMarks(r.coptic))}</b> — ${escapeHtml(String(r.meaning ?? "").split(/[،,]/u)[0].trim().slice(0, 50))}`).join("\n")}` : "📝 لا توجد أمثلة أخرى من نفس النوع.");
       return true;
     },
-    async wod(env, chatId) {
+    async wod(env, chatId, messageId) {
       const w = wodOfDay();
       const hasAudio = Boolean(audioManifest[w.id] || audioManifest[String(w.id)]);
       await send(env, chatId, `🌟 <b>كلمة اليوم</b>\n\n🔤 <b>${escapeHtml(stripMarks(w.coptic))}</b>${w.pronunciation ? ` [${escapeHtml(String(w.pronunciation).trim())}]` : ""}\n🇪🇬 ${escapeHtml(String(w.meaning ?? "").slice(0, 120))}\n🇬🇧 ${escapeHtml(String(w.english ?? "—").slice(0, 80))}\n🏛️ الأصل: ${escapeHtml(String(w.origin ?? "—"))}${hasAudio ? "\n🔊 لها تسجيل صوتي — ابحث عنها لسماعه." : ""}\n\nللاشتراك اليومي: /subscribe`);
+      // ❤️ on the user's /wod message (best-effort, never blocks the reply).
+      if (messageId) {
+        try { await telegram(env, "setMessageReaction", { chat_id: chatId, message_id: messageId, reaction: [{ type: "emoji", emoji: "❤️" }] }); } catch { /* best-effort */ }
+      }
       return true;
     },
     async pronounce(env, chatId, arg) {
@@ -220,7 +224,7 @@ export function createProUser2({ telegram, storeCall, getUser, saveUser, isAdmin
     return true;
   }
 
-  async function handle({ env, chatId, userId, text }) {
+  async function handle({ env, chatId, userId, text, messageId }) {
     const cmd = text.split(/\s/u)[0]?.split("@")[0] ?? "";
     const arg = text.slice(cmd.length).trim();
     // Hangman plain-text letter guess takes priority over search.
@@ -234,7 +238,7 @@ export function createProUser2({ telegram, storeCall, getUser, saveUser, isAdmin
       case "/daily": return handlers.daily(env, chatId, userId);
       case "/compare": return handlers.compare(env, chatId, arg);
       case "/examples": return handlers.examples(env, chatId, arg);
-      case "/wod": case "/wordoftheday": return handlers.wod(env, chatId);
+      case "/wod": case "/wordoftheday": return handlers.wod(env, chatId, messageId);
       case "/pronounce": return handlers.pronounce(env, chatId, arg);
       case "/quiz2": return handlers.quiz2(env, chatId, userId);
       case "/hangman": if (arg === "stop") { hangmanState.delete(String(userId)); await send(env, chatId, "⏹ أوقفت لعبة الشنق."); return true; } return handlers.hangman(env, chatId, userId);
