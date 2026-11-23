@@ -817,7 +817,7 @@ async function runMenuCommand(env, chatId, userId, command) {
   if (command === "/quiz") { await beginQuiz(env, chatId); return; }
   if (command === "/help") { await sendHelp(env, chatId); return; }
   if (command === "/dailyquiz") { await beginQuizV2(env, chatId, dailyQuizType()); return; }
-  if (command === "/menu") { await sendRootMenus(env, chatId, chatId); return; }
+  if (command === "/learnhere" || command === "/menu") { await sendRootMenus(env, chatId, chatId); return; }
   if (command === "/search") { await beginSearchMode(env, chatId, userId); return; }
   if (command === "/cert1") { await beginCertFlow(env, chatId, userId, "0"); return; }
   if (command === "/cert2") { await beginCertFlow(env, chatId, userId, "1"); return; }
@@ -838,7 +838,7 @@ async function runMenuCommand(env, chatId, userId, command) {
 async function sendLearnLesson(env, chatId, userId, lessonId) {
   const lesson = findLearnLesson(lessonId);
   if (!lesson) {
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "الدرس غير موجود (ربما حُذف). أرسل /menu لعرض القوائم الحالية." });
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "الدرس غير موجود (ربما حُذف). أرسل /learnhere لعرض القوائم الحالية." });
     return;
   }
   const state = await loadImportState(env);
@@ -848,25 +848,35 @@ async function sendLearnLesson(env, chatId, userId, lessonId) {
     return;
   }
   const levelMenuId = (LEARN_LEVELS.find((l) => l.lessons.some((x) => x.id === lessonId)) ?? {}).id ?? "m_learn_l1";
-  // No inline, ever (user 2026-11-13): the nav under a lesson is a small
-  // REPLY keyboard — Previous/Next lesson + Back/Home — attached to the
-  // LAST lesson message. The first message still removes the keyboard so
-  // the video/photo arrive full-screen; the nav keyboard only appears
-  // after all the content, as the way to the next lesson. Siblings come
-  // from the stored level menu's lesson buttons, in order; if the menu
-  // is not stored yet, the nav falls back to Back/Home only.
+  // Lesson list stays visible (user 2026-11-23, reversing the 2026-11-13
+  // full-screen rule): the level menu's lesson-name keyboard stays on
+  // screen while a lesson plays, so the user can tap another lesson
+  // directly. No inline, ever. Siblings come from the stored level
+  // menu's lesson buttons, in order; if the menu is not stored yet, the
+  // nav falls back to the small Previous/Next + Back/Home keyboard.
   const storedMenus = await loadMenus(env);
   const levelMenu = findMenu(storedMenus, levelMenuId);
   const lessonButtons = (levelMenu?.buttons ?? []).filter((b) => b.kind === "lesson");
   const currentIndex = lessonButtons.findIndex((b) => b.lessonId === lessonId);
   const prevButton = currentIndex > 0 ? lessonButtons[currentIndex - 1] : null;
   const nextButton = currentIndex >= 0 && currentIndex < lessonButtons.length - 1 ? lessonButtons[currentIndex + 1] : null;
-  const navRows = [];
   const stepRow = [];
   if (prevButton) stepRow.push({ text: "⏮ السابق" });
   if (nextButton) stepRow.push({ text: "التالي ⏭" });
+  const navRows = [];
   if (stepRow.length) navRows.push(stepRow);
   navRows.push([{ text: "🔙 رجوع" }, { text: "🏠 الرئيسية" }]);
+  const smallNavKeyboard = { keyboard: navRows, resize_keyboard: true };
+  // The level menu keyboard (lesson names, cert, search, back, home)
+  // with Previous/Next on top when applicable. Null when the level menu
+  // is not stored yet — the caller falls back to the small nav.
+  let lessonListKeyboard = null;
+  if (levelMenu) {
+    const menuKb = buildReplyMenuKeyboard(storedMenus, levelMenu, { isAdmin: isAdmin(env, userId) });
+    const rows = [...(menuKb?.keyboard ?? [])];
+    if (stepRow.length) rows.unshift(stepRow);
+    if (rows.length) lessonListKeyboard = { keyboard: rows, resize_keyboard: true };
+  }
   // Remember the lesson so the nav keyboard's Previous/Next taps (plain
   // text) can find the sibling in the next update.
   const lessonUser = await getUser(env, userId);
@@ -874,22 +884,20 @@ async function sendLearnLesson(env, chatId, userId, lessonId) {
   for (let i = 0; i < plan.length; i++) {
     const step = plan[i];
     const isLast = i === plan.length - 1;
-    // The lesson opens full-screen (user 2026-11-13): the level menu's
-    // reply keyboard stays on screen while the lesson content arrives,
-    // shrinking the view — so the FIRST lesson message removes it.
-    // Navigation returns as a small reply keyboard on the LAST lesson
-    // message (Previous/Next lesson, Back to the level, Home to the
-    // root) — no inline anywhere. A single remove_keyboard and the nav
-    // keyboard cannot share one message, so when a plan has only one
-    // step the nav is skipped and the keyboard is still removed (the
-    // user types /menu to go back).
-    const hideKeyboard = i === 0 ? { remove_keyboard: true } : undefined;
-    const navKeyboard = isLast && !hideKeyboard ? { keyboard: navRows, resize_keyboard: true } : undefined;
+    // The lesson list stays visible (user 2026-11-23): the level menu
+    // keyboard is attached to the FIRST lesson message and again to the
+    // LAST one, so the lesson names stay on screen and the user can pick
+    // another lesson directly. Falls back to the small nav when the level
+    // menu is not stored yet (and to remove_keyboard on the first step
+    // of a single-step lesson in that case, as before).
+    const attachKeyboard = i === 0
+      ? (lessonListKeyboard ?? { remove_keyboard: true })
+      : (isLast ? (lessonListKeyboard ?? smallNavKeyboard) : undefined);
     if (step.kind === "video" || step.kind === "photo") {
       const method = step.kind === "video" ? "sendVideo" : "sendPhoto";
-      const res = await telegram(env, method, { chat_id: chatId, [step.kind]: step.fileId, caption: step.caption, ...(hideKeyboard ? { reply_markup: hideKeyboard } : {}), ...(navKeyboard ? { reply_markup: navKeyboard } : {}) });
+      const res = await telegram(env, method, { chat_id: chatId, [step.kind]: step.fileId, caption: step.caption, ...(attachKeyboard ? { reply_markup: attachKeyboard } : {}) });
       if (!res?.ok) {
-        await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تعذّر إرسال هذا المحتوى حاليًا. جرّب لاحقًا أو أبلغ الإدارة.", ...(hideKeyboard ? { reply_markup: hideKeyboard } : {}) });
+        await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تعذّر إرسال هذا المحتوى حاليًا. جرّب لاحقًا أو أبلغ الإدارة.", ...(attachKeyboard ? { reply_markup: attachKeyboard } : {}) });
         if (isAdmin(env, userId)) {
           await telegram(env, "sendMessage", { chat_id: chatId, text: `🛠 سبب الرفض من تيليجرام: ${res?.description ?? `خطأ ${res?.error_code ?? "غير معروف"}`}` });
         }
@@ -898,16 +906,16 @@ async function sendLearnLesson(env, chatId, userId, lessonId) {
     }
     if (step.kind === "text") {
       // sendMenuMessage drops a remove_keyboard markup (it only keeps
-      // markups with rows), so the first text step goes direct.
-      if (hideKeyboard) await telegram(env, "sendMessage", { chat_id: chatId, text: step.text, reply_markup: hideKeyboard });
-      else await sendMenuMessage(env, chatId, step.text, navKeyboard);
+      // markups with rows), so a remove_keyboard fallback goes direct.
+      if (attachKeyboard?.remove_keyboard) await telegram(env, "sendMessage", { chat_id: chatId, text: step.text, reply_markup: attachKeyboard });
+      else await sendMenuMessage(env, chatId, step.text, attachKeyboard);
       continue;
     }
     if (step.kind === "url") {
       // The exam link goes as plain text (phrase + link in one message) so
       // the user taps it freely — not as an inline button. No link preview,
       // so the message stays exactly the phrase and the link.
-      await telegram(env, "sendMessage", { chat_id: chatId, text: `${step.label}: ${step.url}`, disable_web_page_preview: true, ...(hideKeyboard ? { reply_markup: hideKeyboard } : {}), ...(navKeyboard ? { reply_markup: navKeyboard } : {}) });
+      await telegram(env, "sendMessage", { chat_id: chatId, text: `${step.label}: ${step.url}`, disable_web_page_preview: true, ...(attachKeyboard ? { reply_markup: attachKeyboard } : {}) });
     }
   }
 }
@@ -923,7 +931,7 @@ async function handleMenuButton(env, callback) {
   const menu = findMenu(stored, menuId);
   const button = findButton(menu, buttonId);
   if (!button) {
-    const text = "الزر غير موجود (ربما حُذف). أرسل /menu لعرض القوائم الحالية.";
+    const text = "الزر غير موجود (ربما حُذف). أرسل /learnhere لعرض القوائم الحالية.";
     if (plain) await telegram(env, "sendMessage", { chat_id: chatId, text });
     else await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, text, show_alert: true });
     return;
@@ -1365,7 +1373,7 @@ async function openReplyMenu(env, chatId, userId, menu) {
   const stored = await loadMenus(env);
   const target = typeof menu === "string" ? findMenu(stored, menu) : menu;
   if (!target) {
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "⚠️ هذه القائمة غير موجودة. أرسل /menu لعرض القوائم." });
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "⚠️ هذه القائمة غير موجودة. أرسل /learnhere لعرض القوائم." });
     return;
   }
   await setMenuNav(env, userId, target.id);
@@ -1992,8 +2000,8 @@ async function findMatches(query, env) {
 const USER_COMMANDS = [
   { command: "start", description: "بدء استخدام القاموس" },
   { command: "keyboard", description: "لوحة مفاتيح قبطية لكتابة الكلمات" },
-  { command: "learn", description: "بوت تعلم اللغة القبطية من الصفر" },
-  { command: "menu", description: "القوائم والدروس" },
+  { command: "learn", description: "تعلم اللغة القبطية من بوت منفصل" },
+  { command: "learnhere", description: "تعلم اللغة القبطية هنا" },
   { command: "contact", description: "تواصل مع الإدارة" },
   { command: "random", description: "كلمة عشوائية" },
 ];
@@ -4085,8 +4093,8 @@ async function buildCommandsHelpText(env, userId) {
   const general = [
     ["/start", "/start — بدء الاستخدام وإظهار القائمة"],
     ["/keyboard", "/keyboard — لوحة مفاتيح قبطية"],
-    ["/learn", "/learn — تعلم اللغة القبطية"],
-    ["/menu", "/menu — القوائم والدروس"],
+    ["/learn", "/learn — تعلم اللغة القبطية من بوت منفصل"],
+    ["/learnhere", "/learnhere — تعلم اللغة القبطية هنا"],
     ["/random", "/random — كلمة عشوائية من القاموس"],
     ["/contact", "/contact — تواصل مع إدارة البوت (أو زر «📞 تواصل مع الإدارة»)"],
     ["/links", "/links — روابط المنصات: التطبيق والموقع والبوتات"],
@@ -4096,7 +4104,7 @@ async function buildCommandsHelpText(env, userId) {
     "",
     "🔹 <b>عامة</b>",
     ...general.filter(([cmd]) => !isHidden(cmd)).map(([, text]) => text),
-    "💡 اكتب أي كلمة مباشرة للبحث: قبطي / عربي / إنجليزي / يوناني / فرنسي / ألماني.",
+    "💡 اكتب أي كلمة مباشرة للبحث: قبطي / عربي / إنجليزي / فرنسي / ألماني.",
   ];
   if (admin) {
     lines.push("", "🔹 <b>للأدمن فقط</b>");
@@ -8361,7 +8369,7 @@ async function handleUpdate(update, env, ctx) {
   if (text === "/links") {
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
-      text: "🔗 <b>روابط القاموس القبطي Ⲭⲏⲙⲓ</b>\n📲 التطبيق (أندرويد): https://is.gd/copticdictionary\n🌐 الموقع الإلكتروني: https://abr429701-oss.github.io/coptic-dictionary-web/\n📱 تيليجرام: https://t.me/Coptic_Dictionary_bot\n💬 ماسنجر: https://m.me/Copticdictionary\n🟢 واتساب: https://wa.me/message/WSYPILDL7WV7C1",
+      text: "🔗 <b>روابط القاموس القبطي Ⲭⲏⲙⲓ</b>\n📲 التطبيق (أندرويد): https://is.gd/copticdictionary\n🌐 الموقع الإلكتروني: https://copticdictionry.neocities.org/\n📱 تيليجرام: https://t.me/Coptic_Dictionary_bot\n💬 ماسنجر: https://m.me/Copticdictionary\n🟢 واتساب: https://wa.me/message/WSYPILDL7WV7C1",
       parse_mode: "HTML",
     });
     return;
@@ -8396,7 +8404,7 @@ async function handleUpdate(update, env, ctx) {
   if (text === "/help") { await sendHelp(env, message.chat.id); return; }
   if (text === "/cert1" || text === "/cert2") { await beginCertFlow(env, message.chat.id, userId, text === "/cert1" ? "0" : "1"); return; }
   if (text === "/getcode") { await beginGetCodeFlow(env, message.chat.id, userId); return; }
-  if (text === "/menu") { await sendRootMenus(env, message.chat.id, userId); return; }
+  if (text === "/learnhere" || text === "/menu") { await sendRootMenus(env, message.chat.id, userId); return; }
   if (text === "/search") { await beginSearchMode(env, message.chat.id, userId); return; }
   if (text === "/app") {
     await telegram(env, "sendMessage", {

@@ -91,12 +91,12 @@ const nowIso = () => new Date().toISOString();
 function seedUser(kvEnv, id, name) {
   kvEnv.USERS.store.set(`user:${id}`, { name, registeredAt: nowIso(), firstSeen: nowIso(), lastSeen: nowIso() });
 }
-const SIX = ["start", "keyboard", "learn", "menu", "contact", "random"];
+const SIX = ["start", "keyboard", "learn", "learnhere", "contact", "random"];
 const SIX_DESCRIPTIONS = {
   start: "بدء استخدام القاموس",
   keyboard: "لوحة مفاتيح قبطية لكتابة الكلمات",
-  learn: "بوت تعلم اللغة القبطية من الصفر",
-  menu: "القوائم والدروس",
+  learn: "تعلم اللغة القبطية من بوت منفصل",
+  learnhere: "تعلم اللغة القبطية هنا",
   contact: "تواصل مع الإدارة",
   random: "كلمة عشوائية",
 };
@@ -129,12 +129,12 @@ test("user-menu: the /start commands list shows /menu after /learn", async () =>
   const help = sent(calls).find((p) => String(p.text ?? "").includes("القاموس القبطي الناطق — الأوامر"));
   assert.ok(help, "the /start commands list is sent");
   const lines = String(help.text).split("\n");
-  const general = lines.slice(lines.indexOf("🔹 <b>عامة</b>") + 1, lines.indexOf("💡 اكتب أي كلمة مباشرة للبحث: قبطي / عربي / إنجليزي / يوناني / فرنسي / ألماني."));
+  const general = lines.slice(lines.indexOf("🔹 <b>عامة</b>") + 1, lines.indexOf("💡 اكتب أي كلمة مباشرة للبحث: قبطي / عربي / إنجليزي / فرنسي / ألماني."));
   assert.deepEqual(general, [
     "/start — بدء الاستخدام وإظهار القائمة",
     "/keyboard — لوحة مفاتيح قبطية",
-    "/learn — تعلم اللغة القبطية",
-    "/menu — القوائم والدروس",
+    "/learn — تعلم اللغة القبطية من بوت منفصل",
+    "/learnhere — تعلم اللغة القبطية هنا",
     "/random — كلمة عشوائية من القاموس",
     "/contact — تواصل مع إدارة البوت (أو زر «📞 تواصل مع الإدارة»)",
     "/links — روابط المنصات: التطبيق والموقع والبوتات",
@@ -153,7 +153,7 @@ test("user-menu: a command hidden with /hidebutton disappears from the /start li
   const userHelp = sent(userCalls).find((p) => String(p.text ?? "").includes("القاموس القبطي الناطق — الأوامر"));
   assert.ok(userHelp, "the /start commands list is sent to the user");
   assert.ok(!String(userHelp.text).includes("/random —"), "the hidden /random line is gone for the user");
-  assert.ok(String(userHelp.text).includes("/menu — القوائم والدروس"), "the other commands stay");
+  assert.ok(String(userHelp.text).includes("/learnhere — تعلم اللغة القبطية هنا"), "the other commands stay");
   const adminCalls = await say(kvEnv, ADMIN, "/start");
   const adminHelp = sent(adminCalls).find((p) => String(p.text ?? "").includes("القاموس القبطي الناطق — الأوامر"));
   assert.ok(adminHelp, "the /start commands list is sent to the admin");

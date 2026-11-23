@@ -991,21 +991,29 @@ test("learn-import: plain tap on a lesson sends video, photo, then the exam link
   assert.deepEqual(calls.map((c) => c.method), ["sendVideo", "sendPhoto", "sendMessage"]);
   assert.match(String(calls[0].payload?.caption ?? ""), /الدرس الاول/u);
   assert.match(String(calls[1].payload?.caption ?? ""), /الدرس الاول/u);
-  // The lesson opens full-screen (user 2026-11-13): the first message
-  // removes the level menu's reply keyboard, so it stops shrinking the
-  // view while the lesson content arrives.
-  assert.deepEqual(calls[0].payload?.reply_markup, { remove_keyboard: true }, "first lesson message removes the reply keyboard");
-  assert.equal(calls[1].payload?.reply_markup, undefined, "only the first message carries the removal");
+  // The lesson list stays visible (user 2026-11-23): the first message
+  // carries the level menu's lesson-name keyboard (Previous/Next on top,
+  // lesson names, Back/Home at the bottom), so the user can tap another
+  // lesson directly.
+  const firstKb = calls[0].payload?.reply_markup;
+  assert.ok(Array.isArray(firstKb?.keyboard), "first lesson message carries a reply keyboard");
+  const firstLabels = firstKb.keyboard.flat().map((b) => b.text);
+  assert.ok(firstLabels.includes("⏮ السابق") && firstLabels.includes("التالي ⏭"), "lesson list keyboard has Previous/Next on top");
+  assert.ok(firstLabels.includes("الدرس الاول"), "lesson list keyboard shows the lesson names");
+  assert.ok(firstLabels.includes("🔙 رجوع") && firstLabels.includes("🏠 الرئيسية"), "lesson list keyboard has Back/Home");
+  assert.equal(calls[1].payload?.reply_markup, undefined, "middle messages carry no keyboard");
   const exam = calls[2].payload;
   assert.match(exam.text, /^📝 الامتحان الإلكتروني: https:\/\/docs\.google\.com\/forms\//u);
-  // Navigation returns as a small reply keyboard on the last lesson
-  // message — no inline, ever. ("الدرس الاول" is the third button in the
-  // stored level menu — the manifest titles do not follow the id order —
-  // so it has both a Previous and a Next.)
-  assert.deepEqual(exam.reply_markup, { keyboard: [
-    [{ text: "⏮ السابق" }, { text: "التالي ⏭" }],
-    [{ text: "🔙 رجوع" }, { text: "🏠 الرئيسية" }],
-  ], resize_keyboard: true }, "exam message carries the small reply nav keyboard (Previous/Next + Back/Home)");
+  // The last lesson message carries the same lesson-list keyboard — no
+  // inline, ever. ("الدرس الاول" is the third button in the stored level
+  // menu — the manifest titles do not follow the id order — so it has
+  // both a Previous and a Next.)
+  const lastKb = exam.reply_markup;
+  assert.ok(Array.isArray(lastKb?.keyboard), "exam message carries the lesson-list keyboard");
+  const lastLabels = lastKb.keyboard.flat().map((b) => b.text);
+  assert.ok(lastLabels.includes("⏮ السابق") && lastLabels.includes("التالي ⏭"), "last keyboard has Previous/Next");
+  assert.ok(lastLabels.includes("الدرس الاول"), "last keyboard shows the lesson names");
+  assert.ok(lastLabels.includes("🔙 رجوع") && lastLabels.includes("🏠 الرئيسية"), "last keyboard has Back/Home");
 });
 
 test("learn-import: tapping 🏠 الرئيسية under a lesson returns to the main menu", async () => {
@@ -1082,14 +1090,23 @@ test("learn-import: inline tap on an L2 lesson sends video, photo, exercise text
   const calls = await tapCallback(kvEnv, 57, "mb|btn|m_learn_l2|b_learn_l2_06");
   assert.deepEqual(calls.map((c) => c.method), ["answerCallbackQuery", "sendVideo", "sendPhoto", "sendMessage", "sendMessage"]);
   assert.match(String(calls[1].payload?.caption ?? ""), /الدرس السادس/u);
-  assert.deepEqual(calls[1].payload?.reply_markup, { remove_keyboard: true }, "first lesson message removes the reply keyboard");
+  // The lesson list stays visible (user 2026-11-23): the first message
+  // carries the level menu's lesson-name keyboard.
+  const firstKb = calls[1].payload?.reply_markup;
+  assert.ok(Array.isArray(firstKb?.keyboard), "first lesson message carries a reply keyboard");
+  const firstLabels = firstKb.keyboard.flat().map((b) => b.text);
+  assert.ok(firstLabels.includes("⏮ السابق") && firstLabels.includes("التالي ⏭"), "lesson list keyboard has Previous/Next on top");
+  assert.ok(firstLabels.includes("الدرس السادس"), "lesson list keyboard shows the lesson names");
+  assert.ok(firstLabels.includes("🔙 رجوع") && firstLabels.includes("🏠 الرئيسية"), "lesson list keyboard has Back/Home");
   assert.match(messageTexts(calls).find((t) => /التدريب الثالث/u.test(t)) ?? "", /التدريب الثالث/u);
   const exam = calls[4].payload;
   assert.match(exam.text, /^📝 الامتحان الإلكتروني: https:\/\/docs\.google\.com\/forms\//u);
-  assert.deepEqual(exam.reply_markup, { keyboard: [
-    [{ text: "⏮ السابق" }, { text: "التالي ⏭" }],
-    [{ text: "🔙 رجوع" }, { text: "🏠 الرئيسية" }],
-  ], resize_keyboard: true }, "exam message carries the small reply nav keyboard (Previous/Next + Back/Home)");
+  const lastKb = exam.reply_markup;
+  assert.ok(Array.isArray(lastKb?.keyboard), "exam message carries the lesson-list keyboard");
+  const lastLabels = lastKb.keyboard.flat().map((b) => b.text);
+  assert.ok(lastLabels.includes("⏮ السابق") && lastLabels.includes("التالي ⏭"), "last keyboard has Previous/Next");
+  assert.ok(lastLabels.includes("الدرس السادس"), "last keyboard shows the lesson names");
+  assert.ok(lastLabels.includes("🔙 رجوع") && lastLabels.includes("🏠 الرئيسية"), "last keyboard has Back/Home");
 });
 
 test("learn-import: one failed lesson item does not abort the rest of the lesson", async () => {
@@ -1122,10 +1139,12 @@ test("learn-import: one failed lesson item does not abort the rest of the lesson
   assert.ok(messageTexts(calls).some((t) => /wrong file identifier/u.test(t)), "admin sees the real reason");
   const exam = calls.at(-1).payload;
   assert.match(exam.text, /^📝 الامتحان الإلكتروني: https:\/\/docs\.google\.com\/forms\//u);
-  assert.deepEqual(exam.reply_markup, { keyboard: [
-    [{ text: "⏮ السابق" }, { text: "التالي ⏭" }],
-    [{ text: "🔙 رجوع" }, { text: "🏠 الرئيسية" }],
-  ], resize_keyboard: true }, "exam message carries the small reply nav keyboard (Previous/Next + Back/Home) even after a failed item");
+  // The lesson list stays visible (user 2026-11-23) even after a failed item.
+  const lastKb = exam.reply_markup;
+  assert.ok(Array.isArray(lastKb?.keyboard), "exam message carries the lesson-list keyboard even after a failed item");
+  const lastLabels = lastKb.keyboard.flat().map((b) => b.text);
+  assert.ok(lastLabels.includes("⏮ السابق") && lastLabels.includes("التالي ⏭"), "last keyboard has Previous/Next");
+  assert.ok(lastLabels.includes("🔙 رجوع") && lastLabels.includes("🏠 الرئيسية"), "last keyboard has Back/Home");
 });
 
 // ---------------------------------------------------------------------------
@@ -1162,13 +1181,13 @@ test("learn-import: 9 removed commands no longer respond or list", async () => {
   assert.ok(setCommands, "user setMyCommands must be sent on /start");
   let names = (setCommands.payload?.commands ?? []).map((c) => c.command);
   for (const name of removed) assert.ok(!names.includes(name), `${name} must not be listed`);
-  assert.deepEqual(names, ["start", "keyboard", "learn", "menu", "contact", "random"], "the user menu lists exactly the six chosen commands");
+  assert.deepEqual(names, ["start", "keyboard", "learn", "learnhere", "contact", "random"], "the user menu lists exactly the six chosen commands");
   calls = await sayMsg(kvEnv, ADMIN, "/start");
   setCommands = await waitForCall(calls, (c) => c.method === "setMyCommands" && c.payload?.scope);
   assert.ok(setCommands, "admin setMyCommands must be sent on /start");
   names = (setCommands.payload?.commands ?? []).map((c) => c.command);
   for (const name of removed) assert.ok(!names.includes(name), `${name} must not be listed for admins either`);
-  assert.deepEqual(names, ["start", "keyboard", "learn", "menu", "contact", "random"], "the admin menu lists the same six commands");
+  assert.deepEqual(names, ["start", "keyboard", "learn", "learnhere", "contact", "random"], "the admin menu lists the same six commands");
   // The internal transliteration helper still works via /pronounce.
   calls = await sayMsg(kvEnv, 57, "/pronounce ⲁⲃⲃⲁ");
   assert.ok(anyMessage(calls, /النقل الصوتي \(باللاتيني\)/u), "/pronounce must still show the latin transliteration");
