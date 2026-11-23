@@ -5370,10 +5370,25 @@ async function getUserConv(env, userId) {
   return [...persisted, ...(convLog.get(key) ?? [])].slice(-CONV_MAX_PER_USER);
 }
 async function getActiveConvUsers(env) {
-  const persisted = env.USERS ? ((await storeCall(env, { op: "get", key: "conv:active" })).value ?? {}) : {};
+  let persisted = {};
+  try {
+    persisted = env.USERS ? ((await storeCall(env, { op: "get", key: "conv:active" })).value ?? {}) : {};
+  } catch (error) {
+    // A failed store read must not silence /conversations: fall back to the
+    // in-memory buffer only and let the report say so via the count.
+    console.error("getActiveConvUsers store read failed", error instanceof Error ? error.message : "unknown error");
+    persisted = {};
+  }
+  if (!persisted || typeof persisted !== "object" || Array.isArray(persisted)) persisted = {};
   const merged = { ...persisted };
-  for (const [id, info] of convActive) merged[id] = { name: info.name, at: new Date(info.at).toISOString(), count: (merged[id]?.count ?? 0) + info.count };
-  return Object.entries(merged).map(([id, v]) => ({ id, name: v.name, at: v.at, count: v.count })).sort((a, b) => new Date(b.at) - new Date(a.at));
+  for (const [id, info] of convActive) {
+    const at = info?.at ? new Date(info.at) : null;
+    merged[id] = { name: info?.name, at: at && !Number.isNaN(at.getTime()) ? at.toISOString() : new Date().toISOString(), count: (merged[id]?.count ?? 0) + (info?.count ?? 0) };
+  }
+  return Object.entries(merged).map(([id, v]) => {
+    const at = v?.at ? new Date(v.at) : null;
+    return { id, name: v?.name, at: at && !Number.isNaN(at.getTime()) ? at.toISOString() : new Date(0).toISOString(), count: v?.count ?? 0 };
+  }).sort((a, b) => new Date(b.at) - new Date(a.at));
 }
 
 // ---- Word suggestion box (public /suggest, admin approve/reject) ----
@@ -5891,25 +5906,48 @@ async function toggleLiveMonitor(env, chatId) {
   await telegram(env, "sendMessage", { chat_id: chatId, text: on ? "🔴 تم تشغيل المراقبة المباشرة — ستصلك رسائل المستخدمين فور وصولها، مع زر «↩️ رد سريع» للرد عليهم مباشرة. أوقفها بـ /livemon." : "⚪ تم إيقاف المراقبة المباشرة — لن تصلك رسائل المستخدمين لحظيًا. المحادثات تظل محفوظة وتُراجَع بـ /conversations و /userchat." });
 }
 async function sendConversationsReport(env, chatId) {
-  const users = await getActiveConvUsers(env);
-  if (!users.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: "📭 لا توجد محادثات محفوظة بعد — تظهر هنا بعد أول رسالة من أي مستخدم." }); return; }
-  const lines = ["👥 <b>المحادثات الأخيرة</b> (الأحدث أولًا)", "", ...users.slice(0, 20).map((u) => `• <b>${escapeHtml(u.name || "بدون اسم")}</b> (<code>${escapeHtml(u.id)}</code>) — ${u.count} رسالة، آخرها ${new Date(u.at).toLocaleString("en-GB")}`), "", "لعرض محادثة كاملة: /userchat <id>"];
-  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
+  // Never fail silently: the admin must always get a reply (report, empty
+  // notice, or an explicit error). A throw here used to be swallowed by the
+  // poller, leaving /conversations with no reply at all (open since 8 Nov).
+  try {
+    const users = await getActiveConvUsers(env);
+    if (!users.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: "📭 لا توجد محادثات محفوظة بعد — تظهر هنا بعد أول رسالة من أي مستخدم." }); return; }
+    const lines = ["👥 <b>المحادثات الأخيرة</b> (الأحدث أولًا)", "", ...users.slice(0, 20).map((u) => {
+      const when = new Date(u.at);
+      const whenText = Number.isNaN(when.getTime()) ? "—" : when.toLocaleString("en-GB");
+      return `• <b>${escapeHtml(u.name || "بدون اسم")}</b> (<code>${escapeHtml(u.id)}</code>) — ${u.count} رسالة، آخرها ${whenText}`;
+    }), "", "لعرض محادثة كاملة: /userchat <id>"];
+    const sent = await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
+    if (!sent?.ok) {
+      logError(env, new Error(`conversations send failed: ${sent?.description ?? "unknown"}`), { where: "conversations" });
+      await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تعذّر إرسال تقرير المحادثات — حاول مرة أخرى." });
+    }
+  } catch (error) {
+    logError(env, error, { where: "conversations" });
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ تعذّر تحميل المحادثات: ${escapeHtml(error instanceof Error ? error.message : "خطأ غير معروف")}` }).catch(() => null);
+  }
 }
 async function sendUserChatReport(env, chatId, arg) {
-  const id = String(arg ?? "").split(/\s+/u)[0] ?? "";
-  if (!/^\d+$/u.test(id)) { await telegram(env, "sendMessage", { chat_id: chatId, text: "✏️ الاستخدام: /userchat <id>\nمثال: /userchat 123456789" }); return; }
-  const entries = await getUserConv(env, id);
-  if (!entries.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: `📭 لا توجد رسائل محفوظة للمستخدم <code>${escapeHtml(id)}</code> بعد.`, parse_mode: "HTML" }); return; }
-  const user = await getUser(env, id).catch(() => null);
-  const name = user?.name || "";
-  const lines = [`💬 <b>محادثة ${escapeHtml(name)}</b> (<code>${escapeHtml(id)}</code>) — آخر ${entries.length} رسالة`, ""];
-  for (const e of entries.slice(-30)) {
-    const time = new Date(e.at).toLocaleTimeString("en-GB");
-    const label = e.kind === "text" ? escapeHtml(e.text) : `${convKindLabel(e.kind)}${e.text ? ` ${escapeHtml(e.text)}` : ""}`;
-    lines.push(`[${time}] ${label}`);
+  // Same never-silent rule as /conversations: always reply, even on error.
+  try {
+    const id = String(arg ?? "").split(/\s+/u)[0] ?? "";
+    if (!/^\d+$/u.test(id)) { await telegram(env, "sendMessage", { chat_id: chatId, text: "✏️ الاستخدام: /userchat <id>\nمثال: /userchat 123456789" }); return; }
+    const entries = await getUserConv(env, id);
+    if (!entries.length) { await telegram(env, "sendMessage", { chat_id: chatId, text: `📭 لا توجد رسائل محفوظة للمستخدم <code>${escapeHtml(id)}</code> بعد.`, parse_mode: "HTML" }); return; }
+    const user = await getUser(env, id).catch(() => null);
+    const name = user?.name || "";
+    const lines = [`💬 <b>محادثة ${escapeHtml(name)}</b> (<code>${escapeHtml(id)}</code>) — آخر ${entries.length} رسالة`, ""];
+    for (const e of entries.slice(-30)) {
+      const time = new Date(e.at);
+      const timeText = Number.isNaN(time.getTime()) ? "—" : time.toLocaleTimeString("en-GB");
+      const label = e.kind === "text" ? escapeHtml(e.text) : `${convKindLabel(e.kind)}${e.text ? ` ${escapeHtml(e.text)}` : ""}`;
+      lines.push(`[${timeText}] ${label}`);
+    }
+    await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
+  } catch (error) {
+    logError(env, error, { where: "userchat" });
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ تعذّر تحميل المحادثة: ${escapeHtml(error instanceof Error ? error.message : "خطأ غير معروف")}` }).catch(() => null);
   }
-  await telegram(env, "sendMessage", { chat_id: chatId, text: lines.join("\n").slice(0, 3500), parse_mode: "HTML" });
 }
 async function sendAdminAuditReport(env, chatId) {
   const list = await readAdminAudit(env);
