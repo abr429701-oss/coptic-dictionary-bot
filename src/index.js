@@ -1280,6 +1280,63 @@ const FIRST_TIME_TEXT =
 const NAME_RETRY_TEXT = "الرجاء إدخال اسمك صحيحاً بالحروف فقط بدون رموز ولا أرقام.";
 const HELP_TEXT = `${BOT_TITLE}\n\nأهلًا بك في القاموس.\n\nاكتب الكلمة مباشرة، مثل:\nⲁⲛⲁⲩ\nwater\nماء\n\nسأبحث في القبطية والعربية والإنجليزية والفرنسية والألمانية والنطق.\n\nاكتب الكلمة أو أول حروفها لتظهر لك اقتراحات بالكلمات التي تبدأ بها.`;
 
+// /share — إعلان إطلاق النسخة الثانية (نص طويل + صورة البوستر).
+// النص حرفيًا كما كتبه المستخدم؛ الصورة مرفوعة على R2.
+const SHARE_POSTER_URL = "https://pub-e39b5be260724e0ea1bbf6a7db089987.r2.dev/poster-v9.jpg";
+const SHARE_TEXT = `إطلاق النسخة الثانية من تطبيق القاموس القبطي الناطق Ⲭⲏⲙⲓ | Coptic Dictionary 😍🎉
+
+بعد إطلاق النسخة الأولى التجريبية، يُسعدنا أن نقدم لكم النسخة الثانية من القاموس القبطي الناطق Ⲭⲏⲙⲓ، بإصدار أكثر تطوراً وشمولاً، يضم حوالي 17,000 كلمة متنوعة، إلى جانب مجموعة من المميزات والإضافات الجديدة التي تهدف إلى تسهيل تعلم اللغة القبطية والبحث في مفرداتها.
+
+📚 أبرز إمكانيات ومميزات القاموس:
+
+🔹 قاعدة بيانات لغوية موسّعة: تضم حوالي 17,000 كلمة قبطية متنوعة، لتوفير مرجع لغوي واسع للبحث والتعلم.
+
+🔹 النطق الصوتي للكلمات: إمكانية الاستماع إلى النطق الصوتي للمفردات القبطية، مما يساعد على التعرف على نطق الكلمات وتعلمها بصورة عملية.
+
+🔹 واجهة بحث سهلة وسريعة: إمكانية البحث عن الكلمات والوصول إلى معانيها من خلال واجهة استخدام بسيطة وميسرة.
+
+🔹 دعم منصات متعددة: إمكانية استخدام القاموس من خلال تطبيق الأندرويد أو الموقع الإلكتروني أو بوتات تيليجرام وماسنجر.
+
+📱 ميزة خاصة بتطبيق الأندرويد: من أبرز المميزات التي ينفرد بها تطبيق الأندرويد إمكانية تحميل الملفات الصوتية والاحتفاظ بها على جهازك، لتتمكن من الاستماع إلى نطق الكلمات القبطية في أي وقت، حتى دون الحاجة إلى الاتصال بالإنترنت، وذلك بعد تحميلها لأول مرة، وهذه الميزة متاحة داخل تطبيق الأندرويد، لتمنح مستخدميه تجربة مختلفة عن استخدام القاموس من خلال البوتات.
+
+🎧 والأفضل من ذلك أن الحجم الإجمالي للملفات الصوتية لا يتجاوز 40 ميجابايت فقط!
+
+⚠️ تنويه مهم: القاموس مرجع لغوي متخصص في عرض معاني الكلمات المفردة، وليس أداة لترجمة الجمل والنصوص الكاملة.
+
+📖 إضافة قسم جديد: الكتاب المقدس 😍
+إضافة قسم مميز للكتاب المقدس، يتيح الاطلاع على نصوصه وترجماته باللغات المختلفة، وفي مقدمتها اللغة القبطية، إلى جانب لغات أخرى مثل السريانية واليونانية والعبرية والإنجليزية. 😍
+
+🔔 نظام الإشعارات اليومية😍
+إضافة مجموعة متنوعة من الإشعارات اليومية وإشعارات المناسبات، ومن أبرزها إشعار الكلمة القبطية اليومية، بهدف تعزيز التعلم المستمر والتفاعل مع اللغة والتراث القبطي، ولتعمل هذه الميزة لديك، قُم بتفعيل الاشعارات للتطبيق.
+
+✨ تحسينات وإضافات جديدة
+العديد من التحسينات والتطويرات والمميزات الإضافية التي ندعوكم لاكتشافها بأنفسكم!
+
+📱 طرق استخدام القاموس القبطي Ⲭⲏⲙⲓ:
+
+1️⃣ تطبيق الأندرويد:
+https://is.gd/copticdictionary
+
+2️⃣ الموقع الإلكتروني:
+https://copticdictionry.neocities.org/
+
+3️⃣ بوت تيليجرام للقاموس:
+https://t.me/Coptic_Dictionary_bot
+
+4️⃣ بوت ماسنجر للقاموس:
+https://m.me/Copticdictionary
+
+📚 وأيضاً بوت تعلم اللغات القديمة: يمكنكم أيضاً الاستفادة من بوت مخصص لتعلم اللغة القبطية والهيروغليفية واليونانية:
+https://t.me/Coptic2_bot
+
+وندعوكم لمشاركة هذا العمل مع جميع أحبائكم وأصدقائكم والمهتمين باللغة القبطية والتراث المصري القديم، للمساهمة في نشر المعرفة وإيصال هذا المشروع إلى أكبر عدد ممكن من المهتمين، حتى تعم الفائدة😍❤️
+
+━━━━━━━━━━━━━━━━━━
+وإذا تعذر عليك تحميل نسخة القاموس للاندرويد أو لديك أي استفسار، يمكنك التواصل مع مبرمج القاموس من خلال الواتساب: https://wa.me/@Ebram_El_masry أو من خلال التيليجرام: https://telegram.me/Abraam55 وسيتم ارسال لك نسخة ملف الـ APK جاهزة للتثبيت المباشر😍
+
+Ebram Merzik
+ⲬⲎⲘⲒ | COPTIC DICTIONARY`;
+
 const ACCENT_MAP = { ὲ: "ⲉ", έ: "ⲉ", ὶ: "ⲓ", ί: "ⲓ", ὸ: "ⲟ", ό: "ⲟ", ὼ: "ⲱ", ώ: "ⲱ", ὴ: "ⲏ", ή: "ⲏ", ὰ: "ⲁ", ά: "ⲁ", ὺ: "ⲩ", ύ: "ⲩ" };
 const ALEF_MAP = { أ: "ا", إ: "ا", آ: "ا", ٱ: "ا", ى: "ي", ة: "ه" };
 
@@ -4098,6 +4155,7 @@ async function buildCommandsHelpText(env, userId) {
     ["/random", "/random — كلمة عشوائية من القاموس"],
     ["/contact", "/contact — تواصل مع إدارة البوت (أو زر «📞 تواصل مع الإدارة»)"],
     ["/links", "/links — روابط المنصات: التطبيق والموقع والبوتات"],
+    ["/share", "/share — مشاركة إعلان النسخة الثانية"],
   ];
   const lines = [
     "📖 <b>القاموس القبطي الناطق — الأوامر</b>",
@@ -6813,6 +6871,7 @@ const EXTRA_BOT_COMMANDS = [
   { command: "kbd", description: "لوحة مفاتيح قبطية (اختصار)" },
   { command: "lang", description: "تغيير لغة الواجهة" },
   { command: "links", description: "روابط المنصات: التطبيق والموقع والبوتات" },
+  { command: "share", description: "مشاركة إعلان النسخة الثانية" },
   { command: "myfav", description: "كلماتك المفضلة" },
   { command: "mystats", description: "إحصاءاتك ونقاطك" },
   { command: "points", description: "منح أو خصم نقاط" },
@@ -6865,7 +6924,7 @@ function allBotCommands() {
 // بلا تأكيد من الكود نفسه) تطلب تأكيدًا أولًا قبل التشغيل.
 const ALL_COMMANDS_DANGEROUS = new Set(["resetstats", "purgeinactive", "resetsessions"]);
 const ALL_COMMANDS_CATEGORIES = [
-  { id: "main", title: "⭐ الأوامر الأساسية", commands: ["start", "keyboard", "learn", "menu", "search", "app", "contact", "random", "help", "admin", "dashboard", "about", "cancel", "k", "kbd", "lang", "links"] },
+  { id: "main", title: "⭐ الأوامر الأساسية", commands: ["start", "keyboard", "learn", "menu", "search", "app", "contact", "random", "help", "admin", "dashboard", "about", "cancel", "k", "kbd", "lang", "links", "share"] },
   { id: "stats", title: "📊 الإحصاءات والتقارير", commands: ["usage", "analytics", "topusers", "growth", "usercount", "searchstats", "topwords", "misses", "livewords", "hourly", "dictstats", "wordcount", "fieldreport", "statuspage", "digest", "weekly", "reports", "reportclose", "adminscore", "usertimeline", "trace", "searchcount", "liveusers", "conversations", "userchat", "livemon", "livesearch", "retention", "ops", "funnel", "cohorts", "reflinks", "searchhistory", "report"] },
   { id: "voices", title: "🎙 الأصوات", commands: ["record", "record_choose", "record_select", "record_stop", "record_voice", "voice_delete", "voice_delete_all", "voice_delete_many", "voicecoverage", "voiceoff", "voiceon", "voiceonce", "voicesettings", "voicethree", "noaudio", "nopronounce", "uploadaudio", "rebuildvoice", "voicegaps", "pronounce"] },
   { id: "drive", title: "☁️ Drive والمزامنة", commands: ["drive", "syncdrive", "syncusers", "syncall", "synccancel", "syncreset", "syncstatus", "synctest", "syncwatch", "importusers", "importsheet", "importlearn", "setdrive", "setarchive", "resync"] },
@@ -8404,6 +8463,16 @@ async function handleUpdate(update, env, ctx) {
     return;
   }
   if (text === "/contact" || text.startsWith("/contact ")) { if (!await featureEnabled(env, "contact")) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "📭 خاصية التواصل مع الأدمن معطلة حاليًا." }); return; } await handleContactAdmin(env, message, userId, text); return; }
+  // /share — إعلان النسخة الثانية: الصورة أولًا ثم النص الطويل،
+  // مثل ترتيب الوسائط في الدروس (فيديو → صورة → نص).
+  if (text === "/share") {
+    const photoRes = await telegram(env, "sendPhoto", { chat_id: message.chat.id, photo: SHARE_POSTER_URL });
+    if (!photoRes?.ok) {
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `⚠️ عذراً، لم أتمكن من إرسال صورة الإعلان.\nالسبب من تليجرام: ${photoRes?.description ?? "unknown"}` });
+    }
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: SHARE_TEXT, parse_mode: "HTML", disable_web_page_preview: true });
+    return;
+  }
   if (text === "/links") {
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,

@@ -138,7 +138,8 @@ test("user-menu: the /start commands list shows /menu after /learn", async () =>
     "/random — كلمة عشوائية من القاموس",
     "/contact — تواصل مع إدارة البوت (أو زر «📞 تواصل مع الإدارة»)",
     "/links — روابط المنصات: التطبيق والموقع والبوتات",
-  ], "the general section lists the seven commands with /menu after /learn");
+    "/share — مشاركة إعلان النسخة الثانية",
+  ], "the general section lists the eight commands with /menu after /learn");
 });
 
 test("user-menu: a command hidden with /hidebutton disappears from the /start list for users, but not for the admin", async () => {
