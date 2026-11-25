@@ -1337,6 +1337,9 @@ https://t.me/Coptic2_bot
 Ebram Merzik
 ⲬⲎⲘⲒ | COPTIC DICTIONARY`;
 
+// /share — السطر الختامي بعد الصورة: دعوة النشر والمشاركة.
+const SHARE_CLOSING_TEXT = "نرجو منك نشر ومشاركة البوست السابق في صفحتك وجروباتك ولكل احبائك ليستفيد الجميع من هذا العمل الضخم ❤️❤️😍";
+
 const ACCENT_MAP = { ὲ: "ⲉ", έ: "ⲉ", ὶ: "ⲓ", ί: "ⲓ", ὸ: "ⲟ", ό: "ⲟ", ὼ: "ⲱ", ώ: "ⲱ", ὴ: "ⲏ", ή: "ⲏ", ὰ: "ⲁ", ά: "ⲁ", ὺ: "ⲩ", ύ: "ⲩ" };
 const ALEF_MAP = { أ: "ا", إ: "ا", آ: "ا", ٱ: "ا", ى: "ي", ة: "ه" };
 
@@ -8463,14 +8466,15 @@ async function handleUpdate(update, env, ctx) {
     return;
   }
   if (text === "/contact" || text.startsWith("/contact ")) { if (!await featureEnabled(env, "contact")) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "📭 خاصية التواصل مع الأدمن معطلة حاليًا." }); return; } await handleContactAdmin(env, message, userId, text); return; }
-  // /share — إعلان النسخة الثانية: الصورة أولًا ثم النص الطويل،
-  // مثل ترتيب الوسائط في الدروس (فيديو → صورة → نص).
+  // /share — إعلان النسخة الثانية: النص أولًا، ثم الصورة، ثم سطر
+  // الدعوة للنشر (طلب المستخدم 25 نوفمبر 2026).
   if (text === "/share") {
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: SHARE_TEXT, parse_mode: "HTML", disable_web_page_preview: true });
     const photoRes = await telegram(env, "sendPhoto", { chat_id: message.chat.id, photo: SHARE_POSTER_URL });
     if (!photoRes?.ok) {
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `⚠️ عذراً، لم أتمكن من إرسال صورة الإعلان.\nالسبب من تليجرام: ${photoRes?.description ?? "unknown"}` });
     }
-    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: SHARE_TEXT, parse_mode: "HTML", disable_web_page_preview: true });
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: SHARE_CLOSING_TEXT, disable_web_page_preview: true });
     return;
   }
   if (text === "/links") {

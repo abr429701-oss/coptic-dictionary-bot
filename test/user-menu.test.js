@@ -142,6 +142,21 @@ test("user-menu: the /start commands list shows /menu after /learn", async () =>
   ], "the general section lists the eight commands with /menu after /learn");
 });
 
+test("user-menu: /share sends the announcement first, then the poster photo, then the share-ask line", async () => {
+  invalidateHiddenUiCache();
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedUser(kvEnv, 66, "مينا");
+  const calls = await say(kvEnv, 66, "/share");
+  const methods = calls.filter((c) => c.url.includes("/sendMessage") || c.url.includes("/sendPhoto"));
+  assert.equal(methods.length, 3, "exactly three sends: text, photo, text");
+  assert.ok(methods[0].url.endsWith("/sendMessage"), "announcement text goes first");
+  assert.match(methods[0].payload.text, /إطلاق النسخة الثانية من تطبيق القاموس القبطي الناطق/u, "first message is the announcement");
+  assert.ok(methods[1].url.endsWith("/sendPhoto"), "poster photo second");
+  assert.match(String(methods[1].payload.photo), /r2\.dev\/poster-v9\.jpg/u, "photo is the R2 poster");
+  assert.ok(methods[2].url.endsWith("/sendMessage"), "closing line last");
+  assert.match(methods[2].payload.text, /نرجو منك نشر ومشاركة البوست السابق/u, "last message asks the user to share it");
+});
+
 test("user-menu: a command hidden with /hidebutton disappears from the /start list for users, but not for the admin", async () => {
   invalidateHiddenUiCache();
   const kvEnv = { ...env, USERS: fakeKv() };
