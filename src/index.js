@@ -75,6 +75,7 @@ const MAINT_MSG_KEY = "admin:maintmsg";
 const ADMIN_AUDIT_KEY = "admin:audit:actions";
 const SLOW_MODE_KEY = "admin:slowmode";
 const BROADCAST_CTRL_KEY = "broadcast:control";
+const SCHEDULED_BROADCAST_KEY = "broadcast:scheduled";
 const featureFlagsCache = { value: null, at: 0 };
 const blacklistCache = { value: null, at: 0 };
 const whitelistCache = { value: null, at: 0 };
@@ -3323,14 +3324,59 @@ export class UserStore {
     this.pollLastDetailPutAt = now;
   }
 
+  // Start the earliest due scheduled broadcast (FIFO by sendAt). A due job
+  // waits while another broadcast is running — broadcastStep only calls
+  // this when no "broadcast" job exists. Returns the started job, or null.
+  async startDueScheduledBroadcast() {
+    const storage = this.state.storage;
+    const scheduled = (await storage.get(SCHEDULED_BROADCAST_KEY)) ?? [];
+    if (!Array.isArray(scheduled) || !scheduled.length) return null;
+    const now = Date.now();
+    const due = scheduled
+      .filter((j) => j && Number.isFinite(j.sendAt) && j.sendAt <= now)
+      .sort((a, b) => a.sendAt - b.sendAt)[0];
+    if (!due) return null;
+    await storage.put(SCHEDULED_BROADCAST_KEY, scheduled.filter((j) => j !== due));
+    const exclude = [...adminIds(this.doEnv), ...((await storage.get(OPTOUT_KEY)) ?? [])].map(String);
+    const queue = await this.recipients(exclude);
+    if (!queue.length) {
+      await telegram(this.doEnv, "sendMessage", {
+        chat_id: due.adminChat,
+        text: `⏰ حان ميعاد الرسالة المجدولة «${due.label ?? "رسالة"}» لكن لا يوجد مستخدمون لإرسالها إليهم — تم إلغاؤها.`,
+      }).catch(() => null);
+      return null;
+    }
+    const job = {
+      queue, total: queue.length, sent: 0, failed: 0, blocked: 0,
+      fromChat: due.fromChat, messageId: due.messageId, poll: due.poll ?? null,
+      adminChat: due.adminChat, scheduledId: due.id,
+    };
+    await storage.put("broadcast", job);
+    return job;
+  }
+
   // One broadcast batch. Returns the ms until the next batch, or null when
   // no broadcast is active. job.nextAt gates retries: Telegram's retry_after
   // must be respected even when the poller wakes sooner.
   async broadcastStep() {
     const storage = this.state.storage;
     const env = this.doEnv;
-    const job = await storage.get("broadcast");
-    if (!job) return null;
+    let job = await storage.get("broadcast");
+    if (!job) {
+      // No broadcast running: start the earliest due scheduled broadcast
+      // (FIFO by sendAt), or wake at the next scheduled send time.
+      job = await this.startDueScheduledBroadcast();
+      if (!job) {
+        const scheduled = (await storage.get(SCHEDULED_BROADCAST_KEY)) ?? [];
+        if (Array.isArray(scheduled) && scheduled.length) {
+          const nextAt = Math.min(...scheduled.map((j) => Number(j?.sendAt)).filter(Number.isFinite));
+          if (Number.isFinite(nextAt)) return Math.max(0, nextAt - Date.now());
+        }
+        return null;
+      }
+      // A scheduled job just started: the next alarm sends the first batch.
+      return 100;
+    }
     if (job.nextAt && Date.now() < job.nextAt) return job.nextAt - Date.now();
     delete job.nextAt;
     // Batch 4: broadcast pause/cancel control.
@@ -4824,6 +4870,94 @@ const BROADCAST_CONFIRM_MARKUP = {
   ]],
 };
 
+// ---- Scheduled broadcasts: time parsing (Cairo local time) ----
+// Accepted forms (Arabic-Indic digits work like Western ones):
+//   relative: "بعد ساعتين" / "بعد 30 دقيقة" / "بعد 3 أيام" / "بعد أسبوع"
+//   absolute: "بكرة 08:00" / "النهاردة 20:00" / "26/11 08:00" / "26/11/2026 08:00"
+// Returns { ok: true, ms } or { ok: false, error } with an Arabic message.
+const SCHEDULE_MIN_AHEAD_MS = 60 * 1000;
+const SCHEDULE_MAX_AHEAD_MS = 365 * 24 * 60 * 60 * 1000;
+const ARABIC_DIGITS = { "٠": "0", "١": "1", "٢": "2", "٣": "3", "٤": "4", "٥": "5", "٦": "6", "٧": "7", "٨": "8", "٩": "9", "۰": "0", "۱": "1", "۲": "2", "۳": "3", "۴": "4", "۵": "5", "۶": "6", "۷": "7", "۸": "8", "۹": "9" };
+function normalizeScheduleDigits(text) {
+  return String(text ?? "").replace(/[٠-٩۰-۹]/gu, (d) => ARABIC_DIGITS[d] ?? d);
+}
+const CAIRO_TZ = "Africa/Cairo";
+function cairoOffsetMs(atMs) {
+  const dtf = new Intl.DateTimeFormat("en-US", { timeZone: CAIRO_TZ, hour12: false, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const parts = Object.fromEntries(dtf.formatToParts(new Date(atMs)).map((p) => [p.type, p.value]));
+  const wallAsUtc = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour) % 24, Number(parts.minute), Number(parts.second));
+  return wallAsUtc - atMs;
+}
+function cairoWallToMs(year, month, day, hour, minute) {
+  const wallAsUtc = Date.UTC(year, month - 1, day, hour, minute);
+  const first = cairoOffsetMs(wallAsUtc);
+  let ms = wallAsUtc - first;
+  const second = cairoOffsetMs(ms);
+  if (second !== first) ms = wallAsUtc - second;
+  return ms;
+}
+export function formatCairoDateTime(ms) {
+  return new Intl.DateTimeFormat("en-GB", { timeZone: CAIRO_TZ, day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(ms)).replace(",", "");
+}
+function cairoTodayParts(nowMs) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: CAIRO_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(nowMs)).map((p) => [p.type, Number(p.value)]));
+  return { year: parts.year, month: parts.month, day: parts.day };
+}
+export function parseScheduleTime(input, nowMs = Date.now()) {
+  const raw = normalizeScheduleDigits(input).trim().replace(/\s+/gu, " ");
+  const fail = () => ({ ok: false, error: "❌ لم أفهم الميعاد. جرّب: «بعد ساعتين» أو «بعد 30 دقيقة» أو «بكرة 08:00» أو «26/11 08:00»." });
+  if (!raw) return fail();
+  const relative = raw.match(/^بعد\s+(.+)$/u);
+  if (relative) {
+    const rest = relative[1].trim();
+    const units = [
+      [/^(?:(\d+)\s*)?(?:دقيقة|دقائق|دقيقه)$/u, 60 * 1000, "minute"],
+      [/^(?:(\d+)\s*)?(?:ساعة|ساعات|ساعه)$/u, 60 * 60 * 1000, "hour"],
+      [/^(?:(\d+)\s*)?(?:يوم|أيام|ايام)$/u, 24 * 60 * 60 * 1000, "day"],
+      [/^(?:(\d+)\s*)?(?:أسبوع|أسابيع|اسبوع)$/u, 7 * 24 * 60 * 60 * 1000, "week"],
+    ];
+    const duals = { "دقيقتين": 2, "ساعتين": 2, "يومين": 2, "أسبوعين": 2 };
+    for (const [pattern, unitMs] of units) {
+      const m = rest.match(pattern);
+      if (m) {
+        const n = m[1] ? Number(m[1]) : 1;
+        if (!Number.isFinite(n) || n < 1 || n > 366) return fail();
+        return finishScheduleTime(nowMs + n * unitMs, nowMs);
+      }
+    }
+    if (Object.hasOwn(duals, rest)) return finishScheduleTime(nowMs + duals[rest] * (rest === "دقيقتين" ? 60 * 1000 : rest === "ساعتين" ? 60 * 60 * 1000 : rest === "يومين" ? 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000), nowMs);
+    return fail();
+  }
+  const timeOnly = raw.match(/^(?:بكرة|بكرا|غداً|غدا|النهاردة|النهارده|اليوم)\s+(\d{1,2}):(\d{2})$/u);
+  if (timeOnly) {
+    const word = raw.split(/\s+/u)[0];
+    const hour = Number(timeOnly[1]);
+    const minute = Number(timeOnly[2]);
+    if (hour > 23 || minute > 59) return fail();
+    const today = cairoTodayParts(nowMs);
+    const addDays = /^(?:بكرة|بكرا|غداً|غدا)$/u.test(word) ? 1 : 0;
+    const base = new Date(Date.UTC(today.year, today.month - 1, today.day + addDays));
+    return finishScheduleTime(cairoWallToMs(base.getUTCFullYear(), base.getUTCMonth() + 1, base.getUTCDate(), hour, minute), nowMs);
+  }
+  const dated = raw.match(/^(\d{1,2})[/-](\d{1,2})(?:[/-](\d{4}))?\s+(\d{1,2}):(\d{2})$/u);
+  if (dated) {
+    const day = Number(dated[1]);
+    const month = Number(dated[2]);
+    const hour = Number(dated[4]);
+    const minute = Number(dated[5]);
+    if (day < 1 || day > 31 || month < 1 || month > 12 || hour > 23 || minute > 59) return fail();
+    const year = dated[3] ? Number(dated[3]) : cairoTodayParts(nowMs).year;
+    return finishScheduleTime(cairoWallToMs(year, month, day, hour, minute), nowMs);
+  }
+  return fail();
+}
+function finishScheduleTime(ms, nowMs) {
+  if (!Number.isFinite(ms)) return { ok: false, error: "❌ لم أفهم الميعاد." };
+  if (ms <= nowMs + SCHEDULE_MIN_AHEAD_MS) return { ok: false, error: "❌ الميعاد لازم يكون في المستقبل (بعد دقيقة على الأقل)." };
+  if (ms > nowMs + SCHEDULE_MAX_AHEAD_MS) return { ok: false, error: "❌ الميعاد بعيد أوي — أقصى حاجة سنة من دلوقتي." };
+  return { ok: true, ms };
+}
+
 async function beginBroadcast(env, chatId, userId, user) {
   const status = await storeCall(env, { op: "bcstatus" });
   if (status.running) {
@@ -4838,6 +4972,85 @@ async function beginBroadcast(env, chatId, userId, user) {
     chat_id: chatId,
     text: "📢 أرسل الآن الرسالة التي تريد إرسالها للمستخدمين: نص، صورة، فيديو، Voice، ملف، استبيان، أو أي رسالة يدعم Telegram نسخها.\nلإلغاء العملية أرسل /cancel",
   });
+}
+
+function scheduleMessageLabel(message) {
+  const caption = String(message.text ?? message.caption ?? "").trim();
+  if (caption) return caption.slice(0, 60);
+  if (message.photo) return "📷 صورة";
+  if (message.video) return "🎬 فيديو";
+  if (message.voice) return "🎙 رسالة صوتية";
+  if (message.audio) return "🎵 ملف صوتي";
+  if (message.document) return "📎 ملف";
+  if (message.poll) return "📊 استبيان";
+  if (message.sticker) return "🌟 ملصق";
+  if (message.animation) return "🎞 صورة متحركة";
+  return "رسالة";
+}
+
+async function beginSchedule(env, chatId, userId, user) {
+  await saveUser(env, userId, { ...user, bc: "schedule-await" });
+  await telegram(env, "sendMessage", {
+    chat_id: chatId,
+    text: "📅 أرسل الآن الرسالة التي تريد جدولتها: نص، صورة، فيديو، Voice، ملف، استبيان، أو أي رسالة يدعم Telegram نسخها.\nلإلغاء العملية أرسل /cancel",
+  });
+}
+
+async function captureScheduleMessage(env, message, userId, user) {
+  await saveUser(env, userId, {
+    ...user,
+    bc: { mode: "schedule", messageId: message.message_id, ...(message.poll ? { poll: broadcastPollPayload(message.poll) } : {}), label: scheduleMessageLabel(message) },
+  });
+  await telegram(env, "sendMessage", {
+    chat_id: message.chat.id,
+    text: "🕐 تمام، الرسالة محفوظة. اكتب الميعاد دلوقتي:\n• «بعد ساعتين» أو «بعد 30 دقيقة» أو «بعد 3 أيام»\n• «بكرة 08:00» أو «النهاردة 20:00»\n• أو تاريخ وساعة زي «26/11 08:00»\n(بتوقيت القاهرة — /cancel للإلغاء)",
+  });
+}
+
+async function handleScheduleTime(env, message, userId, user, text) {
+  const parsed = parseScheduleTime(text);
+  if (!parsed.ok) {
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: parsed.error });
+    return;
+  }
+  const scheduled = ((await storeCall(env, { op: "get", key: SCHEDULED_BROADCAST_KEY })).value ?? []);
+  const list = Array.isArray(scheduled) ? scheduled : [];
+  const { count } = await storeCall(env, { op: "bccount", exclude: adminIds(env) });
+  const id = Math.random().toString(36).slice(2, 8);
+  const job = {
+    id, sendAt: parsed.ms, fromChat: message.chat.id, messageId: user.bc.messageId,
+    poll: user.bc.poll ?? null, adminChat: message.chat.id,
+    label: user.bc.label ?? "رسالة", createdAt: Date.now(), createdBy: String(userId),
+  };
+  await storeCall(env, { op: "put", key: SCHEDULED_BROADCAST_KEY, value: [...list, job] });
+  await saveUser(env, userId, { ...user, bc: undefined });
+  await telegram(env, "sendMessage", {
+    chat_id: message.chat.id,
+    text: `✅ تمت جدولة الرسالة لـ ${formatCairoDateTime(parsed.ms)} (بتوقيت القاهرة).\n📝 «${job.label}»\n👥 هتتبعت لـ ${Number(count ?? 0).toLocaleString("en-US")} مستخدم.\n🆔 المعرف: ${id} — للإلغاء: /unschedule ${id}\n⚠️ لا تحذف الرسالة الأصلية من هذه المحادثة قبل ميعاد الإرسال.`,
+  });
+}
+
+async function sendScheduledList(env, chatId) {
+  const scheduled = ((await storeCall(env, { op: "get", key: SCHEDULED_BROADCAST_KEY })).value ?? []);
+  const list = (Array.isArray(scheduled) ? scheduled : []).sort((a, b) => a.sendAt - b.sendAt);
+  if (!list.length) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "📅 لا توجد رسائل مجدولة.\nلجدولة رسالة جديدة استخدم /schedule." });
+    return;
+  }
+  const lines = list.map((j) => `• ${formatCairoDateTime(j.sendAt)} — «${j.label ?? "رسالة"}» (🆔 ${j.id})`);
+  await telegram(env, "sendMessage", { chat_id: chatId, text: `📅 الرسائل المجدولة (${list.length}):\n${lines.join("\n")}\n\nللإلغاء: /unschedule <المعرف>` });
+}
+
+async function cancelScheduled(env, chatId, id) {
+  const scheduled = ((await storeCall(env, { op: "get", key: SCHEDULED_BROADCAST_KEY })).value ?? []);
+  const list = Array.isArray(scheduled) ? scheduled : [];
+  const found = list.find((j) => String(j?.id) === String(id));
+  if (!found) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `❌ لم أجد رسالة مجدولة بالمعرف «${id}».\n/schedules لعرض القائمة.` });
+    return;
+  }
+  await storeCall(env, { op: "put", key: SCHEDULED_BROADCAST_KEY, value: list.filter((j) => j !== found) });
+  await telegram(env, "sendMessage", { chat_id: chatId, text: `✅ تم إلغاء الرسالة المجدولة «${found.label ?? "رسالة"}» (${formatCairoDateTime(found.sendAt)}).` });
 }
 
 function broadcastPollPayload(poll) {
@@ -7730,6 +7943,23 @@ async function handleUpdate(update, env, ctx) {
       await beginBroadcast(env, message.chat.id, userId, admin ?? {});
       return;
     }
+    if (text === "/schedule") {
+      await beginSchedule(env, message.chat.id, userId, admin ?? {});
+      return;
+    }
+    if (text === "/schedules") {
+      await sendScheduledList(env, message.chat.id);
+      return;
+    }
+    if (text === "/unschedule" || text.startsWith("/unschedule ")) {
+      const arg = text.slice("/unschedule".length).trim().split(/\s+/u)[0] ?? "";
+      if (!arg) {
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /unschedule <المعرف>\n/schedules لعرض الرسائل المجدولة." });
+        return;
+      }
+      await cancelScheduled(env, message.chat.id, arg);
+      return;
+    }
     if (text === "/drive") {
       await telegram(env, "sendMessage", {
         chat_id: message.chat.id,
@@ -8278,6 +8508,18 @@ async function handleUpdate(update, env, ctx) {
     if (admin?.voicePick && text && !text.startsWith("/")) {
       const view = await renderVoiceWordSuggestions(text, env);
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: view.text, ...(view.reply_markup ? { reply_markup: view.reply_markup } : {}) });
+      return;
+    }
+    if (admin?.bc === "schedule-await" && !text.startsWith("/")) {
+      await captureScheduleMessage(env, message, userId, admin);
+      return;
+    }
+    if (admin?.bc?.mode === "schedule") {
+      if (!text || text.startsWith("/")) {
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "🕐 اكتب الميعاد نصًا: «بعد ساعتين» أو «بكرة 08:00» أو «26/11 08:00». (/cancel للإلغاء)" });
+        return;
+      }
+      await handleScheduleTime(env, message, userId, admin, text);
       return;
     }
     if (admin?.bc === "await" && !text.startsWith("/")) {
