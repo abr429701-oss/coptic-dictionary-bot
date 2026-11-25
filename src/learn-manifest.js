@@ -22,7 +22,7 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1ZrWw4d-UUBGcWZyFiqc-pRQcWvQH3fE8",
+            "driveId": "1UkxzYLLHZmrWftvxrNnhwCh_A00LHHU-",
             "label": "🎬 فيديو الدرس"
           }
         ]
@@ -34,7 +34,7 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1c35DqxbMDhvdR52irXvrKjw6IGqym8i4",
+            "driveId": "1ZPY8yH_U8f9ZcyyKW5ochz43emeB-s8X",
             "label": "🎬 فيديو الدرس"
           }
         ]
@@ -46,13 +46,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1R7Hnl9cwwzgFKXnG63-B9_5i-qYAIjKC",
+            "driveId": "1XoTji3Gv4EwYXr-0sy642N6NFVxxjLza",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "oral",
             "kind": "photo",
-            "driveId": "1IxPinWPhnvEUtNypz6tDu1TKy2QIM1Ym",
+            "driveId": "1xmkBKNU0HAqWZTDdQnVm7y06EMwExoWM",
             "label": "🗣 الشفوي"
           },
           {
@@ -70,13 +70,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1sD5PziUQu-8EQEJQIM-Yg_TShQTNhcGx",
+            "driveId": "1ah7Lw8zZGt8cQsL9-fqSg20uQ7Hd8qGs",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "oral",
             "kind": "photo",
-            "driveId": "1WZhG9eadkF5pf_WWx7TM7unb35_lMuuF",
+            "driveId": "1t12y0V8SLu4ycXGhdc_L-kskqr3oOtUF",
             "label": "🗣 الشفوي"
           },
           {
@@ -94,13 +94,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1zToorIL8_FdjZvlSOXXQUWl9ldkAp1rf",
+            "driveId": "12Ha2__LYyYQ6ssWVgDN20xvdBsVcjxST",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "oral",
             "kind": "photo",
-            "driveId": "1BtPTPPzpEwp41LiyMPjDbXmec_bGob3B",
+            "driveId": "1jsL_iQgGCNAg85wZw_7N1ks2yfnkbB_D",
             "label": "🗣 الشفوي"
           }
         ]
@@ -112,13 +112,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "12FrKVE54L-VELmZN1PY-hFlnEwSYgidT",
+            "driveId": "1SsIn57Q9qId9wPFmM_ZPNbahBL1GqQJc",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "oral",
             "kind": "photo",
-            "driveId": "1vbrEqVNH49reRCd2iD3X2x9fgC1BneJ_",
+            "driveId": "1jo99nrk1r_LEl394hhHQ7EOtyMbsZlTq",
             "label": "🗣 الشفوي"
           },
           {
@@ -136,13 +136,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "175oSfd2DTmaB3vDk6BRHM_0laavwXX9I",
+            "driveId": "1AKE2TcbtaHHQEoTAcuTi0vnqYbs3s-dl",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "oral",
             "kind": "photo",
-            "driveId": "1nFtwmujSehluUVNFV-pywlieipUW1_O0",
+            "driveId": "1JOWFwTf2VKLn3kROjmnzTXQGPh_aNKdj",
             "label": "🗣 الشفوي"
           },
           {
@@ -160,13 +160,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1qUBGvPG7PWixodGdv9zPqgXB7pKUZEsw",
+            "driveId": "1sTrOT2hQxqDRjWtwRO96Jha2bKhgVagS",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "oral",
             "kind": "photo",
-            "driveId": "1ywVDo5GZC20I4cA1XJpJkd26Eth5w50z",
+            "driveId": "1JWjpzQO-1KWazzXNDByPaiTPwv9GsyPO",
             "label": "🗣 الشفوي"
           }
         ]
@@ -178,13 +178,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1IhVT0JgwgtaIMyLhzRKSDTpEgLWnRRVQ",
+            "driveId": "1um3yvRSw_ZhuGM6wjewNYPiF6MXmTsWY",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "oral",
             "kind": "photo",
-            "driveId": "1GBVWYH8c-QDF3VUZEkay0aF4gIqtYUtP",
+            "driveId": "15TklFs-HieDLKUfRwQHUuI7rkdFURlmd",
             "label": "🗣 الشفوي"
           },
           {
@@ -202,13 +202,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "156BMk1gPVvUoc6XYoI9MZSPvABisbWrh",
+            "driveId": "1kxhjsqUbhFpkEYNWHVIDSPHVPGEi4YtW",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "oral",
             "kind": "photo",
-            "driveId": "1MQWYyzPeJrP_saOpDndl_743H4XjjNmL",
+            "driveId": "1w_fmVPU29Pb5hEqFkNIhHleRj8wPF-UZ",
             "label": "🗣 الشفوي"
           },
           {
@@ -226,13 +226,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1QnCSfPzzQeLVo51WNOvQySWy7GqCW9oO",
+            "driveId": "1d8TGDCRLLhEGbtWBzLIAWjli1lCpDJRa",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "oral",
             "kind": "photo",
-            "driveId": "1J7TptmL0eMnb_geNwnPjpkI300On-KMB",
+            "driveId": "13F8dvAOiSraEknxLGmsWqUWYAn2NrSOn",
             "label": "🗣 الشفوي"
           },
           {
@@ -250,13 +250,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1hCO6WXpIZ3jawx2TgFoYTPIGsBFNHVUI",
+            "driveId": "1laDYBEKIKqN7DZc4BNXJgApvR1VPLvU0",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "oral",
             "kind": "photo",
-            "driveId": "1ngCjTO1jAeVJEM-Fqltw34kEzplQuHi9",
+            "driveId": "1qIQ8XENvEI8qWor7FM65gbcJ3jvJpzZM",
             "label": "🗣 الشفوي"
           },
           {
@@ -274,13 +274,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1SbqpCZsH-cMM8J6Sphi0Me9yNT6of7mZ",
+            "driveId": "1Gyewj57qCzL0zN4BqHLbCNBwQ_eSKuwR",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "oral",
             "kind": "photo",
-            "driveId": "1Tk8ngqRTQx4LT_IugCSTpIvpZWS4v6Wi",
+            "driveId": "1bB6WM7QkZFzm7ImclC1oV5KcXHaKJi2n",
             "label": "🗣 الشفوي"
           },
           {
@@ -298,13 +298,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1_Pcv2WLo7UfOio5soHSI_F934kNCW_Bz",
+            "driveId": "1l4AyjgMmIvHkCYCpsTrkKlXY9iEH4qjx",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "oral",
             "kind": "photo",
-            "driveId": "1T1PTDs9TA3wsEXfaKWK7QPYT8hCCNtwI",
+            "driveId": "1JToQqiQkQbW91dnS9gTNK6PwvIwIH3ke",
             "label": "🗣 الشفوي"
           }
         ]
@@ -316,13 +316,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1GARqzKLjWXU6Rnr2aVZHsMaUKgndxiB3",
+            "driveId": "1MhtAUllCtPs8_SvWgcDsf-thw9O0k2hq",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "oral",
             "kind": "photo",
-            "driveId": "1I5WRb8EorgZd5yjmdevFCpHPhlR8zrqk",
+            "driveId": "1ZuguShPp__T36YEVNBNK7z61DhDZ4-LI",
             "label": "🗣 الشفوي"
           }
         ]
@@ -334,13 +334,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1q5fP8_2sJ9eZ9CMCEiHc4sYImCQK3R40",
+            "driveId": "1XG2t5uzTVNpb3B1TuADEbSUSxYJ_4YUX",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "oral",
             "kind": "photo",
-            "driveId": "1RhzmRmYAsLAA8BhgycQ-MfFrKQFdsPDL",
+            "driveId": "1SS9NGrhP1XyJpw6-qPEGASzCKEz8lbeP",
             "label": "🗣 الشفوي"
           }
         ]
@@ -352,13 +352,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1TDrzvbFfBSkMz1zMyWhNHgjNLGz7DCks",
+            "driveId": "1GPCZCwTlJ8Rbo0J4OCjh_RFI5lZnWLkc",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "oral",
             "kind": "photo",
-            "driveId": "1R_kzh3L6Hr52UU7USDJWDFHGNPUVzRWM",
+            "driveId": "1TgNogQf95j_KvOju2ZmKZd-7JdxpDTok",
             "label": "🗣 الشفوي"
           }
         ]
@@ -376,13 +376,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1xBV4r1KF86WQDc3_I0qB8w7X7sd-w5gJ",
+            "driveId": "1was52OGtQ7eGtw_g5VLBVApwNeblcMtI",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "summary",
             "kind": "photo",
-            "driveId": "1QTCVEqPfP-dgJC_nj6Y6WxuaRLpkwOYF",
+            "driveId": "1YMcSi07--nLb2JnoAwTZjy0W0nSePLUm",
             "label": "🖼 ملخص الدرس"
           }
         ]
@@ -394,13 +394,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1wfJwGx1ZMv_9A5Y8ta_BtTalxKJZA9AY",
+            "driveId": "1l50hZgx2RNIJGyTsZ4VD_bOd-LjyVYZb",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "summary",
             "kind": "photo",
-            "driveId": "16C9uL9J2P7TponJDKFrh2_rlb2-dWVsg",
+            "driveId": "1ZctKOIAr6pmBipNF_TTmVK1B8mdBiZx6",
             "label": "🖼 ملخص الدرس"
           },
           {
@@ -418,13 +418,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1wpBCZ3kv3-ho2zWsKd23PGwunS4Yf8Sm",
+            "driveId": "1OJvcKN3IWbogxGJRYyWJMYUjUgMfBxWK",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "summary",
             "kind": "photo",
-            "driveId": "1DcZV-GQFKj8O4Vk4VXSdYbEtwmOrqxTu",
+            "driveId": "1GTdE58tsl34pMSPnHpiTNXOyWxF14C9S",
             "label": "🖼 ملخص الدرس"
           },
           {
@@ -442,13 +442,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1wpJo_l7LfrorUJB1ZqMqjJdwjxtc9bVk",
+            "driveId": "1jiKxGodlTlwtPICtm5jw0VNdmd4aKS6F",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "summary",
             "kind": "photo",
-            "driveId": "1tQnzk7yVEytCXlH18L-VeKRroCpu1D-f",
+            "driveId": "1vzPthQT2kcJvRG8gaCmBXcvF5jATSZNc",
             "label": "🖼 ملخص الدرس"
           },
           {
@@ -466,13 +466,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1wpq3IBloRiZxMjCodM-5dg6Po8dIIwkf",
+            "driveId": "1nE9I9nDchHWsW_gobo2myLh_NUn2StE4",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "summary",
             "kind": "photo",
-            "driveId": "1dpAxJQVMD3-yzFXDk5R1JvX4FSsruBkK",
+            "driveId": "1ib6Uspuo7vZUBdl5Y7DtmanZg1G-iox7",
             "label": "🖼 ملخص الدرس"
           }
         ]
@@ -484,13 +484,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1wrNmIR2ZgJQDB4GvK2SUQDv6hzcJYGyp",
+            "driveId": "1RFQZn9dfyFvANqUWwcCgPLn5glmKvbt-",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "summary",
             "kind": "photo",
-            "driveId": "1FMFeZaQS_HSG3xTHhCFmVsGlM1FalhS1",
+            "driveId": "16Uq8Rcx0sN7Y4QX6mo_0w-fpf_OoP2sR",
             "label": "🖼 ملخص الدرس"
           },
           {
@@ -514,13 +514,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1x0cSeF796PcaAXkyoV8ykSpfqksYURNE",
+            "driveId": "1sL-6OyIdvQczzE5-NuyYU5Pu-GobWWS8",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "summary",
             "kind": "photo",
-            "driveId": "1Am86WnlekUrmma9BhT6JbRocYd_-YAw1",
+            "driveId": "1qwWyLJnkcLC0VidhaZ1ghTQTNbAQuRLv",
             "label": "🖼 ملخص الدرس"
           }
         ]
@@ -532,13 +532,13 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1ywN1rRH6hZOqqkOUHI-gD0r74etKtadO",
+            "driveId": "1PrIvIO3SI_hMDxxMR_ryz02nyPp84kx2",
             "label": "🎬 فيديو الدرس"
           },
           {
             "key": "summary",
             "kind": "photo",
-            "driveId": "1uTTBUkjXb7eD8ZcT92lsBQlOsLgwdoDY",
+            "driveId": "1X4-N5-5qTaA3CvPGzmN9MsD5wlSNN1Y4",
             "label": "🖼 ملخص الدرس"
           },
           {
@@ -562,7 +562,7 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "1-i-VB6Nrd6GTowo7gBC7JO9lRhXCMtSV",
+            "driveId": "1rC26EqOHdmneve3PlbUnt2GjfWTe6745",
             "label": "🎬 فيديو الدرس"
           }
         ]
@@ -574,7 +574,7 @@ export const LEARN_LEVELS = [
           {
             "key": "video",
             "kind": "video",
-            "driveId": "14svcapolBVRXPwxWcSY7_6jp6hb8QwWg",
+            "driveId": "1V2KSvwi-8_IQy2HM_rzj--v7fYo6lk0t",
             "label": "🎬 فيديو الدرس"
           }
         ]
