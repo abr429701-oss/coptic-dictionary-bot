@@ -836,7 +836,7 @@ async function runMenuCommand(env, chatId, userId, command) {
 // video + a photo + long text + a link, so the lesson arrives as
 // consecutive messages in that order. A failed item reports the generic
 // message (plus the real reason for an admin) and the rest still sends.
-async function sendLearnLesson(env, chatId, userId, lessonId) {
+async function sendLearnLesson(env, chatId, userId, lessonId, reactMessageId = undefined) {
   const lesson = findLearnLesson(lessonId);
   if (!lesson) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: "الدرس غير موجود (ربما حُذف). أرسل /learnhere لعرض القوائم الحالية." });
@@ -919,6 +919,11 @@ async function sendLearnLesson(env, chatId, userId, lessonId) {
       await telegram(env, "sendMessage", { chat_id: chatId, text: `${step.label}: ${step.url}`, disable_web_page_preview: true, ...(attachKeyboard ? { reply_markup: attachKeyboard } : {}) });
     }
   }
+  // ❤️ on the user's tap, like the word cards (user 2026-11-25): the
+  // lesson is always sent first, and a failed reaction never blocks or
+  // breaks the reply. Only reached when the lesson sent (the not-ready /
+  // missing branches above return before this).
+  await reactHeartToUserMessage(env, chatId, reactMessageId);
 }
 async function handleMenuButton(env, callback) {
   const chatId = callback.message?.chat?.id;
@@ -937,6 +942,10 @@ async function handleMenuButton(env, callback) {
     else await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, text, show_alert: true });
     return;
   }
+  // A reply-keyboard tap arrives as a synthesized PLAIN_CALLBACK carrying
+  // the user's message id (see followMenuHit); a real callback query has
+  // none, so buttons tapped from old inline keyboards never react.
+  const reactMessageId = callback.reactMessageId ?? undefined;
   if (button.adminOnly && !isAdmin(env, userId)) {
     const text = "⛔ هذا الزر للأدمن فقط.";
     if (plain) await telegram(env, "sendMessage", { chat_id: chatId, text });
@@ -946,7 +955,7 @@ async function handleMenuButton(env, callback) {
   // A popup answers with its own alert below, so the blank acknowledgement
   // above would be a wasted request (and the alert would then be rejected).
   if (!plain && button.kind !== "popup") await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id });
-  if (button.kind === "lesson") { await sendLearnLesson(env, chatId, userId, button.lessonId); return; }
+  if (button.kind === "lesson") { await sendLearnLesson(env, chatId, userId, button.lessonId, reactMessageId); return; }
   if (button.kind === "popup") {
     if (plain) await sendMenuMessage(env, chatId, `⚠️ ${button.text ?? ""}`);
     else await telegram(env, "answerCallbackQuery", { callback_query_id: callback.id, text: button.text ?? "", show_alert: true });
@@ -985,6 +994,10 @@ async function handleMenuButton(env, callback) {
       if (isAdmin(env, userId)) {
         await telegram(env, "sendMessage", { chat_id: chatId, text: `🛠 سبب الرفض من تيليجرام: ${res?.description ?? `خطأ ${res?.error_code ?? "غير معروف"}`}` });
       }
+    } else if (button.kind === "video") {
+      // ❤️ on the user's tap for learning-video buttons (m_video menu —
+      // user 2026-11-25), like the word cards: the video is sent first.
+      await reactHeartToUserMessage(env, chatId, reactMessageId);
     }
     return;
   }
@@ -1449,7 +1462,7 @@ async function openReplyMenu(env, chatId, userId, menu) {
   }
   await sendMenuMessage(env, chatId, text, keyboard);
 }
-async function followMenuHit(env, chatId, userId, hit) {
+async function followMenuHit(env, chatId, userId, hit, reactMessageId = undefined) {
   // Tapping any menu button leaves the certificate flow and the get-code
   // flow (the button's own action runs right after, so a cert/get-code
   // button re-sets its own flag itself).
@@ -1466,6 +1479,9 @@ async function followMenuHit(env, chatId, userId, hit) {
       from: { id: userId },
       message: { chat: { id: chatId } },
       data: `mb|btn|${hit.menu.id}|${hit.button.id}`,
+      // The user's tap message id, so lesson / video buttons can ❤️ it
+      // (handleMenuButton reads callback.reactMessageId).
+      reactMessageId,
     });
     return true;
   }
@@ -3028,12 +3044,16 @@ async function sendSearch(env, chatId, query, page = 0, messageId = undefined, c
 }
 
 // ❤️ on the user's message when a word card is shown (search result,
-// /random, word_ deep link, /wod). Best-effort only: the card is always
-// sent first, and a failed reaction never blocks or breaks the reply.
+// /random, word_ deep link, /wod) — and when a lesson or a learning-video
+// button is tapped (user 2026-11-25). Best-effort only: the card / lesson /
+// video is always sent first, and a failed reaction never blocks or breaks
+// the reply.
 // reactMessageId is the USER's incoming message id. Callback paths (picks,
 // meaning steps, keyboard search, page turns) carry it in the button's
 // `~r<id>` suffix (see withReactId/splitReactId); buttons sent before
-// that suffix existed carry none and simply don't react.
+// that suffix existed carry none and simply don't react. Reply-keyboard
+// taps carry it via followMenuHit -> handleMenuButton (callback.
+// reactMessageId); real callback queries have none.
 async function reactHeartToUserMessage(env, chatId, messageId) {
   if (!chatId || !messageId) return;
   try {
@@ -7908,7 +7928,7 @@ async function handleUpdate(update, env, ctx) {
       const level = LEARN_LEVELS.find((l) => l.lessons.some((x) => x.id === navUser?.lastLessonId));
       const idx = level ? level.lessons.findIndex((x) => x.id === navUser?.lastLessonId) : -1;
       const sibling = idx >= 0 ? level.lessons[idx + (text === "التالي ⏭" ? 1 : -1)] : null;
-      if (sibling) { await sendLearnLesson(env, message.chat.id, userId, sibling.id); return; }
+      if (sibling) { await sendLearnLesson(env, message.chat.id, userId, sibling.id, message.message_id); return; }
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: text === "التالي ⏭" ? "⏭ ده آخر درس في المستوى." : "⏮ ده أول درس في المستوى." });
       return;
     }
@@ -7917,7 +7937,7 @@ async function handleUpdate(update, env, ctx) {
     const isRootLabel = rootMenus(chatMenus).some((m) => String(m.title).trim() === text);
     if (navId || isRootLabel || (isAdmin(env, userId) && text === STUDIO_HOME_LABEL)) {
       const hit = resolveMenuLabel(chatMenus, text, { currentMenuId: navId, isAdmin: isAdmin(env, userId) });
-      if (hit && await followMenuHit(env, message.chat.id, userId, hit)) return;
+      if (hit && await followMenuHit(env, message.chat.id, userId, hit, message.message_id)) return;
     }
   }
   if (isPrivate && !isAdmin(env, userId)) { if (await adminPro.handle({ env, chatId: message.chat.id, userId, text, raw: text })) return; }
