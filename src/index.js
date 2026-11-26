@@ -1366,7 +1366,11 @@ const SHARE_CLOSING_TEXT = "نرجو منك نشر ومشاركة البوست �
 // الـ DO محدودة (~128KB) والورقة بتكبر مع الوقت.
 const KHMI_SHEET_ID = "1kZKjF2KDsGT0HslGSenN-pDTzx4FpX0QDPqX0ZOnriY";
 const KHMI_SHEET_TAB = "KHMI_NOFICATION";
-const KHMI_CSV_URL = `https://docs.google.com/spreadsheets/d/${KHMI_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(KHMI_SHEET_TAB)}`;
+// Only columns A (device_id) and G (language) are fetched: the full sheet
+// is ~490KB per read, the two columns ~66KB — the 5-minute cron tick on
+// the Workers Free plan has just 10 ms of CPU per invocation, so the
+// smaller payload keeps the parse far inside that budget.
+const KHMI_CSV_URL = `https://docs.google.com/spreadsheets/d/${KHMI_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(KHMI_SHEET_TAB)}&tq=select%20A%2CG`;
 const KHMI_NOTIFY_META_KEY = "khmi:notify";
 const KHMI_NOTIFY_CHUNK_SIZE = 300;
 const KHMI_NOTIFY_MAX_DEVICES = 10;
@@ -1466,15 +1470,15 @@ export function describeKhmiDevice(deviceId) {
   return clean ? `${brand} ${clean}` : brand;
 }
 
-// صفوف الورقة من نص الـ CSV: {id, lang, version} لكل صف معرّفه غير فاضي
-// (العمود A = device_id، G = اللغة، H = إصدار التطبيق). الصف الأول هيدر.
+// صفوف الورقة من نص الـ CSV: {id, lang} لكل صف معرّفه غير فاضي
+// (العمود A = device_id، G = اللغة). الصف الأول هيدر.
 export function khmiRowsFromCsv(csvText) {
   const rows = parseCsv(csvText);
   const out = [];
   for (const row of rows.slice(1)) {
     const id = String(row?.[0] ?? "").trim();
     if (!id) continue;
-    out.push({ id, lang: String(row?.[6] ?? "").trim(), version: String(row?.[7] ?? "").trim() });
+    out.push({ id, lang: String(row?.[1] ?? "").trim() });
   }
   return out;
 }

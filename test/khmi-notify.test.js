@@ -93,9 +93,8 @@ function stubKhmiFetch(calls, csvText) {
   };
 }
 
-const CSV_HEADER = `"device_id","hardware_id","التوكين","status","individual_message","broadcast_message","language","",""`;
-const row = (id, lang = "ar", version = "1.3.1") =>
-  `"${id}","android_x","ExponentPushToken[test]","","","","${lang}","${version}"`;
+const CSV_HEADER = `"device_id","language"`;
+const row = (id, lang = "ar") => `"${id}","${lang}"`;
 const SAMSUNG_A16 = "samsung/a16nsxx/a16:16/BP2A.250605.031.A3/A165FXXU5CYK1:user/release-keys_aaa111";
 const ANDROID_1 = "Android_qet1hmd9kng";
 const HONOR_DNP = "HONOR/DNP-NX9/DNP-NX9:14/HONORDNP-NX9-user/release-keys_bbb222";
@@ -109,13 +108,11 @@ test("parseCsv: quoted commas, escaped quotes, CRLF, embedded newlines", () => {
 });
 
 test("khmiRowsFromCsv: skips the header and empty device ids", () => {
-  const rows = khmiRowsFromCsv([CSV_HEADER, row(SAMSUNG_A16), `"","","","","","","","",""`, row(ANDROID_1, "en", "")].join("\n"));
+  const rows = khmiRowsFromCsv([CSV_HEADER, row(SAMSUNG_A16), `"",""`, row(ANDROID_1, "en")].join("\n"));
   assert.equal(rows.length, 2);
   assert.equal(rows[0].id, SAMSUNG_A16);
   assert.equal(rows[0].lang, "ar");
-  assert.equal(rows[0].version, "1.3.1");
   assert.equal(rows[1].lang, "en");
-  assert.equal(rows[1].version, "");
 });
 
 test("describeKhmiDevice: fingerprints, generic ids, and fallbacks", () => {
