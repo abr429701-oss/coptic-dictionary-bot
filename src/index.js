@@ -430,7 +430,7 @@ async function sendRootMenus(env, chatId, userId = chatId) {
   // text must search the dictionary again instead of being read as a code,
   // a name or a phone number.
   const rootUser = await getUser(env, userId);
-  if (rootUser?.certAwaiting || rootUser?.getcodeStep) await saveUser(env, userId, { ...rootUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined });
+  if (rootUser?.certAwaiting || rootUser?.getcodeStep || rootUser?.copticNameAwaiting) await saveUser(env, userId, { ...rootUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined });
   const stored = await loadMenus(env);
   const roots = rootMenus(stored);
   if (!roots.length) {
@@ -448,7 +448,7 @@ async function sendRootMenus(env, chatId, userId = chatId) {
 // searches the dictionary instead of being read as a code or a menu tap.
 async function beginSearchMode(env, chatId, userId) {
   const searchUser = await getUser(env, userId);
-  if (searchUser?.certAwaiting || searchUser?.getcodeStep) await saveUser(env, userId, { ...searchUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined });
+  if (searchUser?.certAwaiting || searchUser?.getcodeStep || searchUser?.copticNameAwaiting) await saveUser(env, userId, { ...searchUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined });
   await setMenuNav(env, userId, null);
   await telegram(env, "sendMessage", { chat_id: chatId, text: "🔍 اكتب الكلمة للبحث في القاموس.", reply_markup: { remove_keyboard: true } });
 }
@@ -1612,6 +1612,7 @@ function lazy(build) {
 // Recordings are linked to the word's permanent id (data/word_ids.json), never to its row position.
 import { audioUrl, audioVersion, prebuiltAudioUrl, fetchPrebuiltSpeech, isSingleWordOgg, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 import { copticDateNow, alphabetText, letterStatsText, longestText, originsText, wordCountText, startsWithText, similarText, translateText, vocabText, startGuess, handleGuessReply } from "./features.js";
+import { transliterateNameToCoptic, copticNameReply } from "./coptic-name.js";
 import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, suggestSimilar, helpText, retentionText, opsText, recordById, levenshtein } from "./new-features.js";
 import { lookupCertificate, parseCertCsv } from "./certificates.js";
 import { extractCodePattern } from "./exam-pattern.js";
@@ -1673,7 +1674,7 @@ async function followMenuHit(env, chatId, userId, hit, reactMessageId = undefine
   // flow (the button's own action runs right after, so a cert/get-code
   // button re-sets its own flag itself).
   const hitUser = await getUser(env, userId);
-  if (hitUser?.certAwaiting || hitUser?.getcodeStep) await saveUser(env, userId, { ...hitUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined });
+  if (hitUser?.certAwaiting || hitUser?.getcodeStep || hitUser?.copticNameAwaiting) await saveUser(env, userId, { ...hitUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined });
   if (hit.kind === "admin") {
     await studio.handleCommand(env, chatId, userId);
     return true;
@@ -4431,6 +4432,7 @@ async function buildCommandsHelpText(env, userId) {
     ["/contact", "/contact — تواصل مع إدارة البوت (أو زر «📞 تواصل مع الإدارة»)"],
     ["/links", "/links — روابط المنصات: التطبيق والموقع والبوتات"],
     ["/share", "/share — مشاركة إعلان النسخة الثانية"],
+    ["/copticname", "/copticname — اكتب اسمك بالحروف القبطية"],
   ];
   const lines = [
     "📖 <b>القاموس القبطي الناطق — الأوامر</b>",
@@ -7316,6 +7318,7 @@ const EXTRA_BOT_COMMANDS = [
   { command: "links", description: "روابط المنصات: التطبيق والموقع والبوتات" },
   { command: "share", description: "مشاركة إعلان النسخة الثانية" },
   { command: "khmi", description: "مراقبة تسجيلات الإشعارات (KHMI)" },
+  { command: "copticname", description: "كتابة اسمك بالحروف القبطية" },
   { command: "myfav", description: "كلماتك المفضلة" },
   { command: "mystats", description: "إحصاءاتك ونقاطك" },
   { command: "points", description: "منح أو خصم نقاط" },
@@ -7368,7 +7371,7 @@ function allBotCommands() {
 // بلا تأكيد من الكود نفسه) تطلب تأكيدًا أولًا قبل التشغيل.
 const ALL_COMMANDS_DANGEROUS = new Set(["resetstats", "purgeinactive", "resetsessions"]);
 const ALL_COMMANDS_CATEGORIES = [
-  { id: "main", title: "⭐ الأوامر الأساسية", commands: ["start", "keyboard", "learn", "menu", "search", "app", "contact", "random", "help", "admin", "dashboard", "about", "cancel", "k", "kbd", "lang", "links", "share", "khmi"] },
+  { id: "main", title: "⭐ الأوامر الأساسية", commands: ["start", "keyboard", "learn", "menu", "search", "app", "contact", "random", "help", "admin", "dashboard", "about", "cancel", "k", "kbd", "lang", "links", "share", "khmi", "copticname"] },
   { id: "stats", title: "📊 الإحصاءات والتقارير", commands: ["usage", "analytics", "topusers", "growth", "usercount", "searchstats", "topwords", "misses", "livewords", "hourly", "dictstats", "wordcount", "fieldreport", "statuspage", "digest", "weekly", "reports", "reportclose", "adminscore", "usertimeline", "trace", "searchcount", "liveusers", "conversations", "userchat", "livemon", "livesearch", "retention", "ops", "funnel", "cohorts", "reflinks", "searchhistory", "report"] },
   { id: "voices", title: "🎙 الأصوات", commands: ["record", "record_choose", "record_select", "record_stop", "record_voice", "voice_delete", "voice_delete_all", "voice_delete_many", "voicecoverage", "voiceoff", "voiceon", "voiceonce", "voicesettings", "voicethree", "noaudio", "nopronounce", "uploadaudio", "rebuildvoice", "voicegaps", "pronounce"] },
   { id: "drive", title: "☁️ Drive والمزامنة", commands: ["drive", "syncdrive", "syncusers", "syncall", "synccancel", "syncreset", "syncstatus", "synctest", "syncwatch", "importusers", "importsheet", "importlearn", "setdrive", "setarchive", "resync"] },
@@ -8132,7 +8135,7 @@ async function handleUpdate(update, env, ctx) {
     // cert/get-code flow, like tapping any other menu button.
     if (text === "⏮ السابق" || text === "التالي ⏭") {
       const navUser = await getUser(env, userId);
-      if (navUser?.certAwaiting || navUser?.getcodeStep) await saveUser(env, userId, { ...navUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined });
+      if (navUser?.certAwaiting || navUser?.getcodeStep || navUser?.copticNameAwaiting) await saveUser(env, userId, { ...navUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined });
       const level = LEARN_LEVELS.find((l) => l.lessons.some((x) => x.id === navUser?.lastLessonId));
       const idx = level ? level.lessons.findIndex((x) => x.id === navUser?.lastLessonId) : -1;
       const sibling = idx >= 0 ? level.lessons[idx + (text === "التالي ⏭" ? 1 : -1)] : null;
@@ -8887,7 +8890,7 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     const user = known ?? await getUser(env, userId);
-    if (user?.certAwaiting || user?.getcodeStep) await saveUser(env, userId, { ...user, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined });
+    if (user?.certAwaiting || user?.getcodeStep || user?.copticNameAwaiting) await saveUser(env, userId, { ...user, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined });
     // Referral link tracking: /start <campaign> remembers the source for new users.
     const startParam = text.startsWith("/start ") ? text.slice(7).trim() : "";
     // v2: deep link /start word_<id> opens that word directly (shared from a result).
@@ -8971,6 +8974,7 @@ async function handleUpdate(update, env, ctx) {
     if (user?.awaitingContact) { await saveUser(env, userId, { ...user, awaitingContact: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء رسالة التواصل مع الإدارة." }); return; }
     if (user?.certAwaiting) { await saveUser(env, userId, { ...user, certAwaiting: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء إدخال الرقم الكودي." }); return; }
     if (user?.getcodeStep) { await saveUser(env, userId, { ...user, getcodeStep: undefined, getcodeName: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء الحصول على الرقم الكودي." }); return; }
+    if (user?.copticNameAwaiting) { await saveUser(env, userId, { ...user, copticNameAwaiting: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء كتابة الاسم بالقبطية." }); return; }
   }
   // ---- Batch 5 user features: quiz, favorites, my stats, recent, voice preference ----
   // v2 commands: /quiz keeps its old meaning-type behaviour; /quiz <type> adds the
@@ -9094,6 +9098,20 @@ async function handleUpdate(update, env, ctx) {
   // Batch 6 user features (self-contained module): games, GDPR, settings, etc.
   if (await proUser2.handle({ env, chatId: message.chat.id, userId, text, messageId: message.message_id })) return;
   // ---- ميزات القاموس الـ12 (src/features.js) — موصولة هنا قبل اعتراض الأوامر المجهولة ----
+  // /copticname: bare → ask for the name; "/copticname <name>" answers at once.
+  if (text === "/copticname" || text.startsWith("/copticname ")) {
+    const arg = text.slice("/copticname".length).trim();
+    if (arg) {
+      const reply = copticNameReply(arg);
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: reply ?? "⚠️ اكتب اسم صحيح بالعربي أو بالإنجليزي." });
+      return;
+    }
+    const u = known ?? await getUser(env, userId);
+    await saveUser(env, userId, { ...(u ?? {}), copticNameAwaiting: true });
+    patchRegisteredCache(userId, { copticNameAwaiting: true });
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✍️ اكتب اسمك بالعربي أو بالإنجليزي:" });
+    return;
+  }
   if (text === "/copticdate") { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: copticDateNow(new Date()), parse_mode: "HTML" }); return; }
   if (text === "/alphabet") { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: alphabetText() }); return; }
   if (text === "/letterstats") { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: letterStatsText() }); return; }
@@ -9158,6 +9176,20 @@ async function handleUpdate(update, env, ctx) {
     // menu tap — never by falling through to the dictionary search.
     if (user?.getcodeStep === "name" || user?.getcodeStep === "phone") {
       await handleGetCodeStep(env, message.chat.id, userId, text, user);
+      return;
+    }
+    // /copticname: the user sent /copticname and this text is their name
+    // (Arabic or English). One shot: the state clears after the reply,
+    // so a later word searches the dictionary again.
+    if (user?.copticNameAwaiting) {
+      const reply = copticNameReply(text);
+      if (!reply) {
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⚠️ اكتب اسم صحيح بالعربي أو بالإنجليزي، أو /cancel للإلغاء." });
+        return;
+      }
+      await saveUser(env, userId, { ...user, copticNameAwaiting: undefined });
+      patchRegisteredCache(userId, { copticNameAwaiting: undefined });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: reply });
       return;
     }
     // ---- ميزات القاموس الجديدة (src/features.js — كلها من بيانات القاموس المرفقة الحقيقية) ----

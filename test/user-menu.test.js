@@ -139,7 +139,8 @@ test("user-menu: the /start commands list shows /menu after /learn", async () =>
     "/contact — تواصل مع إدارة البوت (أو زر «📞 تواصل مع الإدارة»)",
     "/links — روابط المنصات: التطبيق والموقع والبوتات",
     "/share — مشاركة إعلان النسخة الثانية",
-  ], "the general section lists the eight commands with /menu after /learn");
+    "/copticname — اكتب اسمك بالحروف القبطية",
+  ], "the general section lists the nine commands with /menu after /learn");
 });
 
 test("user-menu: /share sends the announcement first, then the poster photo, then the share-ask line", async () => {
