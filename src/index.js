@@ -1354,6 +1354,208 @@ Ebram Merzik
 // /share — السطر الختامي بعد الصورة: دعوة النشر والمشاركة.
 const SHARE_CLOSING_TEXT = "نرجو منك نشر ومشاركة البوست السابق في صفحتك وجروباتك ولكل احبائك ليستفيد الجميع من هذا العمل الضخم ❤️❤️😍";
 
+// ---- KHMI_NOFICATION watch (طلب المستخدم 27 نوفمبر 2026) ----
+// عند تسجيل جهاز جديد في تبويب KHMI_NOFICATION بورقة "coptic"، يبعت
+// البوت رسالة للأدمن. الفحص يشتغل من الـ cron كل 5 دقائق (scheduled)
+// ويقرأ الورقة بنفس طريقة /importsheet: CSV عام عبر gviz بدون مصادقة.
+// القاعدة: أي صف جديد (معرّف جهاز لم يُرَ من قبل) = تسجيل جديد، حتى
+// لو كان نفس الهاتف سجّل تاني — لأن معرّف الجهاز نفسه يتغير مع كل
+// تسجيل (لاحقة عشوائية بعد release-keys_). الصفوف تُحذف أحيانًا من
+// الورقة (تنضيف المكرر)، فالمقارنة بمجموعة المعرّفات لا بالعدد فقط.
+// المعرّفات تُحفظ مجزأة (300 في كل مفتاح) لأن قيمة واحدة في تخزين
+// الـ DO محدودة (~128KB) والورقة بتكبر مع الوقت.
+const KHMI_SHEET_ID = "1kZKjF2KDsGT0HslGSenN-pDTzx4FpX0QDPqX0ZOnriY";
+const KHMI_SHEET_TAB = "KHMI_NOFICATION";
+const KHMI_CSV_URL = `https://docs.google.com/spreadsheets/d/${KHMI_SHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(KHMI_SHEET_TAB)}`;
+const KHMI_NOTIFY_META_KEY = "khmi:notify";
+const KHMI_NOTIFY_CHUNK_SIZE = 300;
+const KHMI_NOTIFY_MAX_DEVICES = 10;
+const khmiNotifyChunkKey = (i) => `khmi:notify:ids:${i}`;
+
+// موديل سامسونج -> الاسم التسويقي (مبني من الموديلات الفعلية في الورقة).
+// أي موديل مش في الجدول بيرجع "Samsung <الموديل>" بدل ما نخمن اسمًا.
+const KHMI_SAMSUNG_MODELS = {
+  A022F: "Galaxy A02", A032F: "Galaxy A03 Core", A037F: "Galaxy A03s",
+  A045F: "Galaxy A04", A047F: "Galaxy A04s", A047M: "Galaxy A04s",
+  A057F: "Galaxy A05s", A057G: "Galaxy A05s", A065F: "Galaxy A06",
+  A075F: "Galaxy A07", A105F: "Galaxy A10", A107F: "Galaxy A10s",
+  A125F: "Galaxy A12", A127F: "Galaxy A12", A135F: "Galaxy A13",
+  A137F: "Galaxy A13", A145F: "Galaxy A14", A145P: "Galaxy A14",
+  A155F: "Galaxy A15", A165F: "Galaxy A16", A175F: "Galaxy A17",
+  A217F: "Galaxy A21s", A225F: "Galaxy A22", A226B: "Galaxy A22",
+  A235F: "Galaxy A23", A245F: "Galaxy A24", A256E: "Galaxy A25",
+  A266B: "Galaxy A26", A305F: "Galaxy A30", A307F: "Galaxy A30s",
+  A315F: "Galaxy A31", A325F: "Galaxy A32", A326B: "Galaxy A32",
+  A336E: "Galaxy A33", A346E: "Galaxy A34", A356E: "Galaxy A35",
+  A366B: "Galaxy A36", A525F: "Galaxy A52", A528B: "Galaxy A52s",
+  A546E: "Galaxy A54", A556E: "Galaxy A55", A566B: "Galaxy A56",
+  A576B: "Galaxy A57", A605F: "Galaxy A6+", A715F: "Galaxy A71",
+  A725F: "Galaxy A72", A736B: "Galaxy A73", A920F: "Galaxy A9",
+  F731B: "Galaxy Z Flip5", F916B: "Galaxy Z Fold2",
+  G780F: "Galaxy S20 FE", G973F: "Galaxy S10", G975F: "Galaxy S10+",
+  G981N: "Galaxy S20", G990B: "Galaxy S21 FE", G990E: "Galaxy S21 FE",
+  G990U: "Galaxy S21 FE", G991U: "Galaxy S21", G998B: "Galaxy S21 Ultra",
+  J410F: "Galaxy J4+", M127F: "Galaxy M12", M315F: "Galaxy M31",
+  M515F: "Galaxy M51", M526B: "Galaxy M52", N770F: "Galaxy Note10 Lite",
+  N975F: "Galaxy Note10+", N985F: "Galaxy Note20 Ultra",
+  P610X: "Galaxy Tab S6 Lite", P613X: "Galaxy Tab S9 FE", P615X: "Galaxy Tab S6 Lite",
+  S711U: "Galaxy S23 FE", S731B: "Galaxy S25 FE", S901B: "Galaxy S22",
+  S908E: "Galaxy S22 Ultra", S916B: "Galaxy S23+", S916U: "Galaxy S23+",
+  S926W: "Galaxy S24+", S928B: "Galaxy S24 Ultra", S928W: "Galaxy S24 Ultra",
+  S936B: "Galaxy S25", S938B: "Galaxy S25 Ultra", S948B: "Galaxy S26 Ultra",
+  T225N: "Galaxy Tab A7 Lite", T505N: "Galaxy Tab A7", T870X: "Galaxy Tab S7",
+  X115X: "Galaxy Tab A9", X216B: "Galaxy Tab A9+",
+};
+const KHMI_BRANDS = {
+  samsung: "Samsung", honor: "HONOR", huawei: "HUAWEI", oppo: "OPPO",
+  realme: "realme", redmi: "Redmi", infinix: "Infinix", poco: "POCO",
+  itel: "Itel", nokia: "Nokia", xiaomi: "Xiaomi", alcatel: "Alcatel",
+  iku: "iKU", motorola: "Motorola",
+};
+
+// محلل CSV صغير (حقول مقتبسة، "" داخل الاقتباس، فواصل، وأسطر مضمّنة).
+export function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let field = "";
+  let inQuotes = false;
+  const src = String(text ?? "");
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (src[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += ch;
+    } else if (ch === '"') inQuotes = true;
+    else if (ch === ",") { row.push(field); field = ""; }
+    else if (ch === "\n" || ch === "\r") {
+      if (ch === "\r" && src[i + 1] === "\n") i++;
+      row.push(field); field = "";
+      rows.push(row); row = [];
+    } else field += ch;
+  }
+  if (field !== "" || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+// اسم مقروء لمعرّف جهاز من KHMI_NOFICATION. بصمة سامسونج شكلها
+// "samsung/a16nsxx/a16:16/BP2A.../A165FXXU5CYK1:user/release-keys_xxx"
+// والموديل في الجزء الخامس؛ باقي الماركات كودها في الجزء الثاني.
+export function describeKhmiDevice(deviceId) {
+  const id = String(deviceId ?? "").trim();
+  if (!id) return "جهاز غير معروف";
+  if (id.startsWith("Android_")) return "جهاز Android";
+  if (id.startsWith("iOS_")) return "جهاز iPhone";
+  if (id.startsWith("Linux_")) return "جهاز كمبيوتر";
+  if (id.startsWith("Windows_")) return "جهاز كمبيوتر";
+  if (id.startsWith("unknown_")) return "جهاز غير معروف";
+  const parts = id.split("/");
+  if (parts.length < 2) return id.slice(0, 40);
+  const brandKey = parts[0].toLowerCase();
+  const brand = KHMI_BRANDS[brandKey] ?? (parts[0].charAt(0).toUpperCase() + parts[0].slice(1));
+  const code = parts[1] ?? "";
+  if (brandKey === "samsung") {
+    const modelSeg = String(parts[4] ?? "").split(":")[0];
+    const model = /^([A-Z]+\d+[A-Z]?)/u.exec(modelSeg)?.[1] ?? "";
+    if (model && KHMI_SAMSUNG_MODELS[model]) return `Samsung ${KHMI_SAMSUNG_MODELS[model]}`;
+    if (model) return `Samsung ${model}`;
+    return `Samsung ${code}`;
+  }
+  const clean = code.replace(/(_global|_eea|_in|_gen|-OP-F1|-OP)$/u, "");
+  return clean ? `${brand} ${clean}` : brand;
+}
+
+// صفوف الورقة من نص الـ CSV: {id, lang, version} لكل صف معرّفه غير فاضي
+// (العمود A = device_id، G = اللغة، H = إصدار التطبيق). الصف الأول هيدر.
+export function khmiRowsFromCsv(csvText) {
+  const rows = parseCsv(csvText);
+  const out = [];
+  for (const row of rows.slice(1)) {
+    const id = String(row?.[0] ?? "").trim();
+    if (!id) continue;
+    out.push({ id, lang: String(row?.[6] ?? "").trim(), version: String(row?.[7] ?? "").trim() });
+  }
+  return out;
+}
+
+async function khmiLoadState(env) {
+  const meta = (await storeCall(env, { op: "get", key: KHMI_NOTIFY_META_KEY })).value ?? null;
+  if (!meta) return null;
+  const chunks = Number(meta.chunks) || 0;
+  if (!chunks) return { ...meta, ids: [] };
+  const parts = await Promise.all(
+    Array.from({ length: chunks }, (_, i) => storeCall(env, { op: "get", key: khmiNotifyChunkKey(i) }).then((r) => r.value ?? []).catch(() => [])),
+  );
+  return { ...meta, ids: parts.flat() };
+}
+
+async function khmiSaveState(env, state) {
+  const ids = state.ids ?? [];
+  const chunks = Math.max(1, Math.ceil(ids.length / KHMI_NOTIFY_CHUNK_SIZE));
+  for (let i = 0; i < chunks; i++) {
+    await storeCall(env, { op: "put", key: khmiNotifyChunkKey(i), value: ids.slice(i * KHMI_NOTIFY_CHUNK_SIZE, (i + 1) * KHMI_NOTIFY_CHUNK_SIZE) });
+  }
+  await storeCall(env, { op: "put", key: KHMI_NOTIFY_META_KEY, value: { chunks, count: ids.length, checkedAt: state.checkedAt, notifiedAt: state.notifiedAt ?? null } });
+}
+
+// فحص دوري واحد: يقرأ الورقة، يقارن معرّفاتها بالمحفوظ، ويبعت للأدمن
+// عند أي تسجيل جديد. أول تشغيل بيحفظ الأساس بس من غير رسالة (عشان ما
+// يبعتش 1150 جهاز مرة واحدة). قراءة فاضية أو ناقصة أكتر من النص بتتعتبر
+// فشل قراءة: لا تحديث للأساس ولا رسالة. لا ترمي استثناء أبدًا — المتصل
+// (scheduled) لازم يكمل شغله حتى لو الفحص فشل.
+export async function checkKhmiNotifications(env) {
+  if (!env.USERS) return { ok: false, reason: "no-store" };
+  let csvText;
+  try {
+    const resp = await fetch(KHMI_CSV_URL, { signal: AbortSignal.timeout(30000) });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    csvText = await resp.text();
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : "fetch-failed" };
+  }
+  const rows = khmiRowsFromCsv(csvText);
+  if (!rows.length) return { ok: false, reason: "empty-sheet" };
+  let prev = null;
+  try { prev = await khmiLoadState(env); } catch { prev = null; }
+  const prevIds = new Set(prev?.ids ?? []);
+  const prevCount = Number(prev?.count) || 0;
+  if (prev && rows.length < prevCount * 0.5) return { ok: false, reason: "suspicious-drop" };
+  const fresh = [];
+  const seenFresh = new Set();
+  for (const r of rows) {
+    if (!prevIds.has(r.id) && !seenFresh.has(r.id)) { seenFresh.add(r.id); fresh.push(r); }
+  }
+  const state = { ids: rows.map((r) => r.id), count: rows.length, checkedAt: Date.now(), notifiedAt: prev?.notifiedAt ?? null };
+  try { await khmiSaveState(env, state); } catch { return { ok: false, reason: "save-failed" }; }
+  if (!prev || !fresh.length) return { ok: true, count: rows.length, newDevices: [], firstRun: !prev };
+  const shown = fresh.slice(0, KHMI_NOTIFY_MAX_DEVICES);
+  const langSuffix = (lang) => (lang === "ar" ? " (عربي)" : lang ? ` (${lang})` : "");
+  const names = shown.map((r) => describeKhmiDevice(r.id) + langSuffix(r.lang)).join("، ");
+  const extra = fresh.length > shown.length ? ` (+${fresh.length - shown.length} أخرى)` : "";
+  const head = fresh.length === 1 ? "📱 جهاز جديد سجّل في الإشعارات!" : `📱 ${fresh.length} أجهزة جديدة سجّلت في الإشعارات!`;
+  const countLine = rows.length > prevCount
+    ? `العدد زاد من ${prevCount} لـ ${rows.length} (+${rows.length - prevCount}).`
+    : `العدد الحالي: ${rows.length}.`;
+  const deviceLine = fresh.length === 1 ? `الجهاز الجديد: ${names}${extra}.` : `الأجهزة الجديدة: ${names}${extra}.`;
+  await telegram(env, "sendMessage", { chat_id: DEFAULT_ADMIN_IDS, text: `${head}\n${countLine}\n${deviceLine}`, disable_web_page_preview: true });
+  try { await khmiSaveState(env, { ...state, notifiedAt: Date.now() }); } catch { /* التنبيه وصل؛ حفظ وقت الإرسال ثانوي */ }
+  return { ok: true, count: rows.length, newDevices: shown.map((r) => ({ id: r.id, name: describeKhmiDevice(r.id), lang: r.lang })) };
+}
+
+async function handleKhmiStatus(env, chatId) {
+  let state = null;
+  try { state = env.USERS ? await khmiLoadState(env) : null; } catch { state = null; }
+  if (!state) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "📱 مراقبة تسجيلات الإشعارات (KHMI_NOFICATION)\nلم يبدأ الفحص بعد — أول فحص دوري يشتغل كل 5 دقائق، وهيبعت لك رسالة هنا عند أي تسجيل جديد." });
+    return;
+  }
+  const checked = state.checkedAt ? formatCairoDateTime(state.checkedAt) : "—";
+  const notified = state.notifiedAt ? formatCairoDateTime(state.notifiedAt) : "لم يُرسَل أي تنبيه بعد";
+  await telegram(env, "sendMessage", { chat_id: chatId, text: `📱 مراقبة تسجيلات الإشعارات (KHMI_NOFICATION)\nالعدد الحالي: ${state.count} جهاز\nآخر فحص: ${checked}\nآخر تنبيه: ${notified}\nالفحص شغال كل 5 دقائق، ويبعت لك رسالة هنا عند أي تسجيل جديد.` });
+}
+
+
 const ACCENT_MAP = { ὲ: "ⲉ", έ: "ⲉ", ὶ: "ⲓ", ί: "ⲓ", ὸ: "ⲟ", ό: "ⲟ", ὼ: "ⲱ", ώ: "ⲱ", ὴ: "ⲏ", ή: "ⲏ", ὰ: "ⲁ", ά: "ⲁ", ὺ: "ⲩ", ύ: "ⲩ" };
 const ALEF_MAP = { أ: "ا", إ: "ا", آ: "ا", ٱ: "ا", ى: "ي", ة: "ه" };
 
@@ -4268,6 +4470,7 @@ async function buildCommandsHelpText(env, userId) {
     lines.push("/integrity — فحص سلامة القاموس | /nopronounce — كلمات بدون نطق | /noaudio — كلمات بدون صوت");
     lines.push("/findempty &lt;حقل&gt; — خلايا فاضية | /livesearch — بحث مباشر | /hourly — توزيع الساعات");
     lines.push("/livemon — المراقبة المباشرة (تشغيل/إيقاف) | /conversations — المحادثات الأخيرة | /userchat &lt;id&gt; — محادثة مستخدم");
+    lines.push("/khmi — حالة مراقبة تسجيلات الإشعارات (تنبيه تلقائي عند أي جهاز جديد)");
     lines.push("/adminaudit — سجل إجراءات الأدمن | /exportsearch — تصدير سجل البحث | /resetstats — تصفير الإحصاءات");
     lines.push("/setbanmsg &lt;نص&gt; — رسالة الحظر | /setmaintmsg &lt;نص&gt; — رسالة الصيانة");
     lines.push("/slowmode on|off|&lt;ثواني&gt; — الوضع البطيء | /clearcache — مسح الكاش");
@@ -7108,6 +7311,7 @@ const EXTRA_BOT_COMMANDS = [
   { command: "lang", description: "تغيير لغة الواجهة" },
   { command: "links", description: "روابط المنصات: التطبيق والموقع والبوتات" },
   { command: "share", description: "مشاركة إعلان النسخة الثانية" },
+  { command: "khmi", description: "مراقبة تسجيلات الإشعارات (KHMI)" },
   { command: "myfav", description: "كلماتك المفضلة" },
   { command: "mystats", description: "إحصاءاتك ونقاطك" },
   { command: "points", description: "منح أو خصم نقاط" },
@@ -7160,7 +7364,7 @@ function allBotCommands() {
 // بلا تأكيد من الكود نفسه) تطلب تأكيدًا أولًا قبل التشغيل.
 const ALL_COMMANDS_DANGEROUS = new Set(["resetstats", "purgeinactive", "resetsessions"]);
 const ALL_COMMANDS_CATEGORIES = [
-  { id: "main", title: "⭐ الأوامر الأساسية", commands: ["start", "keyboard", "learn", "menu", "search", "app", "contact", "random", "help", "admin", "dashboard", "about", "cancel", "k", "kbd", "lang", "links", "share"] },
+  { id: "main", title: "⭐ الأوامر الأساسية", commands: ["start", "keyboard", "learn", "menu", "search", "app", "contact", "random", "help", "admin", "dashboard", "about", "cancel", "k", "kbd", "lang", "links", "share", "khmi"] },
   { id: "stats", title: "📊 الإحصاءات والتقارير", commands: ["usage", "analytics", "topusers", "growth", "usercount", "searchstats", "topwords", "misses", "livewords", "hourly", "dictstats", "wordcount", "fieldreport", "statuspage", "digest", "weekly", "reports", "reportclose", "adminscore", "usertimeline", "trace", "searchcount", "liveusers", "conversations", "userchat", "livemon", "livesearch", "retention", "ops", "funnel", "cohorts", "reflinks", "searchhistory", "report"] },
   { id: "voices", title: "🎙 الأصوات", commands: ["record", "record_choose", "record_select", "record_stop", "record_voice", "voice_delete", "voice_delete_all", "voice_delete_many", "voicecoverage", "voiceoff", "voiceon", "voiceonce", "voicesettings", "voicethree", "noaudio", "nopronounce", "uploadaudio", "rebuildvoice", "voicegaps", "pronounce"] },
   { id: "drive", title: "☁️ Drive والمزامنة", commands: ["drive", "syncdrive", "syncusers", "syncall", "synccancel", "syncreset", "syncstatus", "synctest", "syncwatch", "importusers", "importsheet", "importlearn", "setdrive", "setarchive", "resync"] },
@@ -8602,6 +8806,7 @@ async function handleUpdate(update, env, ctx) {
     if (text === "/livesearch") { await sendLiveSearchesReport(env, message.chat.id); return; }
     if (text === "/livemon") { await toggleLiveMonitor(env, message.chat.id); return; }
     if (text === "/conversations" || text === "/liveusers") { await sendConversationsReport(env, message.chat.id); return; }
+    if (text === "/khmi") { await handleKhmiStatus(env, message.chat.id); return; }
     if (text === "/userchat" || text.startsWith("/userchat ")) { await sendUserChatReport(env, message.chat.id, text.slice("/userchat".length).trim()); return; }
     if (text === "/exportsearch") { await exportSearchHistoryCsv(env, message.chat.id); return; }
     if (text === "/resetstats") { await resetAnalyticsData(env, message.chat.id); await logAdminAction(env, userId, "resetstats"); return; }
@@ -9555,6 +9760,9 @@ export default {
   // isolate in another region), it makes them rare.
   async scheduled(event, env, ctx) {
     await maybeAutoImportLearn(env, ctx);
+    // KHMI_NOFICATION watch: a new device registration sends the admin a
+    // message. Never breaks the tick: the check returns a status, it never throws.
+    try { await checkKhmiNotifications(env); } catch { /* the next tick retries */ }
     // Poller guard: while polling is the delivery path, a webhook must not
     // stay registered (getUpdates returns nothing while one is set). A manual
     // setup_webhook run is undone here within one tick; pending updates are
