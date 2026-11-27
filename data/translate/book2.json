@@ -1,0 +1,91 @@
+{
+  "metadata": {
+    "book": "منهج المهرجان المتخصص للغة القبطية الخامس والعشرون 2024 — أسقفية الشباب (5 levels)",
+    "pages": 74,
+    "script": "latin_keyboard_coptic_transliteration",
+    "keyboard_map": {"a":"ⲁ","b":"ⲃ","g":"ⲅ","d":"ⲇ","e":"ⲉ","^":"ⲋ","z":"ⲍ","y":"ⲏ",";":"ⲑ","i":"ⲓ","k":"ⲕ","l":"ⲗ","m":"ⲙ","n":"ⲛ","x":"ⲝ","o":"ⲟ","p":"ⲡ","r":"ⲣ","c":"ⲥ","t":"ⲧ","u":"ⲩ","v":"ⲫ",",":"ⲭ","'":"ⲯ","w":"ⲱ","s":"ϣ","f":"ϥ","q":"ϧ","{":"ϧ","h":"ϩ","\\":"ϩ","j":"ϫ","[":"ϭ","]":"ϯ","~":"overline before letter","=":"overline (nomina sacra)", "`":"prefix modifier (adds ⲓ or aspirated form)"},
+    "note": "all data below converted to Coptic Unicode where certain; original transliteration kept in 'src' fields where useful",
+    "unreadable_pages": "62-69 extract as legacy-font private-use glyphs; content recovered from Book 1 equivalent lessons"
+  },
+  "curriculum_levels": {
+    "level1_pages_1_20": ["alphabet and pronunciation", "abbreviations (nomina sacra)", "Greek vs Coptic word distinction", "articles", "ⲡⲉ/ⲧⲉ/ⲛⲉ copula", "possessive pronouns", "simple dialogue", "Lord's Prayer"],
+    "level2_pages_21_36": ["present prefixes Ϯ ⲕ̀ ⲧⲉ ϥ̀ ⲥ̀ ⲧⲉⲛ ⲧⲉⲧⲉⲛ ⲥⲉ", "future ϯⲛⲁ ⲭ̀ⲛⲁ ⲧⲉⲣⲁ ϥ̀ⲛⲁ ⲥ̀ⲛⲁ ⲧⲉⲛⲛⲁ ⲧⲉⲧⲉⲛⲛⲁ ⲥⲉⲛⲁ", "past ⲁⲓ ⲁⲕ ⲁⲣⲉ ⲁϥ ⲁⲥ ⲁⲛ ⲁⲧⲉⲧⲉⲛ/ⲁⲣⲉⲧⲉⲛ ⲁⲩ", "past negation ⲙ̀ⲡⲓ ⲙ̀ⲡⲉⲕ ⲙ̀ⲡⲉ ⲙ̀ⲡⲉϥ ⲙ̀ⲡⲉⲥ ⲙ̀ⲡⲉⲛ ⲙ̀ⲡⲉⲧⲉⲛ ⲙ̀ⲡⲟⲩ", "object pronouns", "ⲛⲉⲙ and ⲟⲩⲟϩ", "demonstratives", "numbers 1-10", "question words"],
+    "level3_pages_37_49": ["status/gerund prefixes ⲉⲓ ⲉⲕ ⲉⲣⲉ ⲉϥ ⲉⲥ ⲉⲛ ⲉⲣⲉⲧⲉⲛ ⲉⲩ", "four verb forms", "ⲉⲧⲁ- perfect", "ⲁⲣⲉ question present and ⲁⲣⲉ...ⲛⲁ future", "ⲉ-...ⲉ̀ future of certainty", "compound verbs ⲥⲓ- ⲉⲣ- ϣⲉⲡ- ϫⲉⲙ- ϩⲓ-", "particles ϫⲉ ⲇⲉ ⲅⲁⲣ second position"],
+    "level4_pages_50_59": ["ⲉⲧⲁ- with all pronouns", "ⲁⲣⲉ...ⲛⲁ future questions", "full question words", "ⲛ̀ⲧⲉ/ⲉⲑⲣⲉ subjunctive", "ϣⲁⲓ repetition and ⲙ̀ⲡⲁ negation", "νε past of nominal sentence"],
+    "level5_pages_60_74": ["imperative and prohibition", "imperative verb-forms ⲁⲣⲓⲟⲩⲓ/ⲁⲣⲓ-/ⲁⲣⲓⲧ ⲁⲛⲓⲟⲩⲓ/ⲁⲛⲓ-/ⲁⲛⲓⲧ ⲁⲗⲓⲟⲩⲓ/ⲁⲗⲓ-/ⲁⲗⲓⲧ ⲙⲟⲓ/ⲙⲁ-/ⲙⲏⲓ", "conditional ⲉϣⲱⲡ and ⲁⲣⲉϣⲁⲛ with negation ⲁ-...ϣ̀ⲧⲉⲙ", "unreal past ⲉⲛⲉ/ⲉⲛⲁⲣⲉ + ⲛⲁ-...ⲡⲉ", "ⲁϣⲧⲉⲙ negation", "parallel Coptic-Arabic liturgical texts (evaluation pairs)"]
+  },
+  "greek_vs_coptic_distinction": {
+    "coptic_only_letters": ["ϣ","ϥ","ϧ","ϩ","ϫ","ϭ","ϯ"],
+    "greek_only_letters": ["ⲅ","ⲇ","ⲍ","ⲑ","ⲩ"],
+    "epsilon_note": "word where ⲩ sounds 'y' is Greek (Ⲗⲩⲭⲛⲓⲁ, Ⲩⲓⲟⲥ)",
+    "greek_endings": ["-ⲁⲛ","-ⲟⲛ","-ⲏⲛ","-ⲱⲙⲉⲛ","-ⲁⲥ","-ⲟⲥ","-ⲏⲥ","-ⲥϧⲉ"],
+    "greek_prefixes": ["ⲡⲣⲟ-","ⲁⲡⲟ-","ⲟⲙⲟ-","ⲡⲁⲣⲁ-"],
+    "exceptions": ["ϩ used before Greek words for rough breathing (ϩⲱⲇⲏ)", "ϯ used as feminine definite article before Greek nouns (ϯϩⲱⲇⲏ)"],
+    "pronunciation_effects": ["ⲥ = z in Greek-origin words (Ⲕⲟⲥⲙⲟⲥ), s in Coptic (Ⲥⲙⲩⲣⲛⲁ)", "ⲭ = kh or sh in Greek words (Ⲗⲩⲭⲛⲓⲁ kh, Ⲡⲣⲟⲥⲉⲩⲭⲏ sh)"]
+  },
+  "abbreviations_nomina_sacra": [
+    {"abbr": "Ⲓⲏ̅ⲥ̅", "full": "Ⲓⲏⲥⲟⲩⲥ", "gloss": "Jesus", "src": "Ihc"},
+    {"abbr": "Ⲡⲭ̅ⲥ̅", "full": "Ⲡⲓⲭⲣⲓⲥⲧⲟⲥ", "gloss": "Christ", "src": "Pxc"},
+    {"abbr": "Ϯⲉϥ / Ⲑ̅ⲥ̅", "full": "Ⲑⲉⲟⲥ", "gloss": "God", "src": ";eq?u"},
+    {"abbr": "Ⲡϭ̅ / Ⲡ̅", "full": "Ⲡϭⲟⲓⲥ", "gloss": "Lord", "src": "P_ / _"},
+    {"abbr": "Ⲡⲛ̅ⲁ̅", "full": "Ⲡⲛⲉⲩⲙⲁ", "gloss": "Spirit", "src": "Pna"},
+    {"abbr": "Ⲥⲱ̅ⲣ̅", "full": "Ⲥⲱⲧⲏⲣ", "gloss": "Savior", "src": "Cwr"},
+    {"abbr": "Ⲁⲗ̅", "full": "Ⲁⲗⲗⲏⲗⲟⲩⲓⲁ", "gloss": "Alleluia", "src": "Al"},
+    {"abbr": "Ⲉϥ̅ⲩ̅", "full": "Ⲉϩⲟⲩⲁⲃ", "gloss": "Holy", "src": "eq?u"}
+  ],
+  "particles": {
+    "ϫⲉ": {"gloss": "that (quotation opener)", "position": "second in clause", "example": "ⲡⲉϫⲁϥ ϫⲉ... (he said that...)"},
+    "ⲇⲉ": {"gloss": "and/but/now", "position": "second in clause", "example": "ⲁϥⲧⲱⲛϥ ⲇⲉ ⲛ̀ϫⲉ Ⲁⲃⲣⲁⲁⲙ (so Abraham arose)"},
+    "ⲅⲁⲣ": {"gloss": "for/because", "position": "second in clause", "example": "ⲡⲉⲕⲗⲁⲟⲥ ⲅⲁⲣ ⲛⲉⲙ ⲧⲉⲕⲉⲕⲕⲗⲏⲥⲓⲁ ⲥⲉϣ̀ϧⲟ ⲉ̀ⲣⲟⲕ (for your people and your church ask you)"}
+  },
+  "jinkim": {
+    "rule": "mark (dot/short stroke) above ⲉ ⲓ ⲟ ⲩ or ϫ indicating the vowel forms its own syllable, or ϫ at a closed syllable start",
+    "usage": "ⲉ̀ ⲓ̀ ⲟ̀ ⲩ̀ ϫ̀"
+  },
+  "question_words": {
+    "ⲛⲓⲙ": "who (ⲛⲓⲙ ⲡⲉ ⲛ̀ⲑⲟⲕ who are you)", "ⲛⲓⲙ ⲛ̀...": "which (ⲛⲓⲙ ⲛ̀ⲣⲱⲙⲓ ⲡⲉ ⲫⲁⲓ)",
+    "ⲟⲩⲏⲣ": "how much/many (ⲟⲩⲏⲣ ⲛⲉ ⲛⲉⲕϣ̀ⲃⲏⲣⲓ)", "ϧⲁ ⲟⲩⲏⲣ": "for how much (ϧⲁ ⲟⲩⲏⲣ ⲡⲉ ⲡⲁⲓⲕⲁⲗⲁⲙ)",
+    "ⲑⲱⲛ/ⲛ̀ⲑⲱⲛ": "where (ⲑⲱⲛ ⲡⲉ ⲡⲉⲕϫⲱⲙ / ⲁⲕⲛⲁⲟⲩⲱⲙ ⲛ̀ⲑⲱⲛ)", "ⲑ̀ⲛⲁⲩ/ⲛ̀ⲑ̀ⲛⲁⲩ": "when (ⲑ̀ⲛⲁⲩ ⲡⲉ ⲡⲓⲥⲏⲟⲩ / ⲁⲕⲛⲁⲓ̀ ⲛ̀ⲑ̀ⲛⲁⲩ)",
+    "ⲉⲑⲃⲉ ⲟⲩ": "why (ⲉⲧⲁⲕⲓ̀ ⲉⲑⲃⲉ ⲟⲩ)", "ⲡⲱⲥ": "how (ⲡⲱⲥ ⲫⲁⲓ)",
+    "ⲙⲏ": "yes-no (ⲙⲏ ⲁⲛⲟⲕ ⲡ̀ⲟⲩⲣⲓⲧ ⲙ̀ⲡⲁⲥⲟⲛ am I my brother's keeper)",
+    "ⲁϧⲟⲓ ⲁϧⲟⲕ ⲁϧⲟ ⲁϧⲟϥ ⲁϧⲟⲥ ⲁϧⲟⲛ ⲁϧⲱⲧⲉⲛ ⲁϧⲱⲟⲩ": "what is it to me/you.../them",
+    "ⲁⲕⲑⲱⲛ": "where are you (Ⲁⲇⲁⲙ ⲁⲕⲑⲱⲛ)"
+  },
+  "verb_form_examples": [
+    {"verb": "ⲓⲣⲓ (do)", "forms": ["ⲓⲣⲓ","ⲉⲣ-","ⲟⲓ","ⲟⲓ"]},
+    {"verb": "ⲙⲓⲥⲓ (bear)", "forms": ["ⲙⲓⲥⲓ","ⲙⲉⲥ-","ⲙⲁⲥ","ⲙⲟⲥⲓ"]},
+    {"verb": "ϩⲱⲡⲓ (hide)", "forms": ["ϩⲱⲡⲓ","—","—","ϩⲟⲡ"]},
+    {"verb": "ϫⲓⲙⲓ (find)", "forms": ["ϫⲓⲙⲓ","ϫⲉⲙ-","ϫⲉⲙ","—"]},
+    {"verb": "ⲥ̀ⲙⲟⲩ (bless)", "forms": ["ⲥ̀ⲙⲟⲩ","—","—","ⲥ̀ⲙⲁⲣⲱⲟⲩⲧ"]},
+    {"verb": "ϫⲱ (say)", "forms": ["ϫⲱ","ϫⲉ-","ϫⲟ","—"]},
+    {"verb": "ⲟⲩⲱⲙ (eat)", "forms": ["ⲟⲩⲱⲙ","ⲟⲩⲉⲙ-","ⲟⲩⲟⲙ","—"]},
+    {"verb": "ⲙⲉⲓ (love)", "forms": ["ⲙⲉⲓ","ⲙⲉⲛⲣⲉ-","ⲙⲉⲛⲣⲓⲧ","—"]},
+    {"verb": "ⲧⲟⲩⲃⲟ (purify)", "forms": ["ⲧⲟⲩⲃⲟ","ⲧⲟⲩⲃⲉ-","ⲧⲟⲩⲃⲟ","ⲧⲟⲩⲃⲏⲟⲩⲧ"]},
+    {"verb": "ⲭⲁⲙⲓⲟ (create)", "forms": ["ⲭⲁⲙⲓⲟ","ⲭⲁⲙⲓⲉ-","ⲭⲁⲙⲓⲟ","ⲭⲁⲙⲓⲏⲟⲩⲧ"]},
+    {"verb": "ⲓϣⲓ (crucify)", "forms": ["ⲓϣⲓ","ⲉϣ-","ⲁϣ","ⲁϣⲓ"]}
+  ],
+  "compound_verbs": {
+    "ⲥⲓ- (take)": ["ⲥⲓⲱⲟⲩ (be glorified)","ⲥⲓⲥ̀ⲃⲱ (be taught/learn)"],
+    "ⲉⲣ- (make)": ["ⲉⲣϩ̀ⲙⲟⲧ (thank)","ⲉⲣⲛⲟⲃⲓ (sin)","ⲉⲣϩⲏⲧⲥ (begin)","ⲉⲣϣⲟⲣⲡ (precede)","ⲉⲣⲁⲅⲓⲁⲍⲓⲛ (sanctify)"],
+    "ϣⲉⲡ- (accept)": ["ϣⲉⲡϩ̀ⲙⲟⲧ (thank)"],
+    "ϫⲉⲙ- (find)": ["ϫⲉⲙⲑ̀ⲡⲓ (taste)"],
+    "ϩⲓ- (throw)": ["ϩⲓϣⲉⲛⲛⲟⲩϥⲓ (evangelize)"]
+  },
+  "conditional_level5": {
+    "areshan_if": {"prefixes": ["ⲁⲓϣⲁⲛ","ⲁⲕϣⲁⲛ","ⲁⲣⲉϣⲁⲛ","ⲁϥϣⲁⲛ","ⲁⲥϣⲁⲛ","ⲁⲛϣⲁⲛ","ⲁⲣⲉⲧⲉⲛϣⲁⲛ","ⲁⲩϣⲁⲛ"], "example": "Ⲁⲣⲉϣⲁⲛ Ⲫ̀ⲛⲟⲩϯ ⲟⲩⲱϣ (God willing)"},
+    "negation_shtem": ["ⲁⲓϣ̀ⲧⲉⲙ","ⲁⲕϣ̀ⲧⲉⲙ","ⲁⲣⲉϣ̀ⲧⲉⲙ","ⲁϥϣ̀ⲧⲉⲙ","ⲁⲥϣ̀ⲧⲉⲙ","ⲁⲛϣ̀ⲧⲉⲙ","ⲁⲣⲉⲧⲉⲛϣ̀ⲧⲉⲙ","ⲁⲩϣ̀ⲧⲉⲙ"],
+    "eshwp": "ⲉϣⲱⲡ + clause (if) — Ⲉϣⲱⲡ ⲁⲣⲉⲧⲉⲛϣⲁⲛⲉⲣⲡⲣⲟⲥⲉⲩⲭⲉⲥϧⲉ (if you pray)",
+    "unreal_past": "ⲉⲛⲉ/ⲉⲛⲁⲣⲉ + past clause, apodosis ⲛⲁ-...ⲡⲉ — Ⲉⲛⲁⲕϫⲏ ⲙ̀ⲡⲁⲓⲙⲁ ⲛⲁⲣⲉ ⲡⲁⲥⲟⲛ ⲛⲁⲙⲟⲩ ⲁⲛ ⲡⲉ (had you been here my brother would not have died)",
+    "mare_wish": "ⲙⲁⲣⲉ- + pronoun/noun + verb (ⲙⲁⲣⲉⲛⲥ̀ⲙⲟⲩ let us bless, ⲙⲁⲣⲟⲩϣⲉⲛⲱⲟⲩ let them go)"
+  },
+  "imperative_forms": {
+    "ⲓⲣⲓ": ["ⲁⲣⲓⲟⲩⲓ","ⲁⲣⲓ-","ⲁⲣⲓⲧ"],
+    "ⲓⲛⲓ": ["ⲁⲛⲓⲟⲩⲓ","ⲁⲛⲓ-","ⲁⲛⲓⲧ"],
+    "ⲱⲗⲓ": ["ⲁⲗⲓⲟⲩⲓ","ⲁⲗⲓ-","ⲁⲗⲓⲧ"],
+    "ϯ": ["ⲙⲟⲓ","ⲙⲁ-","ⲙⲏⲓ"]
+  },
+  "evaluation_texts": {
+    "description": "parallel Coptic-Arabic liturgical passages usable as test pairs",
+    "locations": "pp. 19-20 (dialogue + Lord's Prayer), 35-36 (Theotokia), 43 (liturgy), 48-49 (Psali/alleluia), 59 (fasting doxology), 72-74 (Neknai w Pasoic doxology)"
+  }
+}

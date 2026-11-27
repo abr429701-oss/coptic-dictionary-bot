@@ -1,0 +1,212 @@
+{
+  "metadata": {
+    "book": "تعلم اللغة القبطية (Coptic Language) — Osama Thabet",
+    "pages": 366,
+    "script": "coptic_unicode",
+    "dialect": "bohairic",
+    "purpose": "structured grammar rules for translator engine",
+    "sections_page_map": {
+      "alphabet": "3-9", "sentence": "10", "articles": "11-24", "plurals": "23-25",
+      "days_months_seasons_coordinates": "26-29", "numbers": "30-44",
+      "nouns_gender": "45-55", "compound_nouns": "56-61", "pronouns": "62-64,109-121",
+      "verb_system": "65-77", "verb_to_be_have_do": "78-96", "simple_tenses": "97-101",
+      "sentence_writing": "102-108", "demonstratives_possessives": "109-121",
+      "continuous_gerund": "122-127", "negation": "128-131", "infinitive": "132-135",
+      "imperative_prohibition": "136-144", "present_of_repetition": "145-148",
+      "future_of_certainty": "149-152", "questions_present_future": "153-155",
+      "imperfect_past": "156-159", "passive": "160-163", "ne_past": "164-166",
+      "past_perfect": "167-170", "past_repetition": "171-172", "past_continuous": "173-174",
+      "conditional_present_past": "175-182", "subjunctive": "183-197",
+      "reflexive": "198-202", "phrasal_verbs": "203-205", "impersonal": "206-209",
+      "questions": "210-224", "complement_adjective_adverb_articles": "225-230",
+      "adjectives": "231-241", "comparison": "242-249", "adverbs": "250-253",
+      "if_clauses": "254-270", "conjunctions": "271-276", "affirmation": "277-281",
+      "apposition": "282-286", "prepositions": "287-304", "complements": "305-359",
+      "relative_pronouns": "360-366"
+    }
+  },
+  "alphabet": {
+    "count": 32,
+    "letters": [
+      {"letter": "ⲁ", "name": "alpha", "sound": "a"}, {"letter": "ⲃ", "name": "vida", "sound": "b/v"},
+      {"letter": "ⲅ", "name": "gamma", "sound": "g/gh/n before gutturals"}, {"letter": "ⲇ", "name": "delta", "sound": "d"},
+      {"letter": "ⲉ", "name": "ei", "sound": "e"}, {"letter": "ⲋ", "name": "sou", "sound": "st; numeral 6"},
+      {"letter": "ⲍ", "name": "zita", "sound": "z"}, {"letter": "ⲏ", "name": "ita", "sound": "ee/long e"},
+      {"letter": "ⲑ", "name": "thita", "sound": "th/t"}, {"letter": "ⲓ", "name": "yota", "sound": "i/y"},
+      {"letter": "ⲕ", "name": "kappa", "sound": "k"}, {"letter": "ⲗ", "name": "lola", "sound": "l"},
+      {"letter": "ⲙ", "name": "mi", "sound": "m"}, {"letter": "ⲛ", "name": "ni", "sound": "n"},
+      {"letter": "ⲝ", "name": "ksi", "sound": "ks"}, {"letter": "ⲟ", "name": "o", "sound": "short o"},
+      {"letter": "ⲡ", "name": "pi", "sound": "b/p"}, {"letter": "ⲣ", "name": "ro", "sound": "r"},
+      {"letter": "ⲥ", "name": "sima", "sound": "s (z in Greek-origin words)"}, {"letter": "ⲧ", "name": "tav", "sound": "t"},
+      {"letter": "ⲩ", "name": "epsilon", "sound": "u/v/y by position"}, {"letter": "ⲫ", "name": "fi", "sound": "f"},
+      {"letter": "ⲭ", "name": "khi", "sound": "k-ah in Coptic words, kh/sh in Greek"}, {"letter": "ⲯ", "name": "psi", "sound": "bs"},
+      {"letter": "ⲱ", "name": "omega", "sound": "long o"}, {"letter": "ϣ", "name": "shai", "sound": "sh"},
+      {"letter": "ϥ", "name": "fai", "sound": "f"}, {"letter": "ϧ", "name": "khai", "sound": "soft h"},
+      {"letter": "ϩ", "name": "hori", "sound": "sharp h"}, {"letter": "ϫ", "name": "janja", "sound": "j"},
+      {"letter": "ϭ", "name": "shima", "sound": "tsh"}, {"letter": "ϯ", "name": "ti", "sound": "ti/de"}
+    ]
+  },
+  "articles": {
+    "indefinite": {"masculine": "ⲟⲩ", "feminine": "ⲟⲩ", "plural": "ϩⲁⲛ"},
+    "definite_generic": {"masculine": "ⲡⲓ", "feminine": "ϯ", "plural": "ⲛⲓ"},
+    "definite_after_nte": {"masculine": "ⲡ̀", "feminine": "ⲧ̀", "plural": "ⲛⲉⲛ"},
+    "definite_before_bilmnor": {"masculine": "ⲫ̀", "feminine": "ⲑ̀", "plural": "ⲛⲉⲛ"},
+    "rules": [
+      "ⲉ + ⲟⲩ merge to ⲉⲩ when preposition ⲉ precedes indefinite article",
+      "ⲟⲩ can be partitive: ⲟⲩϣⲁⲗ 'some myrrh'",
+      "adverbial construction: ϧⲉⲛ + ⲟⲩ + noun = adverb"
+    ]
+  },
+  "pronouns": {
+    "separate_subject": ["ⲁⲛⲟⲕ", "ⲛ̀ⲑⲟⲕ", "ⲛ̀ⲑⲟ", "ⲛ̀ⲑⲟϥ", "ⲛ̀ⲑⲟⲥ", "ⲁⲛⲟⲛ", "ⲛ̀ⲑⲱⲧⲉⲛ", "ⲛ̀ⲑⲱⲟⲩ"],
+    "prefix_subject_present": ["Ϯ/ⲓ", "ⲕ̀/ⲭ̀", "ⲧⲉ", "ϥ̀", "ⲥ̀", "ⲧⲉⲛ", "ⲧⲉⲧⲉⲛ", "ⲥⲉ"],
+    "prefix_notes": ["Ϯ→ⲓ in past", "ⲕ̀→ⲭ̀ before verbs starting ⲙ ⲛ ⲟⲩ", "ⲕ̀→ⲭ̀ⲛⲁ in future"],
+    "possessive_prefixes": {
+      "my": ["ⲡⲁ-", "ⲧⲁ-", "ⲛⲁ-"], "your_m": ["ⲡⲉⲕ-", "ⲧⲉⲕ-", "ⲛⲉⲕ-"],
+      "your_f": ["ⲡⲉ-", "ⲧⲉ-", "ⲛⲉ-"], "his": ["ⲡⲉϥ-", "ⲧⲉϥ-", "ⲛⲉϥ-"],
+      "her": ["ⲡⲉⲥ-", "ⲧⲉⲥ-", "ⲛⲉⲥ-"], "our": ["ⲡⲉⲛ-", "ⲧⲉⲛ-", "ⲛⲉⲛ-"],
+      "your_pl": ["ⲡⲉⲧⲉⲛ-", "ⲧⲉⲧⲉⲛ-", "ⲛⲉⲧⲉⲛ-"], "their": ["ⲡⲟⲩ-", "ⲧⲟⲩ-", "ⲛⲟⲩ-"],
+      "columns": "masculine / feminine / plural of possessed noun"
+    },
+    "demonstrative_adjectives": ["ⲡⲁⲓ", "ⲧⲁⲓ", "ⲛⲁⲓ"],
+    "demonstrative_pronouns_near": ["ⲫⲁⲓ", "ⲑⲁⲓ", "ⲛⲁⲓ"],
+    "demonstrative_pronouns_far": ["ⲫⲏ", "ⲑⲏ", "ⲛⲏ"],
+    "belonging_pronouns": {
+      "forms": {"my": ["ⲫⲱⲓ","ⲑⲱⲓ","ⲛⲟⲩⲓ"], "your_m": ["ⲫⲱⲕ","ⲑⲱⲕ","ⲛⲟⲩⲕ"], "your_f": ["ⲫⲱ","ⲑⲱ","ⲛⲟⲩ"], "his": ["ⲫⲱϥ","ⲑⲱϥ","ⲛⲟⲩϥ"], "her": ["ⲫⲱⲥ","ⲑⲱⲥ","ⲛⲟⲩⲥ"], "our": ["ⲫⲱⲛ","ⲑⲱⲛ","ⲛⲟⲩⲛ"], "your_pl": ["ⲫⲱⲧⲉⲛ","ⲑⲱⲧⲉⲛ","ⲛⲟⲩⲧⲉⲛ"], "their": ["ⲫⲱⲟⲩ","ⲑⲱⲟⲩ","ⲛⲟⲩⲟⲩ"]}
+    }
+  },
+  "verb_system": {
+    "core_principle": "verb does not conjugate for tense or person; tense is marked by prefix (none=present, ⲁ=past, ⲛⲁ=future); verb has 4 usage forms",
+    "four_forms": {
+      "form1": "verb + ⲛ̀/ⲙ̀/ⲉ̀ + noun complement (indicator)",
+      "form2": "verb + noun complement directly",
+      "form3": "verb + complement pronoun",
+      "form4": "past participle / passive-descriptive"
+    },
+    "vowel_patterns": [
+      {"pattern": "ⲱ→ⲉ→ⲟ→ⲏ", "forms": ["ⲃⲱⲗ","ⲃⲉⲗ-","ⲃⲟⲗ","ⲃⲏⲗ"], "gloss": "solve"},
+      {"pattern": "ⲱ→ⲉ→ⲟ→ⲏ", "forms": ["ⲕⲱⲧ","ⲕⲉⲧ-","ⲕⲟⲧ","ⲕⲏⲧ"], "gloss": "build"},
+      {"pattern": "ⲱ→ⲉ→ⲁ→ⲏ (before ϣ/ϧ)", "forms": ["ⲑⲱϣ","ⲑⲉϣ-","ⲑⲁϣ","ⲑⲏϣ"], "gloss": "determine"},
+      {"pattern": "ⲱ→ⲉ→ⲁ→ⲏ (before ϣ/ϧ)", "forms": ["ⲫⲱϧ","ⲫⲉϧ-","ⲫⲁϧ","ⲫⲏϧ"], "gloss": "tear apart"},
+      {"pattern": "ⲟ→ⲁ→ⲁ→ⲉ (+ϩ)", "forms": ["ⲟⲩⲟϩ","ⲟⲩⲁϩ-","ⲟⲩⲁϩ","ⲟⲩⲉϩ"], "gloss": "add"},
+      {"pattern": "ⲟ→…→…→ⲏ (3-consonant)", "forms": ["ϧ̀ⲙⲟⲙ","—","—","ϧⲏⲙ"], "gloss": "heat"},
+      {"pattern": "ⲱ→ⲉ→ⲟ→ⲟ (3-consonant)", "forms": ["ϩⲱⲧⲡ","ϩⲉⲧⲡ-","ϩⲟⲧⲡ","ϩⲟⲧⲡ"], "gloss": "unify"},
+      {"pattern": "ⲓ→ⲉ→ⲁ→ⲟ", "forms": ["ⲙⲓⲥⲓ","ⲙⲉⲥ-","ⲙⲁⲥ","ⲙⲟⲥⲓ"], "gloss": "bear/give birth"},
+      {"pattern": "ⲓ→ⲉ→ⲉ→—", "forms": ["ϫⲓⲙⲓ","ϫⲉⲙ-","ϫⲉⲙ","—"], "gloss": "find"},
+      {"pattern": "ⲓ→ⲉ→ⲁ→ⲁ (+ϧ/ϣ/ⲕ)", "forms": ["ⲣⲓⲕⲓ","ⲣⲉⲕ-","ⲣⲁⲕ","ⲣⲁⲕⲓ"], "gloss": "bend"},
+      {"pattern": "final ⲓ", "forms": ["ϣⲓ","ϣⲓ-","ϣⲓⲧ","ϣⲏⲟⲩ"], "gloss": "measure"},
+      {"pattern": "reduplicated", "forms": ["ⲃⲟⲣⲃⲉⲣ","ⲃⲉⲣⲃⲉⲣ-","ⲃⲉⲣⲃⲱⲣ","ⲃⲉⲣⲃⲱⲣ"], "gloss": "roll/through"},
+      {"pattern": "ⲁⲓ→ⲉⲉ→ⲁⲏ→ⲉⲏⲟⲩⲧ", "forms": ["ⲥⲁϩⲛⲓ","ⲥⲉϩⲛⲉ-","ⲥⲁϩⲛⲏⲧ","ⲥⲉϩⲛⲏⲟⲩⲧ"], "gloss": "order"},
+      {"pattern": "ⲟ→ⲉ→ⲟ→ⲏⲟⲩⲧ", "forms": ["ⲧⲁⲓⲟ","ⲧⲁⲓⲉ-","ⲧⲁⲓⲟ","ⲧⲁⲓⲏⲟⲩⲧ"], "gloss": "honor"}
+    ],
+    "compound_verb_bases": ["ϯ (give)","ϭⲓ (take)","ⲉⲣ (make)","ϫⲉⲙ (find)","ϣⲉⲛ (ask)","ϣⲉⲡ (accept)","ϩⲓ (through)"]
+  },
+  "tenses": {
+    "present_simple": {"prefixes": ["Ϯ","ⲕ̀","ⲧⲉ","ϥ̀","ⲥ̀","ⲧⲉⲛ","ⲧⲉⲧⲉⲛ","ⲥⲉ"], "before_noun": "noun + verb"},
+    "past_simple": {"prefixes": ["ⲁⲓ","ⲁⲕ","ⲁⲣⲉ","ⲁϥ","ⲁⲥ","ⲁⲛ","ⲁⲣⲉⲧⲉⲛ","ⲁⲩ"], "before_noun": "ⲁ + noun + verb"},
+    "future_simple": {"prefixes": ["ϯⲛⲁ","ⲭ̀ⲛⲁ","ⲧⲉⲣⲁ(ⲛⲁ)","ϥ̀ⲛⲁ","ⲥ̀ⲛⲁ","ⲧⲉⲛⲛⲁ","ⲧⲉⲧⲉⲛⲛⲁ","ⲥⲉⲛⲁ"]},
+    "present_continuous": {"prefixes": ["ⲉⲓ","ⲉⲕ","ⲉⲣⲉ","ⲉϥ","ⲉⲥ","ⲉⲛ","ⲉⲣⲉⲧⲉⲛ","ⲉⲩ"], "before_noun": "ⲉⲣⲉ + noun + verb"},
+    "past_continuous_gerund": {"prefixes": ["ⲉⲁⲓ","ⲉⲁⲕ","ⲉⲁⲣⲉ","ⲉⲁϥ","ⲉⲁⲥ","ⲉⲁⲛ","ⲉⲁⲣⲉⲧⲉⲛ","ⲉⲁⲩ"], "before_noun": "ⲉⲁⲣⲉ + noun + verb"},
+    "future_continuous_gerund": {"prefixes": ["ⲉⲓⲛⲁ","ⲉⲕⲛⲁ","ⲉⲣⲉⲛⲁ","ⲉϥⲛⲁ","ⲉⲥⲛⲁ","ⲉⲛⲛⲁ","ⲉⲣⲉⲧⲉⲛⲛⲁ","ⲉⲩⲛⲁ"], "before_noun": "ⲉⲣⲉ + noun + ⲛⲁ + verb"},
+    "present_of_repetition": {"prefixes": ["ϣⲁⲓ","ϣⲁⲕ","ϣⲁⲣⲉ","ϣⲁϥ","ϣⲁⲥ","ϣⲁⲛ","ϣⲁⲣⲉⲧⲉⲛ","ϣⲁⲩ"], "negation": ["ⲙ̀ⲡⲁⲓ","ⲙ̀ⲡⲁⲕ","ⲙ̀ⲡⲁⲣⲉ","ⲙ̀ⲡⲁϥ","ⲙ̀ⲡⲁⲥ","ⲙ̀ⲡⲁⲛ","ⲙ̀ⲡⲁⲣⲉⲧⲉⲛ","ⲙ̀ⲡⲁⲩⲛ"]},
+    "future_of_certainty": {"prefixes": ["ⲉⲓⲉ̀","ⲉⲕⲉ̀","ⲉⲣⲉⲉ̀","ⲉϥⲉ̀","ⲉⲥⲉ̀","ⲉⲛⲉ̀","ⲉⲣⲉⲧⲉⲛⲉ̀","ⲉⲩⲉ̀"], "negation": ["ⲛ̀ⲛⲁ","ⲛ̀ⲛⲉⲕ","ⲛ̀ⲛⲉ","ⲛ̀ⲛⲉϥ","ⲛ̀ⲛⲉⲥ","ⲛ̀ⲛⲉⲛ","ⲛⲛⲉⲧⲉⲛ","ⲛ̀ⲛⲟⲩ"], "before_noun": "ⲉⲣⲉ + noun + ⲛⲁ + verb"},
+    "questions_proverbs_present": {"prefixes": ["ⲁⲓ","ⲁⲕ","ⲁⲣⲉ","ⲁϥ","ⲁⲥ","ⲁⲛ","ⲁⲣⲉⲧⲉⲛ","ⲁⲩ"], "negation": "ⲛ̀ + subj + verb + ⲁⲛ"},
+    "questions_proverbs_future": {"prefixes": ["ⲁⲓⲛⲁ","ⲁⲕⲛⲁ","ⲁⲣⲉⲛⲁ","ⲁϥⲛⲁ","ⲁⲥⲛⲁ","ⲁⲛⲛⲁ","ⲁⲣⲉⲧⲉⲛⲛⲁ","ⲁⲩⲛⲁ"]},
+    "imperfect_past": {"prefixes": ["ⲛⲁⲓ","ⲛⲁⲕ","ⲛⲁⲣⲉ","ⲛⲁϥ","ⲛⲁⲥ","ⲛⲁⲛ","ⲛⲁⲣⲉⲧⲉⲛ","ⲛⲁⲩ"], "completion_marker": "ⲡⲉ after verb", "negation": "ⲁⲛ after verb before ⲡⲉ"},
+    "past_perfect_eta": {"prefixes": ["ⲉⲧⲁⲓ","ⲉⲧⲁⲕ","ⲉⲧⲁⲣⲉ","ⲉⲧⲁϥ","ⲉⲧⲁⲥ","ⲉⲧⲁⲛ","ⲉⲧⲁⲣⲉⲧⲉⲛ","ⲉⲧⲁⲩ"], "before_noun": "ⲉⲧⲁ/ⲉⲧⲁⲣⲉ + noun"},
+    "pluperfect_ne": {"prefixes": ["ⲛⲉⲁⲓ","ⲛⲉⲁⲕ","ⲛⲉⲁⲣⲉ","ⲛⲉⲁϥ","ⲛⲉⲁⲥ","ⲛⲉⲁⲛ","ⲛⲉⲁⲣⲉⲧⲉⲛ","ⲛⲉⲁⲩ"], "negation": ["ⲛⲉⲙ̀ⲡⲓ","ⲛⲉⲙ̀ⲡⲉⲕ","ⲛⲉⲙ̀ⲡⲉ","ⲛⲉⲙ̀ⲡⲉϥ","ⲛⲉⲙ̀ⲡⲉⲥ","ⲛⲉⲙ̀ⲡⲉⲛ","ⲛⲉⲙ̀ⲡⲉⲧⲉⲛ","ⲛⲉⲙ̀ⲡⲟⲩ"]},
+    "past_of_repetition": {"prefixes": ["ⲛⲉϣⲁⲓ","ⲛⲉϣⲁⲕ","ⲛⲉϣⲁⲣⲉ","ⲛⲉϣⲁϥ","ⲛⲉϣⲁⲥ","ⲛⲉϣⲁⲛ","ⲛⲉϣⲁⲣⲉⲧⲉⲛ","ⲛⲉϣⲁⲩ"], "negation": ["ⲛⲉⲙ̀ⲡⲁⲓ","ⲛⲉⲙ̀ⲡⲁⲕ","ⲛⲉⲙ̀ⲡⲁⲣⲉ","ⲛⲉⲙ̀ⲡⲁϥ","ⲛⲉⲙ̀ⲡⲁⲥ","ⲛⲉⲙ̀ⲡⲁⲛ","ⲛⲉⲙ̀ⲡⲁⲣⲉⲧⲉⲛ","ⲛⲉⲙ̀ⲡⲁⲩ"]},
+    "subjunctive_nte": {"prefixes": ["ⲛ̀ⲧⲁ","ⲛ̀ⲧⲉⲕ","ⲛ̀ⲧⲉ","ⲛ̀ⲧⲉϥ","ⲛ̀ⲧⲉⲥ","ⲛ̀ⲧⲉⲛ","ⲛ̀ⲧⲉⲧⲉⲛ","ⲛ̀ⲧⲟⲩ"], "before_noun": "ⲛ̀ⲧⲉ + noun + verb", "governing_words": ["ϩⲓⲛⲁ","ϩⲟⲡⲱⲥ","ϫⲉ","ⲥ̀ϣⲉ","ϩⲱϯ","ⲙⲏⲡⲟⲧⲉ","ⲙⲏⲡⲱⲥ","ⲁⲛⲁⲅⲕⲏ","ⲧⲟⲧⲉ","ⲭ̀ⲣⲓⲁ","ϩⲱⲥⲧⲉ","ⲟⲩⲟⲛϣ̀ϫⲟⲙ","ⲙ̀ⲙⲟⲛϣ̀ϫⲟⲙ","ⲓⲙⲏϯ","ⲉⲃⲏⲗ","ⲛⲁⲛⲉⲥ","ⲙ̀ⲡⲉⲣⲭⲁⲥ","ⲉⲑⲣⲉ","ϣⲁ","ϣⲁⲛⲧⲉ"]},
+    "subjunctive_ethre": {"prefixes": ["ⲉⲑⲣⲓ","ⲉⲑⲣⲉⲕ","ⲉⲑⲣⲉ","ⲉⲑⲣⲉϥ","ⲉⲑⲣⲉⲥ","ⲉⲑⲣⲉⲛ","ⲉⲑⲣⲉⲧⲉⲛ","ⲉⲑⲣⲟⲩ"], "note": "two different subjects"},
+    "shanta_until": {"prefixes": ["ϣⲁⲛ̀ⲧⲁ","ϣⲁⲛ̀ⲧⲉⲕ","ϣⲁⲛ̀ⲧⲉ","ϣⲁⲛ̀ⲧⲉϥ","ϣⲁⲛ̀ⲧⲉⲥ","ϣⲁⲛ̀ⲧⲉⲛ","ϣⲁⲛ̀ⲧⲉⲧⲉⲛ","ϣⲁⲛ̀ⲧⲟⲩ"], "variant": "ϣⲁϯ ϣⲁⲧⲉⲕ ϣⲁⲧⲉ ϣⲁⲧⲉϥ ϣⲁⲧⲉⲥ ϣⲁⲧⲉⲛ ϣⲁⲧⲉⲧⲉⲛ ϣⲁⲧⲟⲩ"}
+  },
+  "negation": {
+    "present_future": "ⲁⲛ after verb/clause",
+    "past_simple": ["ⲙ̀ⲡⲓ","ⲙ̀ⲡⲉⲕ","ⲙ̀ⲡⲉ","ⲙ̀ⲡⲉϥ","ⲙ̀ⲡⲉⲥ","ⲙ̀ⲡⲉⲛ","ⲙ̀ⲡⲉⲧⲉⲛ","ⲙ̀ⲡⲟⲩ"],
+    "nominal_sentence": "...ⲁⲛ ⲡⲉ"
+  },
+  "imperative": {
+    "rule": "bare verb, no tense marker or subject",
+    "alpha_prefix_verbs": {"ϫⲉ":"ⲁϫⲉ","ⲓⲣⲓ":"ⲁⲣⲓ","ⲓⲛⲓ":"ⲁⲛⲓ","ⲱⲗⲓ":"ⲁⲗⲓ","ⲟⲩⲱⲛ":"ⲁⲟⲩⲱⲛ","ⲛⲁⲩ":"ⲁⲛⲁⲩ","ⲉⲣ":"ⲁⲣⲓ"},
+    "give_verb": {"ϯ": {"before_pronouns": "ⲙⲟⲓ", "before_nouns": "ⲙⲁ-", "form": "ⲙⲏⲓ"}},
+    "ma_prefix_verbs": {"ⲕⲁϯ": "ⲙⲁⲕⲁϯ"},
+    "wishing": "ⲙⲁⲣⲉ- + pronoun/noun + verb (let him/them...)",
+    "prohibition": "ⲙ̀ⲡⲉⲣ + verb"
+  },
+  "passive_voice": {
+    "present": ["ⲥⲉ","ϣⲁⲩ","ⲁⲩ","ⲉⲩ"],
+    "future": ["ⲥⲉⲛⲁ","ⲁⲩⲛⲁ","ⲉⲩⲛⲁ","ⲉⲩⲉ"],
+    "past": ["ⲁⲩ","ⲛⲁⲩ","ⲛⲉⲁⲩ","ⲉⲧⲁⲩ","ⲛⲉϣⲁⲩ","ⲉⲁⲩ"],
+    "by_agent": "ⲉ̀ⲃⲟⲗϩⲓⲧⲉⲛ / ϩⲓⲧⲉⲛ"
+  },
+  "conditional": {
+    "present_unreal_forms": "simple present / present of status (ⲉⲓ...ⲉⲩ) / imperfect ⲛⲁ- + ⲡⲉ / repetition ϣⲁ-",
+    "unreal_wish_example": "ⲛⲁⲓⲟⲩⲱϣ ⲡⲉ 'I would like'"
+  },
+  "question_words": {
+    "ⲛⲓⲙ": "who", "ϩⲓⲧⲉⲛ ⲛⲓⲙ": "by whom", "ⲫⲁ/ⲑⲁ/ⲛⲁ ⲛⲓⲙ": "whose (m/f/pl)",
+    "ⲁϣ": "what", "ⲟⲩ": "what", "ⲛ̀ⲁϣ/ⲛ̀ⲟⲩ/ϧⲉⲛ ⲁϣ/ϧⲉⲛ ⲟⲩ": "with what",
+    "ⲛ̀ⲁϣ ⲛ̀ⲣⲏϯ": "how", "ϧⲉⲛ ⲁϣ ⲛ̀ⲣⲏϯ": "how", "ⲉⲑⲃⲉ ⲟⲩ": "why",
+    "ϩⲓϫⲉⲛ ⲟⲩ": "about what", "ⲟⲩⲏⲣ/ⲁⲩⲏⲣ": "how much/many", "ϧⲁ ⲟⲩⲏⲣ": "for how much",
+    "ⲑ̀ⲛⲁⲩ/ⲛ̀ⲑ̀ⲛⲁⲩ": "when", "ϣⲁ ⲑ̀ⲛⲁⲩ": "until when", "ⲓⲥϫⲉⲛ ⲑ̀ⲛⲁⲩ": "since when",
+    "ⲑⲱⲛ/ⲛ̀ⲑⲱⲛ": "where", "ⲉⲑⲱⲛ/ϣⲁ ⲑⲱⲛ": "where to", "ⲉⲃⲟⲗ ⲑⲱⲛ": "from where",
+    "ⲙⲏ/ⲁⲛ/ϫⲉ": "yes-no question markers", "ⲁϧⲟⲓ...ⲁϧⲱⲟⲩ": "what is it to me...to them",
+    "order": "question word + subject + verb"
+  },
+  "relative_pronouns": {
+    "basic": "ⲉⲧ/ⲉⲧⲉ + noun or verb (who/which/where)",
+    "fused": {"ⲡⲉⲧ": "ⲡⲉ+ⲉⲧ who is", "ⲫⲏⲉⲧ": "that who (m)", "ⲑⲏⲉⲧ": "that who (f)", "ⲛⲏⲉⲧ": "those who"},
+    "person_forms": ["ⲉⲧⲓ","ⲉⲧⲉⲕ","ⲉⲧⲉ","ⲉⲧⲉϥ","ⲉⲧⲉⲥ","ⲉⲧⲉⲛ","ⲉⲧⲉⲧⲉⲛ","ⲉⲧⲟⲩ"],
+    "temporal": {"ⲉⲛⲁⲣⲉ": "who was", "ⲉϣⲁⲣⲉ": "who used to"}
+  },
+  "prepositions": {
+    "ⲛⲁ (to/for)": ["ⲛⲏⲓ","ⲛⲁⲕ","ⲛⲉ","ⲛⲁϥ","ⲛⲁⲥ","ⲛⲁⲛ","ⲛⲱⲧⲉⲛ","ⲛⲱⲟⲩ"],
+    "ⲛⲉⲙ (with)": ["ⲛⲉⲙⲏⲓ","ⲛⲉⲙⲁⲕ","ⲛⲉⲙⲉ","ⲛⲉⲙⲁϥ","ⲛⲉⲙⲁⲥ","ⲛⲉⲙⲁⲛ","ⲛⲉⲙⲱⲧⲉⲛ","ⲛⲉⲙⲱⲟⲩ"],
+    "ⲛ̀ⲧⲉ (of)": ["ⲛ̀ⲧⲏⲓ","ⲛ̀ⲧⲁⲕ","ⲛ̀ⲧⲉ","ⲛ̀ⲧⲁϥ","ⲛ̀ⲧⲁⲥ","ⲛ̀ⲧⲁⲛ","ⲛ̀ⲧⲱⲧⲉⲛ","ⲛ̀ⲧⲱⲟⲩ"],
+    "ϧⲉⲛ (in)": ["ⲛ̀ϧⲏⲧ","ⲛ̀ϧⲏⲧⲕ","ⲛ̀ϧⲏϯ","ⲛ̀ϧⲏⲧϥ","ⲛ̀ϧⲏⲧⲥ","ⲛ̀ϧⲏⲧⲉⲛ","ϧⲉⲛⲑⲏⲛⲟⲩ","ⲛ̀ϧⲏⲧⲟⲩ"],
+    "ⲉⲑⲃⲉ (for sake of)": ["ⲉⲑⲃⲏⲧ","ⲉⲑⲃⲏⲧⲕ","ⲉⲑⲃⲏϯ","ⲉⲑⲃⲏⲧϥ","ⲉⲑⲃⲏⲧⲥ","ⲉⲑⲃⲏⲧⲉⲛ","ⲉⲑⲃⲉⲑⲏⲛⲟⲩ","ⲉⲑⲃⲏⲧⲟⲩ"],
+    "ⲟⲩⲃⲉ (against)": ["ⲟⲩⲃⲏⲓ","ⲟⲩⲃⲏⲕ","ⲟⲩⲃⲏ","ⲟⲩⲃⲏϥ","ⲟⲩⲃⲏⲥ","ⲟⲩⲃⲏⲛ","ⲟⲩⲃⲉⲑⲏⲛⲟⲩ","ⲟⲩⲃⲏⲟⲩ"],
+    "ϩⲓ (over/above)": ["ϩⲓⲱⲧ","ϩⲓⲱⲧⲕ","ϩⲓⲱϯ","ϩⲓⲱⲧϥ","ϩⲓⲱⲧⲥ","ϩⲓⲱⲧⲉⲛ","ϩⲓⲑⲏⲛⲟⲩ","ϩⲓⲱⲧⲟⲩ"],
+    "ⲟⲩⲧⲉ (between)": ["ⲟⲩⲧⲱⲓ","ⲟⲩⲧⲱⲕ","ⲟⲩⲧⲱ","ⲟⲩⲧⲱϥ","ⲟⲩⲧⲱⲥ","ⲟⲩⲧⲱⲛ","ⲟⲩⲧⲉⲑⲏⲛⲟⲩ","ⲟⲩⲧⲱⲟⲩ"],
+    "ⲛ̀ⲥⲁ (towards)": ["ⲛ̀ⲥⲱⲓ","ⲛ̀ⲥⲱⲕ","ⲛ̀ⲥⲱ","ⲛ̀ⲥⲱϥ","ⲛ̀ⲥⲱⲥ","ⲛ̀ⲥⲱⲛ","ⲛ̀ⲥⲁⲑⲏⲛⲟⲩ","ⲛ̀ⲥⲱⲟⲩ"],
+    "ϣⲁ (until)": ["ϣⲁⲣⲟⲓ","ϣⲁⲣⲟⲕ","ϣⲁⲣⲟ","ϣⲁⲣⲟϥ","ϣⲁⲣⲟⲥ","ϣⲁⲣⲟⲛ","ϣⲁⲣⲱⲧⲉⲛ","ϣⲁⲣⲱⲟⲩ"],
+    "ϩⲁ (towards)": ["ϩⲁⲣⲟⲓ","ϩⲁⲣⲟⲕ","ϩⲁⲣⲟ","ϩⲁⲣⲟϥ","ϩⲁⲣⲟⲥ","ϩⲁⲣⲟⲛ","ϩⲁⲣⲱⲧⲉⲛ","ϩⲁⲣⲱⲟⲩ"],
+    "ϧⲁ (under/about)": ["ϧⲁⲣⲟⲓ","ϧⲁⲣⲟⲕ","ϧⲁⲣⲟ","ϧⲁⲣⲟϥ","ϧⲁⲣⲟⲥ","ϧⲁⲣⲟⲛ","ϧⲁⲣⲱⲧⲉⲛ","ϧⲁⲣⲱⲟⲩ"],
+    "ⲁϭⲛ/ⲁⲧϭⲛ (without)": ["ⲁ(ⲧ)ϭⲛⲟⲩⲓ","ⲁϭⲛⲟⲩⲕ","ⲁϭⲛⲟⲩ","ⲁϭⲛⲟⲩϥ","ⲁϭⲛⲟⲩⲥ","ⲁϭⲛⲟⲩⲛ","ⲁϭⲛⲉⲑⲏⲛⲟⲩ","ⲁϭⲛⲟⲩⲟⲩ"]
+  },
+  "numbers": {
+    "1-10": ["ⲟⲩⲁⲓ","ⲥ̀ⲛⲁⲩ","ϣⲟⲙⲧ","ϥ̀ⲧⲟⲩ","ϯⲟⲩ","ⲥⲟⲟⲩ","ϣⲁϣϥ","ϣ̀ⲙⲏⲛ","ⲯⲓⲧ","ⲙⲏⲧ"],
+    "11-19": ["ⲙⲉⲧⲟⲩⲁⲓ","ⲙⲉⲧⲥ̀ⲛⲁⲩ","ⲙⲉⲧϣⲟⲙⲧ","ⲙⲉⲧϥ̀ⲧⲟⲩ","ⲙⲉⲧϯⲟⲩ","ⲙⲉⲧⲥⲟⲟⲩ","ⲙⲉⲧϣⲁϣϥ","ⲙⲉⲧϣ̀ⲙⲏⲛ","ⲙⲉⲧⲯⲓⲧ"],
+    "tens": {"20":"ϫⲟⲩⲧ","30":"ⲙⲁⲡ","40":"ϩ̀ⲙⲉ","50":"ⲧⲉⲃⲓ","60":"ⲥⲉ","70":"ϣ̀ⲃⲉ","80":"ϧⲁⲙⲛⲉ","90":"ⲡⲓⲥⲧⲁⲩ","100":"ϣⲉ","1000":"ϣⲟ"},
+    "composition": "tens + units no conjunction (ϫⲟⲩⲧ ⲟⲩⲁⲓ=21); hundreds: n + ϣⲉ; thousands: n + ⲛ̀ϣⲟ",
+    "usage": "number + ⲛ̀ + noun (ϣⲟⲙⲧ ⲛ̀ⲣⲱⲙⲓ) or number + noun",
+    "letter_numerals": "letter + overline (ⲁ̅=1 ... ⲓ̅=10 ⲕ̅=20 ... ⲣ̅=100)"
+  },
+  "calendar": {
+    "days": {"sunday": ["ⲡⲓⲟⲩⲁⲓ","ϯⲕⲩⲣⲓⲁⲕⲏ"], "monday": ["ⲡⲓⲥ̀ⲛⲁⲩ"], "tuesday": ["ⲡⲓϣⲟⲙⲧ"], "wednesday": ["ⲡⲓϥ̀ⲧⲟⲩ"], "thursday": ["ⲡⲓϯⲟⲩ"], "friday": ["ⲡⲓⲥⲟⲟⲩ","ϯⲡⲁⲣⲁⲥⲕⲉⲩⲏ"], "saturday": ["ⲡⲓϣⲁϣϥ","ⲡⲓⲥⲁⲃⲃⲁⲧⲟⲛ"]},
+    "months": [
+      {"n": 1, "bohairic": "Ⲑⲱⲟⲩⲧ", "sahidic": "Ⲑⲟⲟⲧ", "arabic": "توت", "starts": "Sep 11"},
+      {"n": 2, "bohairic": "Ⲡⲁⲟⲡⲓ", "sahidic": "Ⲡⲁⲁⲡⲉ", "arabic": "بابه", "starts": "Oct 11"},
+      {"n": 3, "bohairic": "Ⲁⲑⲟⲣ", "sahidic": "Ϩⲁⲧⲱⲣ", "arabic": "هاتور", "starts": "Nov 10"},
+      {"n": 4, "bohairic": "Ⲭⲟⲓⲁⲕ", "sahidic": "Ⲕⲓⲁϩⲕ", "arabic": "كيهك", "starts": "Dec 10"},
+      {"n": 5, "bohairic": "Ϯⲱⲃⲓ", "sahidic": "Ϯⲱⲃⲉ", "arabic": "طوبه", "starts": "Jan 9"},
+      {"n": 6, "bohairic": "Ⲙⲉϣⲓⲣ", "sahidic": "Ⲙⲉϣⲏⲣ", "arabic": "أمشير", "starts": "Feb 8"},
+      {"n": 7, "bohairic": "Ⲫⲁⲣⲉⲙϩⲁⲧ", "sahidic": "Ⲡⲁⲣⲉⲙϩⲁⲧ", "arabic": "برمهات", "starts": "Mar 10"},
+      {"n": 8, "bohairic": "Ⲫⲁⲣⲙⲟⲩⲑⲓ", "sahidic": "Ⲡⲁⲣⲁⲙⲟⲩⲧⲉ", "arabic": "برموده", "starts": "Apr 9"},
+      {"n": 9, "bohairic": "Ⲡⲁϣⲁⲛⲥ", "sahidic": "Ⲡⲁϣⲟⲛⲥ", "arabic": "بشنس", "starts": "May 9"},
+      {"n": 10, "bohairic": "Ⲡⲁⲱⲛⲓ", "sahidic": "Ⲡⲁⲱⲛⲉ", "arabic": "بؤنة", "starts": "Jun 8"},
+      {"n": 11, "bohairic": "Ⲉⲡⲏⲡ", "sahidic": "Ⲉⲡⲉⲡ", "arabic": "أبيب", "starts": "Jul 8"},
+      {"n": 12, "bohairic": "Ⲙⲉⲥⲱⲣⲏ", "sahidic": "Ⲙⲉⲥⲱⲣⲏ", "arabic": "مسرى", "starts": "Aug 7"},
+      {"n": 13, "bohairic": "ⲡⲓⲕⲟⲩϫⲓ ⲛ̀ⲁⲃⲟⲧ", "sahidic": "ⲡⲓⲕⲟⲩϫⲓ ⲛ̀ⲁⲃⲟⲧ", "arabic": "النسيء", "starts": "Sep 6-10"}
+    ],
+    "seasons": {"spring": "ⲡⲓϩⲏⲛ̀ϣⲱⲙ", "autumn": "ⲡⲓϩⲏⲛⲉⲫⲣⲱ", "summer": "ⲡⲓϣⲱⲙ", "winter": "ϯⲫ̀ⲣⲱ"},
+    "coordinates": {"east": "ⲡ̀ⲉⲓⲉⲃⲧ", "west": "ⲡ̀ⲉⲙⲉⲛⲧ", "north": "ⲡ̀ⲉⲙϩⲓⲧ", "south": "ⲫ̀ⲣⲏⲥ"}
+  },
+  "conjunctions": {
+    "coordinating": {"and": ["ⲛⲉⲙ","ⲟⲩⲟϩ"], "or": ["ⲓⲉ","ⲏ...ⲏ","ⲓⲧⲉ","ϣⲁⲛ"], "nor": ["ⲟⲩⲇⲉ","ⲣⲱ","ⲟⲩⲧⲉ"], "but": ["ⲁⲗⲗⲁ","ϫⲉ","ⲇⲉ","ⲡⲗⲏⲛ","ⲛ̀ⲑⲟϥ"], "yet": ["ⲁⲕⲙⲏⲛ","ⲓⲧⲉ"]},
+    "condition": {"if": ["ⲉϣⲁⲛ","ϣⲁⲛ","ⲕⲁⲛ","ⲉⲛⲉ","ⲓⲥϫⲉ"], "unless": ["ⲓⲉ","ⲉⲓⲙⲏϯ","ⲉⲕⲧⲟⲥ","ⲓⲙⲏϯ"], "until": ["ϣⲁⲧⲉ","ϣⲁ","ⲡⲓⲥⲏⲟⲩ","ⲙ̀ⲙⲓⲛ ⲙ̀ⲙⲟ"], "even_if": ["ϩⲟⲙⲱⲥ","ⲕⲁⲛ","ⲓⲥϫⲉ"], "in_case": ["ϧⲉⲛ ⲫ̀ⲣⲏϯ ϫⲉ"]},
+    "time": {"after": ["ⲉⲡⲉⲓ","ⲉⲡⲉⲓⲇⲏ","ⲉⲡⲓⲇⲉ","ⲉⲧⲓ","ⲙⲉⲛⲉⲛⲥⲁ","ⲙⲉⲛⲉⲛⲥⲱ"], "as_long_as": ["ⲉⲫⲟⲥⲟⲛ","ⲫⲟⲥⲟⲛ","ⲱⲥ","ϩⲟⲥⲟⲛ","ϩⲱⲥ"], "as_soon_as": ["ϣⲱⲣⲡ","ⲉⲥⲉϣⲱⲡⲓ"], "before": ["ⲙ̀ⲡⲁⲧⲉ","ϧⲁϫⲱ","ⲉⲙ̀ⲑⲟ","ⲙ̀ⲑⲟ"], "since": ["ⲓⲥϫⲉⲛ"], "until": ["ϣⲁ","ϣⲁⲣⲟ"], "when": ["ⲙ̀ⲡⲓⲛⲁⲩ","ⲉⲡⲉⲓ","ⲉⲧⲁ","ⲉⲧⲉ","ϩⲟⲧⲉ","ϩⲟⲧⲁⲛ"], "once": ["ⲛ̀ⲟⲩⲥⲏⲟⲩ","ⲛ̀ⲟⲩⲥⲟⲡ","ϩⲁⲡⲁⲝ","ⲁⲡⲁⲝ"], "now_that": ["ϯⲛⲟⲩ ϫⲉ"]},
+    "reason": {"because": ["ⲉⲃⲟⲗϧⲉⲛ ϫⲉ","ⲉⲑⲃⲉ ϫⲉ","ⲉⲡⲉⲓ","ⲉⲡⲉⲓⲇⲏ","ⲕⲁⲓ ⲅⲁⲣ","ⲟⲧⲓ","ϩⲁ","ⲇⲓⲟ","ϩⲱⲥⲧⲉ","ⲉⲓϫⲉ","ⲉⲓⲅⲉ"], "since_because": ["ⲉⲫⲟⲥⲟⲛ","ⲫⲟⲥⲟⲛ","ⲉϣⲱⲡ","ⲱⲥ","ϩⲁⲫ̀ⲛⲁⲩ","ϩⲱⲥ"], "so_that": ["ϫⲉ","ⲉⲑⲣⲉ","ⲓⲛⲁ","ϩⲓⲛⲁ","ⲟⲡⲱⲥ","ϩⲩⲛⲁ","ϣⲁⲛⲧ","ϣⲁⲧⲉ","ϩⲟⲡⲱⲥ","ϫⲉⲭⲁⲥ"], "so_as_not": ["ⲙ̀ⲡⲉⲣⲭⲁⲥ","ⲛ̀ⲧⲉϣ̀ⲧⲉⲙ","ⲙⲏⲡⲟⲧⲉ","ⲙⲏⲡⲱⲥ"]}
+  },
+  "impersonal": ["ⲟⲩⲟⲛ (there is)", "ⲙ̀ⲙⲟⲛ (there is not)", "ⲟⲩⲟⲛϣ̀ϫⲟⲙ (possible)", "ⲙ̀ⲙⲟⲛϣ̀ϫⲟⲙ (impossible)", "ⲥ̀ϣⲉ (must)", "ⲭ̀ⲣⲓⲁ (needed)", "ϩⲱϯ (necessary)", "ⲛⲁⲛⲉⲥ (it is good)", "ⲁⲛⲁⲅⲕⲏ (necessary)", "ⲟⲩⲛⲧⲁϥ (he has)"]
+}
