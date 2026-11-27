@@ -8833,7 +8833,7 @@ async function handleUpdate(update, env, ctx) {
         const u = known ?? await getUser(env, userId);
         await saveUser(env, userId, { ...(u ?? {}), translateAwaiting: true });
         patchRegisteredCache(userId, { translateAwaiting: true });
-        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✍️ اكتب الجملة بالعربي:" });
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✍️ اكتب الجملة بالعربي أو بالإنجليزي أو بالفرنسي أو بالألماني:" });
         return;
       }
     }
