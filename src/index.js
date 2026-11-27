@@ -1613,7 +1613,7 @@ function lazy(build) {
 import { audioUrl, audioVersion, prebuiltAudioUrl, fetchPrebuiltSpeech, isSingleWordOgg, NEURAL_VOICE_VERSION } from "./neural-voice.js";
 import { copticDateNow, alphabetText, letterStatsText, longestText, originsText, wordCountText, startsWithText, similarText, translateText, vocabText, startGuess, handleGuessReply } from "./features.js";
 import { transliterateNameToCoptic, copticNameReply } from "./coptic-name.js";
-import { formatTranslation } from "./translate.js";
+import { formatTranslation, setReverseTarget } from "./translate.js";
 import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, suggestSimilar, helpText, retentionText, opsText, recordById, levenshtein } from "./new-features.js";
 import { lookupCertificate, parseCertCsv } from "./certificates.js";
 import { extractCodePattern } from "./exam-pattern.js";
@@ -8833,7 +8833,7 @@ async function handleUpdate(update, env, ctx) {
         const u = known ?? await getUser(env, userId);
         await saveUser(env, userId, { ...(u ?? {}), translateAwaiting: true });
         patchRegisteredCache(userId, { translateAwaiting: true });
-        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✍️ اكتب الجملة بالعربي أو بالإنجليزي أو بالفرنسي أو بالألماني:" });
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✍️ اكتب الجملة بالعربي أو بالإنجليزي أو بالفرنسي أو بالألماني — أو بالقبطي للترجمة العكسية. للتبديل بين لغات الترجمة العكسية اكتب en أو fr أو de أو ar." });
         return;
       }
     }
@@ -9220,6 +9220,15 @@ async function handleUpdate(update, env, ctx) {
     // Persistent session: the state stays set after the reply, so the next
     // message is translated too; it ends only on /cancel, /menu or /start.
     if (user?.translateAwaiting) {
+      // Bare en/fr/de/ar inside the session switches the reverse (Coptic→)
+      // target language instead of being translated as a word.
+      const target = text.trim().toLowerCase();
+      if (target === "en" || target === "fr" || target === "de" || target === "ar") {
+        setReverseTarget(target);
+        const label = { en: "الإنجليزي", fr: "الفرنسي", de: "الألماني", ar: "العربي" }[target];
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `✅ تمام، الترجمة العكسية دلوقتي لل${label}. اكتب جملة بالقبطي.` });
+        return;
+      }
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: formatTranslation(text) });
       return;
     }

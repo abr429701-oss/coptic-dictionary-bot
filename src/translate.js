@@ -2134,6 +2134,8 @@ export function translateForeign(input) {
 }
 
 export function formatTranslation(input) {
+  // Coptic letters → the reverse engine (target = the session target).
+  if (/[\u2C80-\u2CFF\u03E2-\u03EF]/.test(String(input ?? ""))) return formatReverseTranslation(input, getReverseTarget());
   // Arabic letters → the existing Arabic engine, unchanged. Latin-script input
   // → the EN/FR/DE gloss (detection inside translateForeign).
   const r = /[\u0600-\u06FF]/.test(String(input ?? "")) ? translateSentence(input) : translateForeign(input);
@@ -2145,3 +2147,1362 @@ export function formatTranslation(input) {
   if (r.unknown.length) out += `\n⚠️ كلمات غير معروفة: ${[...new Set(r.unknown)].join("، ")}`;
   return out;
 }
+
+// ---------- Reverse translation (Coptic → Arabic / English / French / German) ----------
+// The forward engine is never touched: the reverse parser mirrors its sentence
+// patterns (pronoun subjects, tense prefixes, possessives, articles, genitive,
+// object markers, negation, copula, question words, prepositions) and resolves
+// every Coptic word through the SAME curated tables and dictionary records, so
+// forward and reverse agree. Unknown Coptic words are reported, never guessed.
+// Verb meanings in the dictionary are past-tense 3rd-person masculine in
+// Arabic: the reverse engine rebuilds the right person/tense from the Coptic
+// prefix instead of pasting the past form (Ϯⲥ̀ϧⲁⲓ → "I write", not "I wrote").
+//
+// Session target (default Arabic). The parent (src/index.js) calls
+// setReverseTarget when the user types en / fr / de / ar inside the session.
+let REVERSE_TARGET = "ar";
+export function setReverseTarget(lang) {
+  const l = String(lang ?? "").toLowerCase();
+  if (["ar", "en", "fr", "de"].includes(l)) REVERSE_TARGET = l;
+  return REVERSE_TARGET;
+}
+export function getReverseTarget() { return REVERSE_TARGET; }
+export function hasCoptic(s) { return /[\u2C80-\u2CFF\u03E2-\u03EF]/.test(String(s ?? "")); }
+
+// Coptic lookup key: jinkim-insensitive + lowercase. The dictionary stores
+// ⲉⲕⲕ̀ⲗⲏⲥⲓⲁ (with jinkim) while the forward engine writes ⲉⲕⲕⲗⲏⲥⲓⲁ, and
+// proper nouns are capitalised (Ⲫ̀ⲛⲟⲩϯ) — both must resolve to one key.
+export function normCoptic(s) {
+  return String(s ?? "").replace(/\u0300/g, "").toLowerCase();
+}
+// Display Arabic word: strip diacritics but KEEP the hamza (NFC composes
+// ا + U+0654 into أ), so "قرأ" displays as "قرأ", not "قرا".
+function displayArabicWord(raw) {
+  return String(raw ?? "").replace(/[ً-ْٰـ]/gu, "").normalize("NFC").trim();
+}
+// First word of a field's first value, cleaned for a gloss.
+function firstGlossWord(val) {
+  const w = String(val ?? "").split(/[،,]/)[0].trim().split(/\s+/)[0]?.replace(/^[("']+|[)"'.,;:!?]+$/g, "") ?? "";
+  return w;
+}
+
+// ---------- Reverse indexes (lazy) ----------
+// Coptic form → noun entry {ar, arPl, en, enPl, fr, frPl, de, dePl, gender, kind, proper, plural}.
+// `ar` is the DISPLAY Arabic word (كنيسة, not the normalized key كنيسه).
+let COPTIC_NOUN = null;
+let COPTIC_VERB = null;
+let COPTIC_ADJ = null;
+function firstValueFirstWord(field) {
+  return firstGlossWord(field);
+}
+// The curated Arabic keys are normalized (كنيسه, امراه, موسي, اب...): the
+// display spelling differs for these. Only the keys that differ are listed.
+const CURATED_AR_DISPLAY = {
+  "كنيسه": "كنيسة", "امراه": "امرأة", "زوجه": "زوجة", "موسي": "موسى",
+  "سنه": "سنة", "صلاه": "صلاة", "محبه": "محبة", "كلمه": "كلمة",
+  "شجره": "شجرة", "ام": "أم", "اب": "أب", "اخ": "أخ", "اخت": "أخت",
+  "اولاد": "أولاد", "ايام": "أيام", "ابرام": "إبرام", "انسان": "إنسان",
+  "ارض": "أرض", "مشي": "مشى", "صلي": "صلى", "احب": "أحب", "اعطي": "أعطى",
+  "راي": "رأى", "اكل": "أكل", "اخذ": "أخذ", "اتي": "أتى", "اختبا": "اختبأ",
+};
+function curatedDisplayAr(key) { return CURATED_AR_DISPLAY[key] ?? key; }
+function buildCopticNounIndex() {
+  if (COPTIC_NOUN) return COPTIC_NOUN;
+  const idx = new Map();
+  const byForm = new Map();
+  for (const r of records) {
+    const c = normCoptic(cleanCoptic(r.coptic ?? "").split(" ")[0].replace(/-$/, ""));
+    if (!c) continue;
+    if (!byForm.has(c)) byForm.set(c, []);
+    byForm.get(c).push(r);
+  }
+  for (const [c, rs] of byForm) {
+    // Prefer a singular noun record (اسم مذكر/مؤنث, or bare اسم); a جمع-only
+    // form becomes a plural entry. Proper nouns (اسم علم) are kept, flagged.
+    const isNoun = (r) => (r.kind ?? "").includes("اسم");
+    const singular = rs.find((r) => isNoun(r) && !r.kind.includes("جمع"))
+      ?? rs.find((r) => isNoun(r));
+    if (!singular) continue;
+    const arRaw = displayArabicWord(firstGlossWord(singular.meaning ?? "").split(" ")[0] ?? "");
+    // The meaning's first word is the lemma; a phrase first word (e.g. the
+    // vocative "يا") is not a noun.
+    const arNorm = normalizeArabic(arRaw);
+    if (!arRaw || arNorm.length < 2 || FUNCTION_WORDS.has(arNorm)) continue;
+    const plural = singular.kind.includes("جمع");
+    idx.set(c, {
+      ar: arRaw, arPl: null,
+      en: firstValueFirstWord(singular.english), enPl: null,
+      fr: firstValueFirstWord(singular.translation_fr), frPl: null,
+      de: firstValueFirstWord(singular.translation_de), dePl: null,
+      gender: genderFromRecord(singular), kind: singular.kind ?? "",
+      proper: (singular.kind ?? "").includes("علم"), plural,
+    });
+  }
+  // Curated nouns override the dictionary (the record's first sense is often
+  // wrong: ⲣⲱⲙⲓ → رجال, ⲙⲁⲩ → والدة, ⲕⲁϩ has no noun record at all, and
+  // ϫⲱⲱⲙ is not in the dictionary). The record's en/fr/de are kept when they
+  // exist; the Arabic display comes from the record when it matches the key.
+  // First curated gloss wins for a form (رجل, not the later انسان → ⲣⲱⲙⲓ).
+  const curatedSet = new Set();
+  for (const [key, cur] of Object.entries(CURATED_NOUNS)) {
+    const c = normCoptic(cur.coptic);
+    // A plural key sharing the singular's form (كتاب/كتب → ϫⲱⲱⲙ, رجل/رجال →
+    // ⲣⲱⲙⲓ) must not overwrite the singular entry: the plural is derived
+    // from the singular by the renderers (ⲛⲓ + form → plural).
+    if (cur.gender === "pl" && idx.has(c) && idx.get(c).gender !== "pl") continue;
+    if (curatedSet.has(c)) continue;
+    curatedSet.add(c);
+    const rec = idx.get(c);
+    const ar = rec && normalizeArabic(rec.ar) === key ? rec.ar : curatedDisplayAr(key);
+    idx.set(c, {
+      ar, arPl: null,
+      // The curated gloss wins over the record's first value when both exist
+      // (ϣ̀ⲫⲉⲣ → "Companion" in the record, "friend" curated).
+      en: REVERSE_NOUN_GLOSS[c]?.en ?? rec?.en ?? "", enPl: null,
+      fr: REVERSE_NOUN_GLOSS[c]?.fr ?? rec?.fr ?? "", frPl: null,
+      de: REVERSE_NOUN_GLOSS[c]?.de ?? rec?.de ?? "", dePl: null,
+      gender: cur.gender, kind: "", proper: !!cur.proper || !!cur.definite, plural: cur.gender === "pl",
+    });
+    if (cur.plural) {
+      const pc = normCoptic(cur.plural);
+      const prec = idx.get(pc);
+      idx.set(pc, {
+        ar: pluralizeArabicNounDisplay(key), arPl: null,
+        en: REVERSE_NOUN_GLOSS[pc]?.en ?? prec?.en ?? "", enPl: null,
+        fr: REVERSE_NOUN_GLOSS[pc]?.fr ?? prec?.fr ?? "", frPl: null,
+        de: REVERSE_NOUN_GLOSS[pc]?.de ?? prec?.de ?? "", dePl: null,
+        gender: "pl", kind: "", proper: false, plural: true,
+      });
+    }
+  }
+  COPTIC_NOUN = idx;
+  return idx;
+}
+// Curated en/fr/de glosses for Coptic noun forms whose dictionary record is
+// missing or whose first value is the wrong sense (ϣ̀ⲫⲉⲣ → "Companion", not
+// "friend"; ϫⲱⲱⲙ has no record at all).
+const REVERSE_NOUN_GLOSS = {
+  [normCoptic("ϫⲱⲱⲙ")]: { en: "book", fr: "livre", de: "Buch" },
+  [normCoptic("ϫⲱⲙ")]: { en: "book", fr: "livre", de: "Buch" },
+  [normCoptic("ϣ̀ⲫⲉⲣ")]: { en: "friend", fr: "ami", de: "Freund" },
+  [normCoptic("ϣ̀ⲫⲉⲣⲓ")]: { en: "friends", fr: "amis", de: "Freunde" },
+  [normCoptic("ⲣⲱⲙⲓ")]: { en: "man", fr: "homme", de: "Mann" },
+};
+// Pluralize an Arabic noun for DISPLAY (keeps a leading أ: أستاذ → أستاذون).
+function pluralizeArabicNounDisplay(word) {
+  const pl = pluralizeArabicNoun(word);
+  if (word.startsWith("أ") && pl.startsWith("ا")) return "أ" + pl.slice(1);
+  return pl;
+}
+function buildCopticVerbIndex() {
+  if (COPTIC_VERB) return COPTIC_VERB;
+  const idx = new Map();
+  for (const r of records) {
+    const kind = r.kind ?? "";
+    if (!kind.startsWith("فعل")) continue;
+    // Participles/adjectives are not finite verb stems (same rule as the
+    // forward foreignVerbArabic): "فعل مذكر/مؤنث/جمع", stative and descriptive forms.
+    if (/^فعل (مذكر|مؤنث|جمع)/.test(kind)) continue;
+    if (kind.includes("حالة") || kind.includes("وصفية")) continue;
+    const c = normCoptic(cleanCoptic(r.coptic ?? "").split(" ")[0].replace(/-$/, ""));
+    if (!c || idx.has(c)) continue;
+    // The copula forms ⲡⲉ/ⲧⲉ/ⲛⲉ are verb records ("to be") but function as
+    // the nominal copula in a sentence — the nominal parser handles them, so
+    // they must not resolve as verbs here (or "ⲡⲓⲣⲱⲙⲓ ⲟⲩⲥⲁⲃⲉ ⲡⲉ" reads
+    // ⲡⲉ as the verb كان and renders "ييكون").
+    if (c === "ⲡⲉ" || c === "ⲧⲉ" || c === "ⲛⲉ") continue;
+    const arRaw = displayArabicWord(firstGlossWord(r.meaning ?? "").split(" ")[0] ?? "");
+    const ar = normalizeArabic(arRaw);
+    if (!ar || ar.length < 2) continue;
+    // The Arabic word must resolve as a verb stem, or the record is a phrase
+    // whose first word is not a usable stem.
+    if (!lookupVerbStem(ar)) continue;
+    idx.set(c, {
+      ar, arRaw,
+      en: firstValueFirstWord(r.english), fr: firstValueFirstWord(r.translation_fr),
+      de: firstValueFirstWord(r.translation_de), kind,
+    });
+  }
+  // Curated verbs override (the dictionary often has only the f2/f3 form:
+  // أحب has ⲙⲉⲛⲣⲉ/ⲙⲉⲛⲣⲓⲧ but no ⲙⲉⲓ; ϣⲉⲛⲁϥ has no record at all).
+  for (const [stem, forms] of Object.entries(CURATED_VERBS)) {
+    for (const f of [forms.f1, forms.f2, forms.f3]) {
+      if (!f) continue;
+      const c = normCoptic(f);
+      const rec = idx.get(c);
+      idx.set(c, {
+        ar: stem, arRaw: rec?.arRaw ?? curatedDisplayAr(stem),
+        en: rec?.en ?? "", fr: rec?.fr ?? "", de: rec?.de ?? "", kind: "curated",
+      });
+    }
+  }
+  COPTIC_VERB = idx;
+  return idx;
+}
+function buildCopticAdjIndex() {
+  if (COPTIC_ADJ) return COPTIC_ADJ;
+  const idx = new Map();
+  // Adjective glosses: invert FOREIGN_ADJ (foreign word → arabic) so an
+  // Arabic adjective key resolves to its en/fr/de words.
+  const adjGloss = {};
+  for (const [lang, map] of Object.entries(FOREIGN_ADJ)) {
+    for (const [w, ar] of Object.entries(map)) {
+      const k = adjKeyOf(ar);
+      if (!adjGloss[k]) adjGloss[k] = {};
+      if (!adjGloss[k][lang]) adjGloss[k][lang] = w;
+    }
+  }
+  for (const [key, forms] of Object.entries(CURATED_ADJ)) {
+    const g = adjGloss[key] ?? {};
+    for (const f of [forms.m, forms.f]) {
+      idx.set(normCoptic(f), { ar: key, en: g.en ?? "", fr: g.fr ?? "", de: g.de ?? "" });
+    }
+  }
+  COPTIC_ADJ = idx;
+  return idx;
+}
+
+// ---------- Reverse verb glosses (Arabic stem → en/fr/de conjugation data) ----------
+// Curated for the common verbs first (the dictionary's first EN/FR/DE value is
+// often a conjugated or secondary sense: ⲙⲉⲓ → "wish", ⲥⲱⲧⲉⲙ → "Hears").
+// Keys are normalized Arabic stems (normalizeKeys, like CURATED_VERBS).
+// en: {inf, past, part}; fr: {inf, group?, pres?, part, fut?, aux?, refl?};
+// de: {inf, pres23?, past, part, aux?, sep?, refl?}.
+export const REVERSE_VERB_GLOSS = normalizeKeys({
+  "كتب": { en: { inf: "write", past: "wrote", part: "written" }, fr: { inf: "écrire", pres: ["écris", "écris", "écrit", "écrivons", "écrivez", "écrivent"], part: "écrit", fut: "écrir" }, de: { inf: "schreiben", past: "schrieb", part: "geschrieben" } },
+  "احب": { en: { inf: "love", past: "loved", part: "loved" }, fr: { inf: "aimer", group: "er", part: "aimé" }, de: { inf: "lieben", past: "liebte", part: "geliebt" } },
+  "قال": { en: { inf: "say", past: "said", part: "said" }, fr: { inf: "dire", pres: ["dis", "dis", "dit", "disons", "dites", "disent"], part: "dit", fut: "dir" }, de: { inf: "sagen", past: "sagte", part: "gesagt" } },
+  "فعل": { en: { inf: "do", past: "did", part: "done" }, fr: { inf: "faire", pres: ["fais", "fais", "fait", "faisons", "faites", "font"], part: "fait", fut: "fer" }, de: { inf: "machen", past: "machte", part: "gemacht" } },
+  "صنع": { en: { inf: "make", past: "made", part: "made" }, fr: { inf: "faire", pres: ["fais", "fais", "fait", "faisons", "faites", "font"], part: "fait", fut: "fer" }, de: { inf: "machen", past: "machte", part: "gemacht" } },
+  "اعطي": { en: { inf: "give", past: "gave", part: "given" }, fr: { inf: "donner", group: "er", part: "donné" }, de: { inf: "geben", pres23: "gib", past: "gab", part: "gegeben" } },
+  "راي": { en: { inf: "see", past: "saw", part: "seen" }, fr: { inf: "voir", pres: ["vois", "vois", "voit", "voyons", "voyez", "voient"], part: "vu", fut: "verr" }, de: { inf: "sehen", pres23: "sieh", past: "sah", part: "gesehen" } },
+  "سمع": { en: { inf: "hear", past: "heard", part: "heard" }, fr: { inf: "entendre", group: "re", part: "entendu" }, de: { inf: "hören", past: "hörte", part: "gehört" } },
+  "ذهب": { en: { inf: "go", past: "went", part: "gone" }, fr: { inf: "aller", pres: ["vais", "vas", "va", "allons", "allez", "vont"], part: "allé", fut: "ir", aux: "être" }, de: { inf: "gehen", past: "ging", part: "gegangen", aux: "sein" } },
+  "مشي": { en: { inf: "walk", past: "walked", part: "walked" }, fr: { inf: "marcher", group: "er", part: "marché" }, de: { inf: "laufen", pres23: "läuf", past: "lief", part: "gelaufen", aux: "sein" } },
+  "اكل": { en: { inf: "eat", past: "ate", part: "eaten" }, fr: { inf: "manger", group: "er", part: "mangé" }, de: { inf: "essen", pres23: "iss", past: "aß", part: "gegessen" } },
+  "شرب": { en: { inf: "drink", past: "drank", part: "drunk" }, fr: { inf: "boire", pres: ["bois", "bois", "boit", "buvons", "buvez", "boivent"], part: "bu", fut: "boir" }, de: { inf: "trinken", past: "trank", part: "getrunken" } },
+  "جلس": { en: { inf: "sit", past: "sat", part: "sat" }, fr: { inf: "s'asseoir", pres: ["assieds", "assieds", "assied", "asseyons", "asseyez", "asseyent"], part: "assis", fut: "assiér", refl: true }, de: { inf: "sitzen", past: "saß", part: "gesessen" } },
+  "فتح": { en: { inf: "open", past: "opened", part: "opened" }, fr: { inf: "ouvrir", pres: ["ouvre", "ouvres", "ouvre", "ouvrons", "ouvrez", "ouvrent"], part: "ouvert", fut: "ouvrir" }, de: { inf: "öffnen", past: "öffnete", part: "geöffnet" } },
+  "خلق": { en: { inf: "create", past: "created", part: "created" }, fr: { inf: "créer", group: "er", part: "créé" }, de: { inf: "erschaffen", past: "erschuf", part: "erschaffen" } },
+  "بارك": { en: { inf: "bless", past: "blessed", part: "blessed" }, fr: { inf: "bénir", group: "ir", part: "béni" }, de: { inf: "segnen", past: "segnete", part: "gesegnet" } },
+  "صلي": { en: { inf: "pray", past: "prayed", part: "prayed" }, fr: { inf: "prier", group: "er", part: "prié" }, de: { inf: "beten", past: "betete", part: "gebetet" } },
+  "تكلم": { en: { inf: "speak", past: "spoke", part: "spoken" }, fr: { inf: "parler", group: "er", part: "parlé" }, de: { inf: "sprechen", pres23: "sprich", past: "sprach", part: "gesprochen" } },
+  "جاء": { en: { inf: "come", past: "came", part: "come" }, fr: { inf: "venir", pres: ["viens", "viens", "vient", "venons", "venez", "viennent"], part: "venu", fut: "viendr", aux: "être" }, de: { inf: "kommen", past: "kam", part: "gekommen", aux: "sein" } },
+  "اتي": { en: { inf: "come", past: "came", part: "come" }, fr: { inf: "venir", pres: ["viens", "viens", "vient", "venons", "venez", "viennent"], part: "venu", fut: "viendr", aux: "être" }, de: { inf: "kommen", past: "kam", part: "gekommen", aux: "sein" } },
+  "وجد": { en: { inf: "find", past: "found", part: "found" }, fr: { inf: "trouver", group: "er", part: "trouvé" }, de: { inf: "finden", past: "fand", part: "gefunden" } },
+  "ولد": { en: { inf: "bear", past: "bore", part: "born" }, fr: { inf: "naître", pres: ["nais", "nais", "naît", "naissons", "naissez", "naissent"], part: "né", fut: "naîtr", aux: "être" }, de: { inf: "gebären", pres23: "gebier", past: "gebar", part: "geboren" } },
+  "طهر": { en: { inf: "purify", past: "purified", part: "purified" }, fr: { inf: "purifier", group: "er", part: "purifié" }, de: { inf: "reinigen", past: "reinigte", part: "gereinigt" } },
+  "درس": { en: { inf: "study", past: "studied", part: "studied" }, fr: { inf: "étudier", group: "er", part: "étudié" }, de: { inf: "studieren", past: "studierte", part: "studiert" } },
+  "علم": { en: { inf: "teach", past: "taught", part: "taught" }, fr: { inf: "enseigner", group: "er", part: "enseigné" }, de: { inf: "lehren", past: "lehrte", part: "gelehrt" } },
+  "تعلم": { en: { inf: "learn", past: "learned", part: "learned" }, fr: { inf: "apprendre", pres: ["apprends", "apprends", "apprend", "apprenons", "apprenez", "apprennent"], part: "appris", fut: "apprendr" }, de: { inf: "lernen", past: "lernte", part: "gelernt" } },
+  "نظر": { en: { inf: "look", past: "looked", part: "looked" }, fr: { inf: "regarder", group: "er", part: "regardé" }, de: { inf: "sehen", pres23: "sieh", past: "sah", part: "gesehen" } },
+  "قام": { en: { inf: "rise", past: "rose", part: "risen" }, fr: { inf: "se lever", group: "er", part: "levé", refl: true }, de: { inf: "aufstehen", past: "stand", part: "aufgestanden", aux: "sein", sep: "auf" } },
+  "مات": { en: { inf: "die", past: "died", part: "died" }, fr: { inf: "mourir", pres: ["meurs", "meurs", "meurt", "mourons", "mourez", "meurent"], part: "mort", fut: "mourr", aux: "être" }, de: { inf: "sterben", pres23: "stirb", past: "starb", part: "gestorben", aux: "sein" } },
+  "عاش": { en: { inf: "live", past: "lived", part: "lived" }, fr: { inf: "vivre", pres: ["vis", "vis", "vit", "vivons", "vivez", "vivent"], part: "vécu", fut: "vivr" }, de: { inf: "leben", past: "lebte", part: "gelebt" } },
+  "نام": { en: { inf: "sleep", past: "slept", part: "slept" }, fr: { inf: "dormir", pres: ["dors", "dors", "dort", "dormons", "dormez", "dorment"], part: "dormi", fut: "dormir" }, de: { inf: "schlafen", pres23: "schläf", past: "schlief", part: "geschlafen" } },
+  "استيقظ": { en: { inf: "wake up", past: "woke up", part: "woken up" }, fr: { inf: "se réveiller", group: "er", part: "réveillé", refl: true }, de: { inf: "aufwachen", past: "wachte", part: "aufgewacht", aux: "sein", sep: "auf" } },
+  "سكن": { en: { inf: "live", past: "lived", part: "lived" }, fr: { inf: "habiter", group: "er", part: "habité" }, de: { inf: "wohnen", past: "wohnte", part: "gewohnt" } },
+  "اختبا": { en: { inf: "hide", past: "hid", part: "hidden" }, fr: { inf: "se cacher", group: "er", part: "caché", refl: true }, de: { inf: "sich verstecken", past: "versteckte", part: "versteckt", refl: true } },
+  "اخذ": { en: { inf: "take", past: "took", part: "taken" }, fr: { inf: "prendre", pres: ["prends", "prends", "prend", "prenons", "prenez", "prennent"], part: "pris", fut: "prendr" }, de: { inf: "nehmen", pres23: "nimm", past: "nahm", part: "genommen" } },
+  "خاف": { en: { inf: "fear", past: "feared", part: "feared" }, fr: { inf: "craindre", pres: ["crains", "crains", "craint", "craignons", "craignez", "craignent"], part: "craint", fut: "craindr" }, de: { inf: "fürchten", past: "fürchtete", part: "gefürchtet" } },
+  "كان": { en: { inf: "be", past: "was", part: "been" }, fr: { inf: "être", pres: ["suis", "es", "est", "sommes", "êtes", "sont"], part: "été", fut: "ser" }, de: { inf: "sein", pres: ["bin", "bist", "ist", "sind", "seid", "sind"], past: "war", part: "gewesen", aux: "sein" } },
+  "سار": { en: { inf: "walk", past: "walked", part: "walked" }, fr: { inf: "marcher", group: "er", part: "marché" }, de: { inf: "gehen", past: "ging", part: "gegangen", aux: "sein" } },
+  "قرا": { en: { inf: "read", past: "read", part: "read" }, fr: { inf: "lire", pres: ["lis", "lis", "lit", "lisons", "lisez", "lisent"], part: "lu", fut: "lir" }, de: { inf: "lesen", pres23: "lies", past: "las", part: "gelesen" } },
+});
+// Form-I hamza-initial verbs (أكل، أخذ، أتى…): the 1s present is آكل, not
+// أحب-style. Form-IV أ-initial verbs (أحب، أعطى…) take the stem as the 1s
+// present. Unknown أ-initial verbs default to form IV (the commoner case).
+const FORM1_HAMZA = new Set(["اكل", "اخذ", "اتي", "امر", "اذن", "امن", "ابي"].map(normalizeArabic));
+// Hollow ء-final verbs whose past suffixes move the hamza (جاء → جئت، جاؤوا).
+const HOLLOW_HAMZA_PAST = new Set(["جاء", "ساء", "شاء", "باء"].map(normalizeArabic));
+
+// ---------- Arabic display conjugation ----------
+// Unlike inflectArabicVerb (internal gloss, never shown), this renders correct
+// display Arabic: أحب (not أاحب), يقرأ, آكل, جئت, أحببت, سأكتب.
+// stem: the DISPLAY past stem (أحب, قرأ, جاء, كتب...); person: 1s/2m/2f/3m/3f/1p/2p/3p.
+function arabicPresentStem(stemRaw) {
+  const norm = normalizeArabic(stemRaw);
+  if (HOLLOW_PAST_TO_PRESENT[norm]) return HOLLOW_PAST_TO_PRESENT[norm];
+  if (stemRaw.endsWith("ى")) {
+    // ى-final: أعطى → عطي (drop the form-IV أ, ى → ي); رأى → رى (drop the medial أ).
+    if (stemRaw.startsWith("أ")) return stemRaw.slice(1, -1) + "ي";
+    const mid = stemRaw.slice(0, -1);
+    return mid.replace(/أ/g, "") + "ى";
+  }
+  if (stemRaw.startsWith("أ") && !FORM1_HAMZA.has(norm)) return stemRaw.slice(1); // form IV: أحب → حب
+  return stemRaw;
+}
+function arabicConjugate(stemRaw, tense, person) {
+  const norm = normalizeArabic(stemRaw);
+  const pres = arabicPresentStem(stemRaw);
+  if (tense === "past") {
+    const gem = GEMINATE_VERBS.has(norm);
+    const d = gem ? stemRaw + stemRaw.slice(-1) : stemRaw;
+    const hamzaFinal = stemRaw.endsWith("ء");
+    const hollowHamza = HOLLOW_HAMZA_PAST.has(norm);
+    switch (person) {
+      case "3m": return stemRaw;
+      case "3f": return stemRaw + "ت";
+      case "3p": return hamzaFinal ? stemRaw.slice(0, -1) + "ؤوا" : stemRaw + "وا";
+      case "1s": case "2m": return hollowHamza ? stemRaw.slice(0, -1) + "ئت" : d + "ت";
+      case "2f": return (hollowHamza ? stemRaw.slice(0, -1) + "ئت" : d + "ت") + "ِ";
+      case "1p": return (hollowHamza ? stemRaw.slice(0, -1) + "ئ" : d) + "نا";
+      case "2p": return (hollowHamza ? stemRaw.slice(0, -1) + "ئ" : d) + "تم";
+      default: return stemRaw;
+    }
+  }
+  // present (future adds س- outside)
+  const suf = (w) => {
+    // ء-final present stems take ئ before ون/ين (يقرؤون، تقرئين، يجيئون).
+    if (!w) return w;
+    if (pres.endsWith("ء")) return pres.slice(0, -1) + "ئ" + w;
+    return pres + w;
+  };
+  let form;
+  switch (person) {
+    case "1s":
+      form = FORM1_HAMZA.has(norm) ? "آ" + pres.slice(1) : "أ" + pres;
+      break;
+    case "2m": case "3f": form = "ت" + pres; break;
+    case "2f": form = "ت" + suf("ين"); break;
+    case "3m": form = "ي" + pres; break;
+    case "1p": form = "ن" + pres; break;
+    case "2p": form = "ت" + suf("ون"); break;
+    case "3p": form = "ي" + suf("ون"); break;
+    default: form = "ي" + pres;
+  }
+  return tense === "future" ? "س" + form : form;
+}
+// Negation word + present-tense verb (لم/لن/لا all take the present form).
+function arabicNegatedVerb(stemRaw, tense, person) {
+  const neg = tense === "past" ? "لم" : tense === "future" ? "لن" : "لا";
+  return `${neg} ${arabicConjugate(stemRaw, "present", person)}`;
+}
+
+// ---------- Foreign verb gloss resolution ----------
+// Curated table first; otherwise the dictionary record's first en/fr/de value,
+// cleaned to an infinitive (the forward stemmers recover it when the record's
+// first value is a conjugated form, e.g. "Hears" → hear).
+function cleanForeignInfinitive(lang, word) {
+  let w = String(word ?? "").toLowerCase().trim().replace(/^to\s+/, "");
+  if (!w) return "";
+  if (lang === "en") {
+    if (w === "does") return "do";
+    if (w === "has") return "have";
+    if (w === "is") return "be";
+    if (w.endsWith("ies") && w.length > 4) return w.slice(0, -3) + "y";
+    if (/(ches|shes|xes|zes|sses)$/.test(w)) return w.slice(0, -2);
+    if (w.endsWith("s") && !w.endsWith("ss") && !w.endsWith("us") && w.length > 2) return w.slice(0, -1);
+    return w;
+  }
+  return w;
+}
+function verbGloss(lang, arStem, rec) {
+  const cur = REVERSE_VERB_GLOSS[normalizeArabic(arStem)];
+  if (cur?.[lang]) return cur[lang];
+  const raw = lang === "en" ? rec?.en : lang === "fr" ? rec?.fr : rec?.de;
+  if (!raw) return null;
+  const stemmed = VERB_FORM[lang](raw.toLowerCase());
+  const inf = stemmed?.inf ?? cleanForeignInfinitive(lang, raw);
+  if (!inf) return null;
+  if (lang === "en") return { inf, past: enRegularPast(inf), part: enRegularPast(inf) };
+  if (lang === "fr") return { inf, group: frGroupOf(inf), part: frRegularPart(inf) };
+  // Separable verbs (aufstehen, mitmachen…): the prefix goes to the end of the
+  // clause in the present tense and before ge- in the participle (aufgestanden).
+  const sep = DE_SEP_PREFIXES.find((p) => inf.startsWith(p) && inf.length > p.length + 2) ?? null;
+  const base = sep ? inf.slice(sep.length) : inf;
+  return { inf, past: deRegularPast(base), part: (sep ?? "") + deRegularPart(base), sep };
+}
+const DE_SEP_PREFIXES = ["zurück", "zusammen", "weiter", "auf", "ab", "an", "aus", "ein", "mit", "nach", "vor", "zu", "weg", "fest", "los", "her", "hin"];
+function enRegularPast(inf) {
+  if (/[^aeiou]y$/.test(inf)) return inf.slice(0, -1) + "ied";
+  if (/e$/.test(inf)) return inf + "d";
+  if (/([^aeiou])([aeiou])([^aeiouwx])$/.test(inf) && inf.length <= 5) return inf + inf.slice(-1) + "ed";
+  return inf + "ed";
+}
+function frGroupOf(inf) {
+  if (inf.endsWith("er")) return "er";
+  if (inf.endsWith("ir")) return "ir";
+  if (inf.endsWith("re")) return "re";
+  return "er";
+}
+function frRegularPart(inf) {
+  if (inf.endsWith("er")) return inf.slice(0, -2) + "é";
+  if (inf.endsWith("ir")) return inf.slice(0, -1);
+  if (inf.endsWith("re")) return inf.slice(0, -2) + "u";
+  return inf;
+}
+function deRegularPast(inf) {
+  const stem = deStemOf(inf);
+  return stem + (/[td]$/.test(stem) ? "ete" : "te");
+}
+function deRegularPart(inf) {
+  const stem = deStemOf(inf);
+  return "ge" + stem + (/[td]$/.test(stem) ? "et" : "t");
+}
+function deStemOf(inf) {
+  let s = String(inf ?? "").replace(/^(sich|se)\s+/, "");
+  if (s.endsWith("en")) return s.slice(0, -2);
+  if (s.endsWith("n")) return s.slice(0, -1);
+  return s;
+}
+
+// ---------- Foreign noun pluralization + article gender ----------
+// Coptic gender (m/f/pl from the dictionary kind) does NOT decide the French
+// or German article: ⲟⲩⲱⲓⲛⲓ is masculine in Coptic but "la lumière" is
+// feminine, "das Licht" neuter. These tables cover the common nouns; unknown
+// words fall back to the Coptic gender (m → le/der, f → la/die, pl → les/die).
+const FR_GENDER = { livre: "m", "église": "f", "leçon": "f", monde: "m", "lumière": "f", eau: "f", dieu: "m", ami: "m", amie: "f", "frère": "m", "sœur": "f", "père": "m", "mère": "f", professeur: "m", "élève": "m", maison: "f", mot: "m", nom: "m", jour: "m", nuit: "f", ciel: "m", terre: "f", soleil: "m", lune: "f", pain: "m", vin: "m", roi: "m", reine: "f", "prêtre": "m", moine: "m", disciple: "m", serviteur: "m", "maître": "m", enfant: "m", homme: "m", femme: "f", "garçon": "m", fille: "f", livre: "m", "évangile": "m", "étoile": "f", mer: "f", montagne: "f", "arbre": "m", pierre: "f", porte: "f", chemin: "m", "cœur": "m", main: "f", "œil": "m", parole: "f", "vérité": "f", vie: "f", mort: "f", amour: "m", paix: "f", "école": "f", "église": "f", temps: "m", "année": "f", "semaine": "f", voix: "f", "lumière": "f", "ténèbres": "f", "esprit": "m", "ange": "m", "apôtre": "m", "prophète": "m", "saint": "m", sainte: "f", "croix": "f", "prière": "f", "chanson": "f", "histoire": "f", "lettre": "f", "langue": "f", "ville": "f", "village": "m", "champ": "m", "fleur": "f", "oiseau": "m", "poisson": "m", "cheval": "m", "chien": "m", "chat": "m" };
+const DE_GENDER = { buch: "n", kirche: "f", lektion: "f", welt: "f", licht: "n", wasser: "n", gott: "m", freund: "m", bruder: "m", schwester: "f", vater: "m", mutter: "f", lehrer: "m", "schüler": "m", haus: "n", wort: "n", name: "m", tag: "m", nacht: "f", himmel: "m", erde: "f", sonne: "f", mond: "m", brot: "n", wein: "m", "könig": "m", "königin": "f", priester: "m", "mönch": "m", "jünger": "m", diener: "m", meister: "m", kind: "n", mann: "m", frau: "f", junge: "m", "mädchen": "n", evangelium: "n", stern: "m", meer: "n", berg: "m", baum: "m", stein: "m", "tür": "f", weg: "m", herz: "n", hand: "f", auge: "n", wahrheit: "f", leben: "n", tod: "m", liebe: "f", frieden: "m", schule: "f", zeit: "f", jahr: "n", woche: "f", stimme: "f", finsternis: "f", geist: "m", engel: "m", apostel: "m", prophet: "m", heiliger: "m", heilige: "f", kreuz: "n", gebet: "n", lied: "n", geschichte: "f", brief: "m", sprache: "f", stadt: "f", dorf: "n", feld: "n", blume: "f", vogel: "m", fisch: "m", pferd: "n", hund: "m", katze: "f" };
+const DE_PLURAL = { buch: "Bücher", licht: "Lichter", welt: "Welten", lektion: "Lektionen", kirche: "Kirchen", gott: "Götter", freund: "Freunde", bruder: "Brüder", schwester: "Schwestern", vater: "Väter", mutter: "Mütter", lehrer: "Lehrer", "schüler": "Schüler", haus: "Häuser", wort: "Worte", name: "Namen", tag: "Tage", nacht: "Nächte", himmel: "Himmel", erde: "Erden", sonne: "Sonnen", mond: "Monde", brot: "Brote", wein: "Weine", "könig": "Könige", "königin": "Königinnen", priester: "Priester", "mönch": "Mönche", "jünger": "Jünger", diener: "Diener", meister: "Meister", kind: "Kinder", mann: "Männer", frau: "Frauen", junge: "Jungen", "mädchen": "Mädchen", evangelium: "Evangelien", stern: "Sterne", meer: "Meere", berg: "Berge", baum: "Bäume", stein: "Steine", "tür": "Türen", weg: "Wege", herz: "Herzen", hand: "Hände", auge: "Augen", wahrheit: "Wahrheiten", leben: "Leben", tod: "Tode", liebe: "Lieben", frieden: "Frieden", schule: "Schulen", zeit: "Zeiten", jahr: "Jahre", woche: "Wochen", stimme: "Stimmen", finsternis: "Finsternisse", geist: "Geister", engel: "Engel", apostel: "Apostel", prophet: "Propheten", kreuz: "Kreuze", gebet: "Gebete", lied: "Lieder", geschichte: "Geschichten", brief: "Briefe", sprache: "Sprachen", stadt: "Städte", dorf: "Dörfer", feld: "Felder", blume: "Blumen", vogel: "Vögel", fisch: "Fische", pferd: "Pferde", hund: "Hunde", katze: "Katzen", wasser: "Wasser" };
+const EN_PLURAL_IRREG = { man: "men", woman: "women", child: "children", foot: "feet", tooth: "teeth", person: "people", mouse: "mice", goose: "geese" };
+function pluralizeEN(word) {
+  const w = String(word ?? "");
+  if (!w) return w;
+  const low = w.toLowerCase();
+  if (EN_PLURAL_IRREG[low]) return w[0] === w[0].toUpperCase() ? EN_PLURAL_IRREG[low][0].toUpperCase() + EN_PLURAL_IRREG[low].slice(1) : EN_PLURAL_IRREG[low];
+  if (/[^aeiou]y$/.test(w)) return w.slice(0, -1) + "ies";
+  if (/(s|x|ch|sh)$/.test(w)) return w + "es";
+  return w + "s";
+}
+function pluralizeFR(word) {
+  const w = String(word ?? "");
+  if (!w) return w;
+  if (/[sxz]$/.test(w)) return w;
+  if (w.endsWith("eau")) return w + "x";
+  if (w.endsWith("al")) return w.slice(0, -2) + "aux";
+  if (w === "œil") return "yeux";
+  if (w === "ciel") return "cieux";
+  return w + "s";
+}
+function pluralizeDE(word) {
+  const w = String(word ?? "");
+  if (!w) return w;
+  const p = DE_PLURAL[w.toLowerCase()];
+  if (p) return p;
+  // Weak fallback: +e (often wrong for strong nouns — the table covers the common ones).
+  return w + "e";
+}
+function frGenderOf(word, copticGender) {
+  if (copticGender === "pl") return "pl";
+  return FR_GENDER[String(word ?? "").toLowerCase()] ?? copticGender;
+}
+function deGenderOf(word, copticGender) {
+  if (copticGender === "pl") return "pl";
+  return DE_GENDER[String(word ?? "").toLowerCase()] ?? copticGender;
+}
+
+// ---------- Foreign verb conjugation ----------
+// Returns {verb, aux?, sep?}: `verb` is the conjugated form (for the perfect /
+// future the auxiliary is returned separately so the renderer can place the
+// participle / infinitive after the object in EN/FR/DE order). `sep` is a
+// separable DE prefix that goes to the end of the clause in the present tense.
+const PERSON_IDX = { "1s": 0, "2m": 1, "2f": 1, "3m": 2, "3f": 2, "1p": 3, "2p": 4, "3p": 5 };
+function conjugateEN(gloss, tense, person, neg) {
+  if (!gloss) return { verb: "" };
+  const inf = gloss.inf;
+  const p3s = person === "3m" || person === "3f";
+  if (inf === "be") {
+    const pres = person === "1s" ? "am" : p3s ? "is" : "are";
+    const past = person === "1s" || person === "3m" || person === "3f" ? "was" : "were";
+    if (neg) {
+      if (tense === "past") return { verb: past + " not" };
+      if (tense === "future") return { verb: "will not be" };
+      return { verb: pres + " not" };
+    }
+    if (tense === "past") return { verb: past };
+    if (tense === "future") return { verb: "will be" };
+    return { verb: pres };
+  }
+  if (neg) {
+    if (tense === "past") return { verb: "didn't " + inf };
+    if (tense === "future") return { verb: "won't " + inf };
+    return { verb: (p3s ? "doesn't " : "don't ") + inf };
+  }
+  if (tense === "past") return { verb: gloss.past };
+  if (tense === "future") return { verb: "will " + inf };
+  return { verb: p3s ? enPresent3s(inf) : inf };
+}
+function enPresent3s(inf) {
+  if (inf === "have") return "has";
+  if (/[^aeiou]y$/.test(inf)) return inf.slice(0, -1) + "ies";
+  if (/(s|x|ch|sh)$/.test(inf)) return inf + "es";
+  return inf + "s";
+}
+function frPresentForm(gloss) {
+  const inf = gloss.inf.replace(/^s['’]/, "").replace(/^se\s+/, "");
+  if (gloss.pres) return gloss.pres;
+  const group = gloss.group ?? frGroupOf(inf);
+  if (group === "er") {
+    let stem = inf.slice(0, -2);
+    const endings = ["e", "es", "e", "ons", "ez", "ent"];
+    // -ger → nous mangeons; -cer → nous commençons.
+    const p1 = stem.endsWith("g") ? stem + "eons" : stem.endsWith("c") ? stem.slice(0, -1) + "çons" : stem + "ons";
+    const forms = endings.map((e, i) => (i === 3 ? p1 : stem + e));
+    // e → è before a single final consonant (lever → lève), except -eler/-eter
+    // which double the consonant (appeler → appelle, jeter → jette).
+    const m = /^(.*)(e)([bcdfgklmnpqrstvwxz])$/.exec(stem);
+    if (m && !/(el|et)$/.test(stem)) {
+      const alt = m[1] + "è" + m[3];
+      forms[0] = alt + "e"; forms[1] = alt + "es"; forms[2] = alt + "e"; forms[5] = alt + "ent";
+    } else if (/(el|et)$/.test(stem)) {
+      const dbl = stem + stem.slice(-1);
+      forms[0] = dbl + "e"; forms[1] = dbl + "es"; forms[2] = dbl + "e"; forms[5] = dbl + "ent";
+    }
+    return forms;
+  }
+  if (group === "ir") {
+    const stem = inf.slice(0, -2);
+    return [stem + "is", stem + "is", stem + "it", stem + "issons", stem + "issez", stem + "issent"];
+  }
+  const stem = inf.slice(0, -2); // -re
+  return [stem + "s", stem + "s", stem, stem + "ons", stem + "ez", stem + "ent"];
+}
+function conjugateFR(gloss, tense, person, gender, plural, neg) {
+  if (!gloss) return { verb: "" };
+  const idx = PERSON_IDX[person] ?? 2;
+  const refl = gloss.refl ? ["me", "te", "se", "nous", "vous", "se"][idx] : null;
+  const reflForm = (v) => {
+    if (!refl) return v;
+    const r = /^[aeiouéèêh]/.test(v) ? refl.slice(0, -1) + "'" : refl;
+    return `${r} ${v}`;
+  };
+  if (tense === "past") {
+    const aux = gloss.aux === "être"
+      ? ["suis", "es", "est", "sommes", "êtes", "sont"][idx]
+      : ["ai", "as", "a", "avons", "avez", "ont"][idx];
+    let part = gloss.part;
+    if (gloss.aux === "être") {
+      if (plural) part += gender === "f" ? "es" : "s";
+      else if (gender === "f") part += "e";
+    }
+    if (neg) {
+      const neAux = /^[aeiouéèêh]/.test(aux) ? `n'${aux}` : `ne ${aux}`;
+      return { verb: `${neAux} pas ${reflForm(part)}` };
+    }
+    return { verb: reflForm(`${aux} ${part}`) };
+  }
+  if (tense === "future") {
+    const stem = gloss.fut ?? (gloss.inf.endsWith("re") ? gloss.inf.slice(0, -1) : gloss.inf);
+    const end = ["ai", "as", "a", "ons", "ez", "ont"][idx];
+    const v = stem.replace(/^s['’]/, "").replace(/^se\s+/, "") + end;
+    if (neg) {
+      const full = reflForm(v);
+      const ne = /^[aeiouéèêh]/.test(full) ? "n'" : "ne ";
+      return { verb: `${ne}${full} pas` };
+    }
+    return { verb: reflForm(v) };
+  }
+  const v = frPresentForm(gloss)[idx];
+  if (neg) {
+    // "ne" elides only when the next word starts with a vowel — the reflexive
+    // pronoun (me/te/se/nous/vous) starts with a consonant, so "ne m'assieds pas".
+    const full = reflForm(v);
+    const ne = /^[aeiouéèêh]/.test(full) ? "n'" : "ne ";
+    return { verb: `${ne}${full} pas` };
+  }
+  return { verb: reflForm(v) };
+}
+function conjugateDE(gloss, tense, person, gender, plural, neg) {
+  if (!gloss) return { verb: "" };
+  const idx = PERSON_IDX[person] ?? 2;
+  const inf = gloss.inf;
+  const refl = gloss.refl ? ["mich", "dich", "sich", "uns", "euch", "sich"][idx] : null;
+  // Separable prefix: "aufstehen" → stem "steh" + prefix "auf".
+  let stem = deStemOf(inf);
+  const sep = gloss.sep ?? null;
+  if (sep && stem.startsWith(sep)) stem = stem.slice(sep.length);
+  if (tense === "past") {
+    const aux = gloss.aux === "sein"
+      ? ["bin", "bist", "ist", "sind", "seid", "sind"][idx]
+      : ["habe", "hast", "hat", "haben", "habt", "haben"][idx];
+    const v = `${aux} ${gloss.part}`;
+    return { verb: refl ? `${v} ${refl}` : v };
+  }
+  if (tense === "future") {
+    const werd = ["werde", "wirst", "wird", "werden", "werdet", "werden"][idx];
+    return { verb: refl ? `${werd} ${refl} ${inf}` : `${werd} ${inf}` };
+  }
+  // Present: full table for sein, else stem + endings.
+  if (gloss.pres) return { verb: refl ? `${gloss.pres[idx]} ${refl}` : gloss.pres[idx], sep };
+  const useStem = (idx === 1 || idx === 2) && gloss.pres23 ? gloss.pres23 : stem;
+  const tEnd = /[td]$/.test(useStem);
+  const sEnd = /[sßxz]$/.test(useStem);
+  const endings = tEnd ? ["e", "est", "et", "en", "et", "en"] : sEnd ? ["e", "t", "t", "en", "t", "en"] : ["e", "st", "t", "en", "t", "en"];
+  const v = useStem + endings[idx];
+  return { verb: refl ? `${v} ${refl}` : v, sep };
+}
+
+// ---------- Reverse sentence parsing + rendering ----------
+// Raw tokens keep the jinkim (ⲙ̀/ⲛ̀/ⲉ̀ object and genitive markers are only
+// visible there); normalized tokens are used for every lookup.
+const MARKER = "\u0300"; // jinkim
+function rawIsMarker(t) { return !!t && (t === `ⲙ${MARKER}` || t === `ⲛ${MARKER}` || t === `ⲉ${MARKER}`); }
+function rawStripMarker(t) {
+  if (!t) return null;
+  for (const m of [`ⲙ${MARKER}`, `ⲛ${MARKER}`, `ⲉ${MARKER}`]) if (t.startsWith(m)) return t.slice(m.length);
+  return null;
+}
+// Subject pronouns (Coptic separate form → person), inverted from SUBJ_PRONOUNS.
+const REVERSE_SUBJ_PRONOUN = { "ⲁⲛⲟⲕ": "1s", "ⲛⲑⲟⲕ": "2m", "ⲛⲑⲟ": "2f", "ⲛⲑⲟϥ": "3m", "ⲛⲑⲟⲥ": "3f", "ⲁⲛⲟⲛ": "1p", "ⲛⲑⲱⲧⲉⲛ": "2p", "ⲛⲑⲱⲟⲩ": "3p" };
+const AR_SUBJ = { "1s": "أنا", "2m": "أنتَ", "2f": "أنتِ", "3m": "هو", "3f": "هي", "1p": "نحن", "2p": "أنتم", "3p": "هم" };
+const EN_SUBJ = { "1s": "I", "2m": "you", "2f": "you", "3m": "he", "3f": "she", "1p": "we", "2p": "you", "3p": "they" };
+const FR_SUBJ = { "1s": "je", "2m": "tu", "2f": "tu", "3m": "il", "3f": "elle", "1p": "nous", "2p": "vous", "3p": "ils" };
+const DE_SUBJ = { "1s": "ich", "2m": "du", "2f": "du", "3m": "er", "3f": "sie", "1p": "wir", "2p": "ihr", "3p": "sie" };
+// Possessive Coptic prefix → {person, nounGender}, inverted from POSSESSIVE.
+const POSS_PERSON = { "ي": "1s", "ك": "2m", "كي": "2f", "ه": "3m", "ها": "3f", "نا": "1p", "كم": "2p", "هم": "3p" };
+const REVERSE_POSSESSIVE = Object.entries(POSSESSIVE).flatMap(([suf, byGender]) =>
+  Object.entries(byGender).map(([g, pref]) => [normCoptic(pref), { person: POSS_PERSON[suf], gender: g }])
+).sort((a, b) => b[0].length - a[0].length);
+// Prepositions (Coptic → ar/en/fr/de), inverted from PREPOSITIONS + glosses.
+const PREP_GLOSS = {
+  "ϧⲉⲛ": { ar: "في", en: "in", fr: "dans", de: "in", deCase: "dat" },
+  "ⲉ": { ar: "إلى", en: "to", fr: "à", de: "nach", deCase: "dat" },
+  "ⲉⲃⲟⲗϧⲉⲛ": { ar: "من", en: "from", fr: "de", de: "von", deCase: "dat" },
+  "ⲛⲉⲙ": { ar: "مع", en: "with", fr: "avec", de: "mit", deCase: "dat" },
+  "ⲛⲁ": { ar: "ل", en: "for", fr: "pour", de: "für", deCase: "acc" },
+  "ϩⲓϫⲉⲛ": { ar: "على", en: "on", fr: "sur", de: "auf", deCase: "dat" },
+  "ⲉⲑⲃⲉ": { ar: "عن", en: "about", fr: "de", de: "über", deCase: "acc" },
+  "ⲙⲉⲛⲉⲛⲥⲁ": { ar: "بعد", en: "after", fr: "après", de: "nach", deCase: "dat" },
+  "ϩⲁϫⲱ": { ar: "قبل", en: "before", fr: "avant", de: "vor", deCase: "dat" },
+  "ϣⲁ": { ar: "حتى", en: "until", fr: "jusqu'à", de: "bis", deCase: "acc" },
+  "ⲟⲩⲧⲉ": { ar: "بين", en: "between", fr: "entre", de: "zwischen", deCase: "dat" },
+  "ⲟⲩⲃⲉ": { ar: "ضد", en: "against", fr: "contre", de: "gegen", deCase: "acc" },
+  "ⲁϭⲛ": { ar: "بدون", en: "without", fr: "sans", de: "ohne", deCase: "acc" },
+  "ϩⲁⲣⲟ": { ar: "عند", en: "at", fr: "chez", de: "bei", deCase: "dat" },
+  "ϩⲓ": { ar: "فوق", en: "above", fr: "sur", de: "über", deCase: "dat" },
+  "ϧⲁ": { ar: "تحت", en: "under", fr: "sous", de: "unter", deCase: "dat" },
+  "ⲙⲡⲉⲙⲑⲟ": { ar: "أمام", en: "before", fr: "devant", de: "vor", deCase: "dat" },
+};
+// Question words (Coptic → ar/en/fr/de), inverted from QUESTION_WORDS.
+const QWORD_GLOSS = {
+  "ⲛⲓⲙ": { ar: "من", en: "Who", fr: "Qui", de: "Wer" },
+  "ⲁϣ": { ar: "ماذا", en: "What", fr: "Que", de: "Was" },
+  "ⲟⲩ": { ar: "ما", en: "What", fr: "Que", de: "Was" },
+  "ⲑⲱⲛ": { ar: "أين", en: "Where", fr: "Où", de: "Wo" },
+  "ⲑⲛⲁⲩ": { ar: "متى", en: "When", fr: "Quand", de: "Wann" },
+  "ⲡⲱⲥ": { ar: "كيف", en: "How", fr: "Comment", de: "Wie" },
+  "ⲟⲩⲏⲣ": { ar: "كم", en: "How many", fr: "Combien", de: "Wie viele" },
+  "ⲙⲏ": { ar: "هل", en: null, fr: null, de: null },
+};
+// Demonstratives (adjective form → this/that), inverted from DEMONSTRATIVE.
+const DEMONSTRATIVE_REVERSE = { "ⲡⲁⲓ": "this", "ⲧⲁⲓ": "this", "ⲛⲁⲓ": "this", "ⲫⲏ": "that", "ⲑⲏ": "that", "ⲛⲏⲉⲧ": "that" };
+// Demonstrative pronouns (standalone "this/that"), inverted from DEMONSTRATIVE.
+const DEM_PRONOUN = {
+  "ⲫⲁⲓ": { word: "this", gender: "m" }, "ⲑⲁⲓ": { word: "this", gender: "f" }, "ⲛⲁⲓ": { word: "this", gender: "pl" },
+  "ⲫⲏ": { word: "that", gender: "m" }, "ⲑⲏ": { word: "that", gender: "f" }, "ⲛⲏ": { word: "that", gender: "pl" },
+};
+// Copula (standalone token → gender). The forward engine has no nominal
+// past: ⲛⲉ is the plural copula, present tense only.
+const COPULA = { "ⲡⲉ": "m", "ⲧⲉ": "f", "ⲛⲉ": "pl" };
+const HAVE_FORMS = { "ⲟⲩⲛⲧⲏⲓ": "1s", "ⲟⲩⲛⲧⲁⲕ": "2m", "ⲟⲩⲛⲧⲉ": "2f", "ⲟⲩⲛⲧⲁϥ": "3m", "ⲟⲩⲛⲧⲁⲥ": "3f", "ⲟⲩⲛⲧⲁⲛ": "1p", "ⲟⲩⲛⲧⲉⲧⲉⲛ": "2p", "ⲟⲩⲛⲧⲟⲩ": "3p" };
+const HAVE_NEG_FORMS = { "ⲙⲟⲛⲧⲏⲓ": "1s", "ⲙⲟⲛⲧⲁⲕ": "2m", "ⲙⲟⲛⲧⲉ": "2f", "ⲙⲟⲛⲧⲁϥ": "3m", "ⲙⲟⲛⲧⲁⲥ": "3f", "ⲙⲟⲛⲧⲁⲛ": "1p", "ⲙⲟⲛⲧⲉⲧⲉⲛ": "2p", "ⲙⲟⲛⲧⲟⲩ": "3p" };
+
+// Lowercase a foreign gloss for mid-sentence use (proper nouns keep their cap;
+// German nouns are always capitalised, so DE never calls this).
+function lowerForeign(w, proper) {
+  const s = String(w ?? "");
+  if (!s || proper) return s;
+  return s[0].toLowerCase() + s.slice(1);
+}
+// Definite article + stem (ⲡⲓ/ϯ/ⲛⲓ; ⲫ̀/ⲑ̀ only when the rest is a known noun).
+function stripCopticArticle(n) {
+  if (n.startsWith("ⲡⲓ")) return { stem: n.slice(2), definite: true, gender: "m" };
+  if (n.startsWith("ϯ")) return { stem: n.slice(1), definite: true, gender: "f" };
+  if (n.startsWith("ⲛⲓ")) return { stem: n.slice(2), definite: true, gender: "pl" };
+  if (n.startsWith("ⲫ") && buildCopticNounIndex().has(n.slice(1))) return { stem: n.slice(1), definite: true, gender: "m" };
+  if (n.startsWith("ⲑ") && buildCopticNounIndex().has(n.slice(1))) return { stem: n.slice(1), definite: true, gender: "f" };
+  return null;
+}
+// One token → noun phrase head (possessive / article / bare). Null if not a noun.
+function parseReverseNPToken(tok) {
+  const n = normCoptic(tok);
+  const nouns = buildCopticNounIndex();
+  for (const [pref, info] of REVERSE_POSSESSIVE) {
+    if (n.startsWith(pref) && n.length > pref.length) {
+      const e = nouns.get(n.slice(pref.length));
+      if (e) return { head: e, definite: false, possessive: info.person, plural: e.plural || info.gender === "pl", gender: e.gender, genitive: null, adjective: null, demonstrative: null };
+    }
+  }
+  const art = stripCopticArticle(n);
+  if (art) {
+    const e = nouns.get(art.stem);
+    if (e) return { head: e, definite: true, possessive: null, plural: e.plural || art.gender === "pl", gender: e.gender, genitive: null, adjective: null, demonstrative: null };
+  }
+  const e = nouns.get(n);
+  if (e) return { head: e, definite: false, possessive: null, plural: e.plural, gender: e.gender, genitive: null, adjective: null, demonstrative: null };
+  return null;
+}
+// Try to read a noun phrase starting at tokens[i] (raw tokens). Handles an
+// object/genitive marker attached to the first token, demonstratives, and a
+// following genitive (ⲙ̀/ⲛ̀ + NP) or adjective linker (ⲛ̀/ⲙ̀ + adjective).
+// Returns {np, next} or null. `unknown` collects tokens that look like words.
+function parseReverseNP(rawTokens, i, unknown) {
+  if (i >= rawTokens.length) return null;
+  let tok = rawTokens[i];
+  let stripped = rawStripMarker(tok);
+  if (stripped !== null && stripped !== "") tok = stripped;
+  // Demonstrative + noun.
+  if (DEMONSTRATIVE_REVERSE[normCoptic(tok)]) {
+    const rest = parseReverseNP(rawTokens, i + 1, unknown);
+    if (rest) { rest.np.demonstrative = DEMONSTRATIVE_REVERSE[normCoptic(tok)]; return { np: rest.np, next: rest.next }; }
+    return null;
+  }
+  const one = parseReverseNPToken(tok);
+  if (!one) return null;
+  let np = one, j = i + 1;
+  // Genitive / adjective linker (at most one of each, in either order).
+  for (let guard = 0; guard < 2 && j < rawTokens.length; guard++) {
+    let linkTok = rawTokens[j], k = j;
+    if (rawIsMarker(linkTok)) { k = j + 1; }
+    else {
+      const s = rawStripMarker(linkTok);
+      if (s !== null && s !== "") { linkTok = s; k = j; }
+      else {
+        // No jinkim typed: a leading ⲙ/ⲛ whose remainder parses as an NP/adjective.
+        const nn = normCoptic(linkTok);
+        if ((nn.startsWith("ⲙ") || nn.startsWith("ⲛ")) && (parseReverseNPToken(nn.slice(1)) || buildCopticAdjIndex().has(nn.slice(1)))) { linkTok = nn.slice(1); k = j; }
+        else break;
+      }
+    }
+    if (k >= rawTokens.length) break;
+    const adjWord = normCoptic(k === j ? linkTok : rawTokens[k]);
+    const adj = buildCopticAdjIndex().get(adjWord);
+    if (adj && !np.adjective) { np.adjective = adj; j = k + 1; continue; }
+    const gen = parseReverseNP(k === j ? [linkTok, ...rawTokens.slice(k + 1)] : rawTokens, k === j ? 0 : k, unknown);
+    if (gen && !np.genitive) { np.genitive = gen.np; j = k === j ? j + gen.next : gen.next; continue; }
+    break;
+  }
+  return { np, next: j };
+}
+// Verb token → {person, tense, neg, stem (normalized Arabic), entry, imperative, prohibitive}.
+// The remainder after stripping a prefix MUST be a known verb stem — that is
+// what keeps bare ⲕ/ϥ/ⲥ-initial verbs from being misread as prefixed forms.
+function parseReverseVerbToken(tok, allowRelative = true) {
+  const n = normCoptic(tok);
+  const verbs = buildCopticVerbIndex();
+  const hit = (stem) => verbs.get(normCoptic(stem)) ?? null;
+  const mk = (person, tense, neg, stem, extra = {}) => {
+    const entry = hit(stem);
+    if (!entry) return null;
+    return { person, tense, neg, stem: entry.ar, entry, imperative: false, prohibitive: false, ...extra };
+  };
+  // Relative ⲉⲧⲉ- (present) / ⲉⲧⲁ- (past) + subject prefix + verb.
+  if (allowRelative && (n.startsWith("ⲉⲧⲉ") || n.startsWith("ⲉⲧⲁ"))) {
+    const inner = parseReverseVerbToken(n.slice(3), false);
+    if (inner) return { ...inner, tense: n.startsWith("ⲉⲧⲁ") ? "past" : inner.tense };
+  }
+  // Prohibition ⲙ̀ⲡⲉⲣ- (before ⲙ̀ⲡⲉ 2f past-neg: longest first).
+  if (n.startsWith("ⲙⲡⲉⲣ")) { const r = mk("2m", "present", true, n.slice(5), { prohibitive: true, imperative: true }); if (r) return r; }
+  // Past negation ⲙ̀ⲡⲓ/ⲙ̀ⲡⲉⲕ/ⲙ̀ⲡⲉ/ⲙ̀ⲡⲉϥ/ⲙ̀ⲡⲉⲥ/ⲙ̀ⲡⲉⲛ/ⲙ̀ⲡⲉⲧⲉⲛ/ⲙ̀ⲡⲟⲩ (longest first).
+  for (const [person, pref] of [["2p", "ⲙⲡⲉⲧⲉⲛ"], ["2m", "ⲙⲡⲉⲕ"], ["3m", "ⲙⲡⲉϥ"], ["3f", "ⲙⲡⲉⲥ"], ["1p", "ⲙⲡⲉⲛ"], ["1s", "ⲙⲡⲓ"], ["2f", "ⲙⲡⲉ"], ["3p", "ⲙⲡⲟⲩ"]]) {
+    if (n.startsWith(pref)) { const r = mk(person, "past", true, n.slice(pref.length)); if (r) return r; }
+  }
+  // Future prefixes (longest first).
+  for (const [person, pref] of [["2p", "ⲧⲉⲧⲉⲛⲛⲁ"], ["1p", "ⲧⲉⲛⲛⲁ"], ["1s", "ϯⲛⲁ"], ["2m", "ⲭⲛⲁ"], ["2f", "ⲧⲉⲣⲁ"], ["3m", "ϥⲛⲁ"], ["3f", "ⲥⲛⲁ"], ["3p", "ⲥⲉⲛⲁ"]]) {
+    if (n.startsWith(pref)) { const r = mk(person, "future", false, n.slice(pref.length)); if (r) return r; }
+  }
+  // Noun-subject future marker ⲛⲁ + verb (person filled in by the sentence parser).
+  if (n.startsWith("ⲛⲁ")) { const r = mk(null, "future", false, n.slice(2)); if (r) return r; }
+  // Past prefixes (longest first).
+  for (const [person, pref] of [["2p", "ⲁⲣⲉⲧⲉⲛ"], ["2f", "ⲁⲣⲉ"], ["1s", "ⲁⲓ"], ["2m", "ⲁⲕ"], ["3m", "ⲁϥ"], ["3f", "ⲁⲥ"], ["1p", "ⲁⲛ"], ["3p", "ⲁⲩ"]]) {
+    if (n.startsWith(pref)) { const r = mk(person, "past", false, n.slice(pref.length)); if (r) return r; }
+  }
+  // Present prefixes (longest first). ⲭ̀ = 2m only before ⲙ/ⲛ/ⲟⲩ; ⲓ = 1s only
+  // before a vowel-initial verb (Ϯ → ⲓ).
+  for (const [person, pref] of [["2p", "ⲧⲉⲧⲉⲛ"], ["1p", "ⲧⲉⲛ"], ["2f", "ⲧⲉ"], ["1s", "ϯ"], ["2m", "ⲕ"], ["3m", "ϥ"], ["3f", "ⲥ"], ["3p", "ⲥⲉ"]]) {
+    if (n.startsWith(pref)) { const r = mk(person, "present", false, n.slice(pref.length)); if (r) return r; }
+  }
+  if (n.startsWith("ⲭ") && /^[ⲙⲛⲟⲩ]/.test(n.slice(1))) { const r = mk("2m", "present", false, n.slice(1)); if (r) return r; }
+  if (n.startsWith("ⲓ") && /^[ⲁⲉⲏⲓⲟⲩⲱ]/.test(n.slice(1))) { const r = mk("1s", "present", false, n.slice(1)); if (r) return r; }
+  // Bare verb form (imperative, or a noun-subject verb — person filled in later).
+  const bare = hit(n);
+  if (bare) return { person: null, tense: "present", neg: false, stem: bare.ar, entry: bare, imperative: true, prohibitive: false };
+  return null;
+}
+
+// Parse one Coptic clause (no ⲟⲩⲟϩ inside). Returns a sentence object or null.
+// Shape: {kind, subjectPerson, subjectNP, verb, object, preps, qword, neg,
+//          parts (for nominal), unknown[]}. kind: verbal | nominal | exists |
+// have | list | word.
+function parseReverseClause(rawTokens) {
+  const unknown = [];
+  const toks = rawTokens.map(normCoptic);
+  let i = 0;
+  // Trailing ⲁⲛ = present/future negation ("Ϯⲥ̀ϧⲁⲓ ⲁⲛ" = I do not write).
+  let trailingNeg = false;
+  if (toks.length > 1 && toks[toks.length - 1] === "ⲁⲛ") { trailingNeg = true; rawTokens = rawTokens.slice(0, -1); toks.pop(); }
+  // Question word first (ⲉⲑⲃⲉ ⲟⲩ = why, two tokens).
+  let qword = null;
+  if (toks[0] === "ⲉⲑⲃⲉ" && toks[1] === "ⲟⲩ") { qword = "ⲉⲑⲃⲉ ⲟⲩ"; i = 2; }
+  else if (QWORD_GLOSS[toks[0]]) { qword = toks[0]; i = 1; }
+  // "من هذا؟" → ⲛⲓⲙ ⲫⲁⲓ (question word + demonstrative pronoun, no copula).
+  if (qword === "ⲛⲓⲙ" && DEM_PRONOUN[toks[i]] && i + 1 === toks.length) {
+    return { kind: "question-dem", dem: DEM_PRONOUN[toks[i]], qword, unknown };
+  }
+  // Question + copula + NP ("أين بطرس؟" → ⲑⲱⲛ ⲡⲉ Ⲡⲉⲧⲣⲟⲥ).
+  if (qword && COPULA[toks[i]]) {
+    const np = parseReverseNP(rawTokens, i + 1, unknown);
+    if (np && np.next === toks.length) return { kind: "nominal-q", qword, np: np.np, unknown };
+  }
+  // Existential ⲟⲩⲟⲛ / ⲙ̀ⲙⲟⲛ + NP.
+  if (toks[i] === "ⲟⲩⲟⲛ" || toks[i] === "ⲙⲙⲟⲛ") {
+    const neg = toks[i] === "ⲙⲙⲟⲛ";
+    const np = parseReverseNP(rawTokens, i + 1, unknown);
+    if (np) return { kind: "exists", neg, np: np.np, qword, unknown };
+    unknown.push(rawTokens[i + 1] ?? "");
+    return { kind: "exists", neg, np: null, qword, unknown };
+  }
+  // Have ⲟⲩⲛⲧ... / ⲙⲟⲛⲧ... + NP.
+  if (HAVE_FORMS[toks[i]] || HAVE_NEG_FORMS[toks[i]]) {
+    const neg = !!HAVE_NEG_FORMS[toks[i]];
+    const person = HAVE_FORMS[toks[i]] ?? HAVE_NEG_FORMS[toks[i]];
+    const np = parseReverseNP(rawTokens, i + 1, unknown);
+    if (np) return { kind: "have", neg, person, np: np.np, qword, unknown };
+    unknown.push(rawTokens[i + 1] ?? "");
+    return { kind: "have", neg, person, np: null, qword, unknown };
+  }
+  // Noun-subject past marker ⲁ / past-neg marker ⲙ̀ⲡⲉ before the subject NP.
+  let nounPast = null;
+  if (toks[i] === "ⲁ" && i + 1 < toks.length) { nounPast = "past"; i++; }
+  else if (toks[i] === "ⲙⲡⲉ" && i + 1 < toks.length) { nounPast = "past-neg"; i++; }
+  // Subject pronoun?
+  let subjectPerson = REVERSE_SUBJ_PRONOUN[toks[i]] ?? null;
+  let subjectNP = null;
+  let j = i;
+  let verbFirst = null;
+  if (subjectPerson) j = i + 1;
+  else if (DEM_PRONOUN[toks[i]]) {
+    const dem = DEM_PRONOUN[toks[i]];
+    subjectNP = { demPron: dem, head: null, definite: false, possessive: null, plural: dem.gender === "pl", gender: dem.gender, genitive: null, adjective: null, demonstrative: null };
+    j = i + 1;
+  }
+  else {
+    // Verb-first: a prefixed verb (Ϯⲙⲉⲓ, ⲁⲓⲥ̀ϧⲁⲓ, ϯⲛⲁⲥ̀ϧⲁⲓ) is a sentence,
+    // not the noun its stem also spells — the 1s prefix Ϯ lowercases to the
+    // article ϯ, so "Ϯⲙⲉⲓ" would otherwise read as the noun "the love".
+    // A bare verb with a continuation (ⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ = "write the
+    // lesson!") also wins over its noun reading; alone it stays a word.
+    verbFirst = parseReverseVerbToken(rawTokens[i]);
+    if (verbFirst && (verbFirst.person !== null || i + 1 < toks.length)) {
+      j = i; // the verb is at j; its subject comes from the prefix (or is imperative)
+    } else {
+      verbFirst = null;
+      const np = parseReverseNP(rawTokens, i, unknown);
+      if (np) { subjectNP = np.np; j = np.next; }
+    }
+  }
+  // Copula: pronoun/NP subject + ⲡⲉ/ⲧⲉ/ⲛⲉ + NP ("ⲛ̀ⲑⲟⲕ ⲡⲉ Ⲡⲉⲧⲣⲟⲥ" = you are Peter).
+  if ((subjectNP || subjectPerson) && COPULA[toks[j]]) {
+    const pred = parseReverseNP(rawTokens, j + 1, unknown);
+    if (pred) return { kind: "nominal", subjectPerson, subjectNP, pred: pred.np, tense: "present", neg: trailingNeg, qword, unknown };
+  }
+  // Trailing copula: subject + predicate (+ ⲁⲛ) + ⲡⲉ/ⲧⲉ/ⲛⲉ ("الكنيسة جديدة" → ⲟⲩⲃⲉⲣⲓ).
+  if (subjectNP) {
+    const predNP = parseReverseNP(rawTokens, j, unknown);
+    if (predNP) {
+      let k = predNP.next;
+      let neg = trailingNeg;
+      if (toks[k] === "ⲁⲛ") { neg = true; k++; }
+      if (COPULA[toks[k]] && k === toks.length - 1) {
+        return { kind: "nominal", subjectPerson, subjectNP, pred: predNP.np, tense: "present", neg, qword, unknown };
+      }
+    }
+    // Predicate adjective: ⲟⲩ + adjective, then the copula.
+    const adjTok = toks[j];
+    if (adjTok?.startsWith("ⲟⲩ")) {
+      const adj = buildCopticAdjIndex().get(adjTok.slice(2));
+      if (adj) {
+        let k = j + 1;
+        let neg = trailingNeg;
+        if (toks[k] === "ⲁⲛ") { neg = true; k++; }
+        if (COPULA[toks[k]] && k === toks.length - 1) {
+          return { kind: "nominal", subjectPerson, subjectNP, predAdj: adj, tense: "present", neg, qword, unknown };
+        }
+      }
+    }
+  }
+  // Verb token next (with the subject pronoun's person, or the noun subject).
+  let verb = verbFirst ?? (j < toks.length ? parseReverseVerbToken(rawTokens[j]) : null);
+  if (verb) {
+    if (verb.person === null) {
+      if (subjectPerson) verb = { ...verb, person: subjectPerson, imperative: false };
+      else if (subjectNP) verb = { ...verb, person: subjectNP.gender === "pl" ? "3p" : subjectNP.gender === "f" ? "3f" : "3m", imperative: false };
+      else verb = { ...verb, person: "2m" }; // bare imperative
+    }
+    if (nounPast === "past") verb = { ...verb, tense: "past" };
+    if (nounPast === "past-neg") verb = { ...verb, tense: "past", neg: true };
+    if (trailingNeg && !verb.neg) verb = { ...verb, neg: true };
+    // Object + prepositional phrases after the verb.
+    let k = j + 1;
+    let object = null;
+    const preps = [];
+    while (k < toks.length) {
+      if (rawIsMarker(rawTokens[k])) { k++; continue; }
+      const stripped = rawStripMarker(rawTokens[k]);
+      if (stripped !== null && stripped !== "") {
+        const np = parseReverseNP([stripped, ...rawTokens.slice(k + 1)], 0, unknown);
+        if (np) { if (!object) object = np.np; k = k + np.next; continue; }
+      }
+      const prep = PREP_GLOSS[normCoptic(rawTokens[k])];
+      // ⲛⲁⲩ + ⲉ + NP = "look at" (checked before the ⲉ preposition).
+      if (verb.stem === "ⲛⲁⲩ" && normCoptic(rawTokens[k]) === "ⲉ") {
+        const np = parseReverseNP(rawTokens, k + 1, unknown);
+        if (np) { object = np.np; k = np.next; continue; }
+      }
+      if (prep) {
+        const np = parseReverseNP(rawTokens, k + 1, unknown);
+        if (np) { preps.push({ prep, np: np.np }); k = np.next; continue; }
+      }
+      const np = parseReverseNP(rawTokens, k, unknown);
+      if (np) { if (!object) object = np.np; k = np.next; continue; }
+      unknown.push(rawTokens[k]);
+      k++;
+    }
+    return { kind: "verbal", subjectPerson: verb.person, subjectNP, verb, object, preps, qword, unknown };
+  }
+  // No verb: a bare NP (or two NPs) is a phrase, not a sentence.
+  if (subjectNP) {
+    if (j < toks.length) unknown.push(...rawTokens.slice(j));
+    return { kind: "word", np: subjectNP, qword, unknown };
+  }
+  unknown.push(...rawTokens.slice(i));
+  return { kind: "word", np: null, qword, unknown };
+}
+// Full input → sentence object (splits on ⲟⲩⲟϩ into joined clauses).
+function parseReverseSentence(input) {
+  const rawTokens = String(input ?? "").split(/\s+/).filter(Boolean);
+  const clauses = [];
+  let cur = [];
+  for (const t of rawTokens) {
+    if (normCoptic(t) === "ⲟⲩⲟϩ") { clauses.push(cur); cur = []; }
+    else cur.push(t);
+  }
+  clauses.push(cur);
+  const parsed = clauses.filter((c) => c.length).map(parseReverseClause);
+  if (parsed.length <= 1) return parsed[0] ?? { kind: "word", np: null, qword: null, unknown: [] };
+  return { kind: "list", parts: parsed, unknown: parsed.flatMap((p) => p.unknown ?? []) };
+}
+
+// ---------- Reverse NP rendering ----------
+function renderDemPron(np, lang, kase = "nom") {
+  const d = np.demPron; // {word: "this"|"that", gender: "m"|"f"|"pl"}
+  const pl = d.gender === "pl";
+  if (lang === "ar") return d.word === "this" ? (pl ? "هؤلاء" : d.gender === "f" ? "هذه" : "هذا") : (pl ? "أولئك" : d.gender === "f" ? "تلك" : "ذلك");
+  if (lang === "en") return d.word === "this" ? (pl ? "these" : "this") : (pl ? "those" : "that");
+  if (lang === "fr") return d.word === "this" ? (pl ? "ceux-ci" : d.gender === "f" ? "celle-ci" : "celui-ci") : (pl ? "ceux-là" : d.gender === "f" ? "celle-là" : "celui-là");
+  // German demonstrative inflects by case (dieser/diesen/diesem/dieses…).
+  const t = {
+    nom: { m: "dieser", f: "diese", pl: "diese" }, acc: { m: "diesen", f: "diese", pl: "diese" },
+    dat: { m: "diesem", f: "dieser", pl: "diesen" }, gen: { m: "dieses", f: "dieser", pl: "dieser" },
+  };
+  const j = {
+    nom: { m: "jener", f: "jene", pl: "jene" }, acc: { m: "jenen", f: "jene", pl: "jene" },
+    dat: { m: "jenem", f: "jener", pl: "jenen" }, gen: { m: "jenes", f: "jener", pl: "jener" },
+  };
+  return (d.word === "this" ? t : j)[kase][d.gender];
+}
+function arDefinite(w) { return w.startsWith("ال") ? w : "ال" + w; }
+const AR_POSS_SUF = { "1s": "ي", "2m": "ك", "2f": "ك", "3m": "ه", "3f": "ها", "1p": "نا", "2p": "كم", "3p": "هم" };
+function arPossessive(w, person) {
+  const suf = AR_POSS_SUF[person];
+  if (!suf) return w;
+  if (w.endsWith("ة")) return w.slice(0, -1) + "ت" + suf;
+  if (w.endsWith("اء")) return suf === "ي" ? w.slice(0, -1) + "ئي" : w.slice(0, -1) + "ؤ" + suf;
+  return w + suf;
+}
+function arNounWord(np) {
+  if (np.plural && np.head.gender !== "pl") return pluralizeArabicNounDisplay(np.head.ar);
+  return np.head.ar;
+}
+function renderNP_AR(np, bare = false) {
+  if (!np) return "";
+  if (np.demPron) return renderDemPron(np, "ar");
+  let w = arNounWord(np);
+  if (np.possessive) w = arPossessive(w, np.possessive);
+  else if (np.definite && !np.head.proper && !np.genitive && !bare) w = arDefinite(w);
+  if (np.demonstrative) {
+    if (!np.possessive && !w.startsWith("ال")) w = arDefinite(w);
+    w = (np.demonstrative === "this" ? "هذا " : "ذلك ") + w;
+    if (np.plural) w = (np.demonstrative === "this" ? "هؤلاء " : "أولئك ") + w.slice(w.indexOf(" ") + 1);
+  }
+  if (np.adjective) w += " " + np.adjective.ar;
+  if (np.genitive) w += " " + renderNP_AR(np.genitive);
+  return w;
+}
+const EN_POSS = { "1s": "my", "2m": "your", "2f": "your", "3m": "his", "3f": "her", "1p": "our", "2p": "your", "3p": "their" };
+function enNounWord(np) {
+  const w = lowerForeign(np.head.en || np.head.ar, np.head.proper);
+  if (np.plural && np.head.gender !== "pl") return pluralizeEN(w);
+  return w;
+}
+function renderNP_EN(np, bare = false) {
+  if (!np) return "";
+  if (np.demPron) return renderDemPron(np, "en");
+  let w = enNounWord(np);
+  if (np.adjective) w = lowerForeign(np.adjective.en || np.adjective.ar) + " " + w;
+  let det = "";
+  if (np.possessive) det = EN_POSS[np.possessive] + " ";
+  else if (np.definite && !np.head.proper && !bare) det = "the ";
+  if (np.demonstrative) det = (np.demonstrative === "this" ? (np.plural ? "these " : "this ") : (np.plural ? "those " : "that "));
+  let s = det + w;
+  if (np.genitive) s += " of " + renderNP_EN(np.genitive);
+  return s;
+}
+const FR_POSS = {
+  "1s": { m: "mon", f: "ma", pl: "mes" }, "2m": { m: "ton", f: "ta", pl: "tes" }, "2f": { m: "ton", f: "ta", pl: "tes" },
+  "3m": { m: "son", f: "sa", pl: "ses" }, "3f": { m: "son", f: "sa", pl: "ses" },
+  "1p": { m: "notre", f: "notre", pl: "nos" }, "2p": { m: "votre", f: "votre", pl: "vos" }, "3p": { m: "leur", f: "leur", pl: "leurs" },
+};
+const FR_ADJ_BEFORE = new Set(["beau", "bon", "grand", "petit", "nouveau", "ancien", "saint", "vieux", "jeune", "joli"]);
+function frArticle(gender, word) {
+  if (gender === "pl") return "les";
+  if (/^[aeiouéèêàh]/.test(word)) return "l'";
+  return gender === "f" ? "la" : "le";
+}
+function frDeForm(np) {
+  // "de" + the NP: du / de la / des / de l' / de + possessive.
+  if (np.possessive) return "de " + renderNP_FR(np);
+  const g = frGenderOf(np.head.fr, np.head.gender);
+  const gender = np.plural ? "pl" : g;
+  let w = lowerForeign(np.head.fr || np.head.ar, np.head.proper);
+  if (np.plural && np.head.gender !== "pl") w = pluralizeFR(w);
+  if (gender === "pl") return "des " + w;
+  if (/^[aeiouéèêàh]/.test(w)) return "de l'" + w;
+  return gender === "f" ? "de la " + w : "du " + w;
+}
+function renderNP_FR(np, bare = false) {
+  if (!np) return "";
+  if (np.demPron) return renderDemPron(np, "fr");
+  const g = frGenderOf(np.head.fr, np.head.gender);
+  const gender = np.plural ? "pl" : g;
+  let w = lowerForeign(np.head.fr || np.head.ar, np.head.proper);
+  if (np.plural && np.head.gender !== "pl") w = pluralizeFR(w);
+  let det = "";
+  if (np.possessive) {
+    det = FR_POSS[np.possessive][gender];
+    if (gender === "f" && /^[aeiouéèêàh]/.test(w)) det = { ma: "mon", ta: "ton", sa: "son" }[det] ?? det;
+    det += " ";
+  } else if (np.definite && !np.head.proper && !bare) {
+    det = frArticle(gender, w);
+    if (!det.endsWith("'")) det += " ";
+  }
+  if (np.demonstrative) det = np.demonstrative === "this" ? (np.plural ? "ces " : "ce ") : (np.plural ? "ces " : "cet ");
+  // Adjectives: the short common ones go before the noun, the rest after.
+  let adjBefore = "", adjAfter = "";
+  if (np.adjective) {
+    const a = lowerForeign(np.adjective.fr || np.adjective.ar);
+    const before = FR_ADJ_BEFORE.has(a);
+    // ce + vowel-initial adjective → cet ("cet homme"); handled by det above only
+    // for the plain noun — "ce bel homme" needs "cet": fix the demonstrative here.
+    if (before) adjBefore = a + " ";
+    else adjAfter = " " + a;
+  }
+  let s = det + adjBefore + w + adjAfter;
+  if (np.genitive) s += " " + frDeForm(np.genitive);
+  return s;
+}
+const DE_POSS_BASE = { "1s": "mein", "2m": "dein", "2f": "dein", "3m": "sein", "3f": "ihr", "1p": "unser", "2p": "euer", "3p": "ihr" };
+function deArticle(gender, kase) {
+  const t = {
+    nom: { m: "der", f: "die", n: "das", pl: "die" }, acc: { m: "den", f: "die", n: "das", pl: "die" },
+    dat: { m: "dem", f: "der", n: "dem", pl: "den" }, gen: { m: "des", f: "der", n: "des", pl: "der" },
+  };
+  return t[kase][gender];
+}
+function dePossessive(person, gender, kase) {
+  const base = DE_POSS_BASE[person];
+  const end = { nom: { m: "", f: "e", n: "", pl: "e" }, acc: { m: "en", f: "e", n: "", pl: "e" }, dat: { m: "em", f: "er", n: "em", pl: "en" }, gen: { m: "es", f: "er", n: "es", pl: "er" } }[kase][gender];
+  return base + end;
+}
+function renderNP_DE(np, kase = "nom", bare = false) {
+  if (!np) return "";
+  if (np.demPron) return renderDemPron(np, "de", kase);
+  const g = deGenderOf(np.head.de, np.head.gender);
+  const gender = np.plural ? "pl" : g;
+  let w = np.head.de || np.head.ar;
+  w = w[0].toUpperCase() + w.slice(1);
+  if (np.plural && np.head.gender !== "pl") w = pluralizeDE(w);
+  if (kase === "dat" && gender === "pl" && !/[ns]$/.test(w)) w += "n";
+  if (kase === "gen" && (gender === "m" || gender === "n")) {
+    w = w === "Herz" ? "Herzens" : w === "Name" ? "Namens" : /[sßxz]$/.test(w) ? w + "es" : w + "s";
+  }
+  let det = "";
+  if (np.possessive) det = dePossessive(np.possessive, gender, kase) + " ";
+  else if (np.definite && !np.head.proper && !bare) det = deArticle(gender, kase) + " ";
+  if (np.demonstrative) det = np.demonstrative === "this" ? (np.plural ? "diese " : "dieser ") : (np.plural ? "jene " : "jener ");
+  let adj = "";
+  if (np.adjective) {
+    const a = np.adjective.de || "";
+    const end = ((kase === "acc" && gender === "m") || kase === "dat" || kase === "gen" || gender === "pl") ? "en" : "e";
+    // An adjective already ending in -e takes no extra -e (weise, not weisee);
+    // with -en it takes only -n (weisen).
+    adj = (a.endsWith("e") ? (end === "e" ? a : a + "n") : a + end) + " ";
+  }
+  let s = det + adj + w;
+  if (np.genitive) s += " " + renderNP_DE(np.genitive, "gen");
+  return s;
+}
+function renderNP(np, lang, kase, bare) {
+  if (lang === "ar") return renderNP_AR(np, bare);
+  if (lang === "en") return renderNP_EN(np, bare);
+  if (lang === "fr") return renderNP_FR(np, bare);
+  return renderNP_DE(np, kase ?? "nom", bare);
+}
+
+// ---------- Reverse sentence rendering ----------
+function reverseVerbGloss(verb, lang) {
+  return verbGloss(lang, verb.stem, verb.entry);
+}
+function renderVerbal_AR(s) {
+  const v = s.verb;
+  // The future drops the subject pronoun (سأكتب الدرس, not أنا سأكتب الدرس):
+  // the س- prefix already carries the person, and the task pins the compact form.
+  const subj = s.subjectNP ? renderNP_AR(s.subjectNP) : v.tense === "future" ? "" : AR_SUBJ[v.person];
+  const verbText = v.neg
+    ? arabicNegatedVerb(v.entry.arRaw, v.tense, v.person)
+    : arabicConjugate(v.entry.arRaw, v.tense, v.person);
+  const verbClean = verbText.replace(/[ً-ْ]/gu, "");
+  let out = subj ? `${subj} ${verbClean}` : verbClean;
+  if (s.object) out += ` ${renderNP_AR(s.object)}`;
+  for (const pp of s.preps ?? []) out += ` ${pp.prep.ar} ${renderNP_AR(pp.np)}`;
+  return out;
+}
+function renderVerbal_EN(s) {
+  const v = s.verb;
+  const gloss = reverseVerbGloss(v, "en");
+  const c = conjugateEN(gloss, v.tense, v.person, v.neg);
+  const subj = s.subjectNP ? renderNP_EN(s.subjectNP) : EN_SUBJ[v.person];
+  let out = `${subj} ${c.verb}`;
+  if (s.object) out += ` ${renderNP_EN(s.object)}`;
+  for (const pp of s.preps ?? []) out += ` ${pp.prep.en} ${renderNP_EN(pp.np)}`;
+  return out;
+}
+function renderVerbal_FR(s) {
+  const v = s.verb;
+  const gloss = reverseVerbGloss(v, "fr");
+  const gender = s.subjectNP ? frGenderOf(s.subjectNP.head.fr, s.subjectNP.head.gender) : (v.person === "3f" ? "f" : "m");
+  const plural = s.subjectNP ? !!s.subjectNP.plural : (v.person === "1p" || v.person === "2p" || v.person === "3p");
+  const c = conjugateFR(gloss, v.tense, v.person, gender, plural, v.neg);
+  let subj = s.subjectNP ? renderNP_FR(s.subjectNP) : FR_SUBJ[v.person];
+  let verbText = c.verb;
+  if (!s.subjectNP && v.person === "1s") {
+    // "je" elides before a vowel (j'aime, j'écris) but not before "ne"/"n'"
+    // (je n'aime pas) or a consonant (je sais).
+    subj = verbText.startsWith("n'") ? "je" : /^[aeiouéèêh]/.test(verbText) ? "j'" : "je";
+  }
+  let out = subj === "j'" ? `j'${verbText}` : `${subj} ${verbText}`;
+  if (s.object) out += ` ${renderNP_FR(s.object)}`;
+  for (const pp of s.preps ?? []) out += ` ${pp.prep.fr} ${renderNP_FR(pp.np)}`;
+  return out;
+}
+function renderVerbal_DE(s) {
+  const v = s.verb;
+  const gloss = reverseVerbGloss(v, "de");
+  const gender = s.subjectNP ? deGenderOf(s.subjectNP.head.de, s.subjectNP.head.gender) : (v.person === "3f" ? "f" : "m");
+  const plural = s.subjectNP ? !!s.subjectNP.plural : (v.person === "1p" || v.person === "2p" || v.person === "3p");
+  const c = conjugateDE(gloss, v.tense, v.person, gender, plural, v.neg);
+  const subj = s.subjectNP ? renderNP_DE(s.subjectNP, "nom") : DE_SUBJ[v.person];
+  let out = `${subj} ${c.verb}`;
+  if (s.object) out += ` ${renderNP_DE(s.object, "acc")}`;
+  for (const pp of s.preps ?? []) out += ` ${pp.prep.de} ${renderNP_DE(pp.np, pp.prep.deCase)}`;
+  if (v.neg && v.tense !== "past") out += " nicht";
+  if (v.neg && v.tense === "past") out = out.replace(/ (\S+)$/, " nicht $1");
+  if (c.sep && v.tense === "present") out += ` ${c.sep}`;
+  return out;
+}
+// Lowercase the first letter of a rendered body, unless it starts with the
+// English pronoun "I" or with a proper-noun subject (subjectNP present).
+function lowerFirstBody(body, s) {
+  if (!body || s.subjectNP?.head.proper || body.startsWith("I ") || body === "I") return body;
+  return body[0].toLowerCase() + body.slice(1);
+}
+// Wh-questions invert in EN/FR/DE ("What does she write?", "Qu'est-ce qu'elle
+// écrit ?", "Was schreibt sie?"). ⲛⲓⲙ is a subject question — no inversion
+// ("Who writes the lesson?"). ⲟⲩⲏⲣ (how many) keeps the declarative order,
+// since the noun it counts sits inside the object.
+function renderWhQuestion_EN(s, qw, body) {
+  const gloss = reverseVerbGloss(s.verb, "en");
+  const subj = s.subjectNP ? renderNP_EN(s.subjectNP) : EN_SUBJ[s.verb.person];
+  const subjLower = s.subjectNP?.head.proper ? subj : subj === "I" ? "I" : subj[0].toLowerCase() + subj.slice(1);
+  const obj = s.object ? " " + renderNP_EN(s.object) : "";
+  const preps = (s.preps ?? []).map((pp) => ` ${pp.prep.en} ${renderNP_EN(pp.np)}`).join("");
+  if (s.qword === "ⲛⲓⲙ") {
+    const c = conjugateEN(gloss, s.verb.tense, "3m", s.verb.neg);
+    return `Who ${c.verb}${obj}${preps}?`;
+  }
+  if (s.qword === "ⲟⲩⲏⲣ") return `${qw} ${lowerFirstBody(body, s)}?`;
+  const is3s = s.verb.person === "3m" || s.verb.person === "3f";
+  let aux;
+  if (s.verb.tense === "past") aux = s.verb.neg ? "didn't" : "did";
+  else if (s.verb.tense === "future") aux = s.verb.neg ? "won't" : "will";
+  else aux = s.verb.neg ? (is3s ? "doesn't" : "don't") : (is3s ? "does" : "do");
+  return `${qw} ${aux} ${subjLower} ${gloss?.inf ?? ""}${obj}${preps}?`;
+}
+function renderWhQuestion_FR(s, qw, body) {
+  if (s.qword === "ⲛⲓⲙ") {
+    const gloss = reverseVerbGloss(s.verb, "fr");
+    const c = conjugateFR(gloss, s.verb.tense, "3m", s.verb.person === "3f" ? "f" : "m", false, s.verb.neg);
+    const obj = s.object ? " " + renderNP_FR(s.object) : "";
+    return `Qui ${c.verb}${obj}?`;
+  }
+  if (s.qword === "ⲟⲩⲏⲣ") return `${qw} ${lowerFirstBody(body, s)}?`;
+  const b = lowerFirstBody(body, s);
+  const vowel = /^[aeiouéèêëàâîïôöùûü]/i.test(b);
+  if (s.qword === "ⲁϣ" || s.qword === "ⲟⲩ") return vowel ? `Qu'est-ce qu'${b}?` : `Qu'est-ce que ${b}?`;
+  return vowel ? `${qw} est-ce qu'${b}?` : `${qw} est-ce que ${b}?`;
+}
+function renderWhQuestion_DE(s, qw, body) {
+  const gloss = reverseVerbGloss(s.verb, "de");
+  if (gloss?.refl || s.qword === "ⲟⲩⲏⲣ") return `${qw} ${lowerFirstBody(body, s)}?`;
+  const gender = s.subjectNP ? (DE_GENDER[s.subjectNP.head.en] ?? "m") : (s.verb.person === "3f" ? "f" : "m");
+  const c = conjugateDE(gloss, s.verb.tense, s.qword === "ⲛⲓⲙ" ? "3m" : s.verb.person, gender, !!s.subjectNP?.plural, false);
+  const parts = c.verb.split(" ");
+  const v1 = parts[0];
+  const v2 = parts.length > 1 ? parts.slice(1).join(" ") : (c.sep ?? "");
+  const obj = s.object ? " " + renderNP_DE(s.object, "acc") : "";
+  const preps = (s.preps ?? []).map((pp) => ` ${pp.prep.de} ${renderNP_DE(pp.np, pp.prep.deCase ?? "dat")}`).join("");
+  const nicht = s.verb.neg ? " nicht" : "";
+  if (s.qword === "ⲛⲓⲙ") return `Wer ${v1}${obj}${preps}${nicht}${v2 ? " " + v2 : ""}?`;
+  const subj = s.subjectNP ? renderNP_DE(s.subjectNP) : DE_SUBJ[s.verb.person];
+  const subjLower = s.subjectNP?.head.proper ? subj : subj[0].toLowerCase() + subj.slice(1);
+  return `${qw} ${v1} ${subjLower}${obj}${preps}${nicht}${v2 ? " " + v2 : ""}?`;
+}
+function renderSentence(s, lang) {
+  if (!s) return "";
+  if (s.kind === "list") {
+    const join = { ar: " و", en: " and", fr: " et", de: " und" }[lang];
+    return s.parts.map((p) => renderSentence(p, lang)).filter(Boolean).join(join);
+  }
+  if (s.kind === "word") {
+    if (!s.np) return "";
+    return renderNP(s.np, lang);
+  }
+  if (s.kind === "nominal-q") {
+    const np = renderNP(s.np, lang);
+    const pl = !!s.np.plural;
+    const qw = lang === "ar" ? (s.qword === "ⲉⲑⲃⲉ ⲟⲩ" ? "لماذا" : QWORD_GLOSS[s.qword].ar)
+      : s.qword === "ⲉⲑⲃⲉ ⲟⲩ" ? { en: "Why", fr: "Pourquoi", de: "Warum" }[lang]
+      : QWORD_GLOSS[s.qword][lang];
+    if (lang === "ar") return `${qw} ${np}؟`;
+    if (lang === "en") return `${qw} ${pl ? "are" : "is"} ${np}?`;
+    if (lang === "fr") return `${qw} ${pl ? "sont" : "est"} ${np}?`;
+    return `${qw} ${pl ? "sind" : "ist"} ${np}?`;
+  }
+  if (s.kind === "question-dem") {
+    const d = s.dem;
+    if (lang === "ar") return `من ${renderDemPron({ demPron: d }, "ar")}؟`;
+    if (lang === "en") return `Who is ${renderDemPron({ demPron: d }, "en")}?`;
+    if (lang === "fr") return d.word === "this" ? "Qui est-ce?" : "Qui est-ce là?";
+    if (d.gender === "pl") return d.word === "this" ? "Wer sind diese?" : "Wer sind die da?";
+    return d.word === "this" ? "Wer ist das?" : "Wer ist der da?";
+  }
+  if (s.kind === "exists") {
+    if (!s.np) return "";
+    if (lang === "ar") return `${s.neg ? "لا يوجد " : "يوجد "}${renderNP_AR(s.np, s.neg)}`;
+    if (lang === "en") return s.np.plural ? `There are ${s.neg ? "no " : ""}${renderNP_EN(s.np, s.neg)}` : `There is ${s.neg ? "no " : ""}${renderNP_EN(s.np, s.neg)}`;
+    if (lang === "fr") {
+      if (!s.neg) return `Il y a ${renderNP_FR(s.np)}`;
+      const bare = renderNP_FR(s.np, true);
+      return `Il n'y a pas ${/^[aeiouéèêàh]/.test(bare) ? "d'" : "de "}${bare}`;
+    }
+    if (!s.neg) return `Es gibt ${renderNP_DE(s.np, "acc")}`;
+    const g = deGenderOf(s.np.head.de, s.np.head.gender);
+    const kein = s.np.plural ? "keine" : g === "m" ? "keinen" : g === "f" ? "keine" : "kein";
+    return `Es gibt ${kein} ${renderNP_DE(s.np, "acc", true)}`;
+  }
+  if (s.kind === "have") {
+    if (!s.np) return "";
+    if (lang === "ar") return s.neg ? `ليس عندي ${renderNP_AR(s.np)}` : `عندي ${renderNP_AR(s.np)}`;
+    if (lang === "en") return `${EN_SUBJ[s.person]} ${s.neg ? "don't have" : "have"} ${renderNP_EN(s.np)}`;
+    if (lang === "fr") {
+      const have = { "1s": "ai", "2m": "as", "2f": "as", "3m": "a", "3f": "a", "1p": "avons", "2p": "avez", "3p": "ont" }[s.person];
+      const haveNeg = { "1s": "n'ai pas", "2m": "n'as pas", "2f": "n'as pas", "3m": "n'a pas", "3f": "n'a pas", "1p": "n'avons pas", "2p": "n'avez pas", "3p": "n'ont pas" }[s.person];
+      if (s.person === "1s") return s.neg ? `je ${haveNeg} ${renderNP_FR(s.np)}` : `j'ai ${renderNP_FR(s.np)}`;
+      return `${FR_SUBJ[s.person]} ${s.neg ? haveNeg : have} ${renderNP_FR(s.np)}`;
+    }
+    return `${DE_SUBJ[s.person]} ${s.neg ? "habe kein" : "habe"} ${renderNP_DE(s.np, "acc")}`;
+  }
+  if (s.kind === "nominal") {
+    const subj = s.subjectNP ? renderNP(s.subjectNP, lang)
+      : lang === "ar" ? AR_SUBJ[s.subjectPerson] : lang === "en" ? EN_SUBJ[s.subjectPerson]
+      : lang === "fr" ? FR_SUBJ[s.subjectPerson] : DE_SUBJ[s.subjectPerson];
+    const pred = s.predAdj
+      ? lang === "ar" ? s.predAdj.ar : lang === "en" ? lowerForeign(s.predAdj.en || s.predAdj.ar)
+      : lang === "fr" ? lowerForeign(s.predAdj.fr || s.predAdj.ar) : s.predAdj.de || s.predAdj.ar
+      : renderNP(s.pred, lang);
+    if (lang === "ar") return s.neg ? `${subj} ليس ${pred}` : `${subj} ${pred}`;
+    // Copula agrees with the subject (You ARE Peter, not "You is Peter").
+    const person = s.subjectPerson ?? (s.subjectNP ? (s.subjectNP.plural ? "3p" : s.subjectNP.gender === "f" ? "3f" : "3m") : "3m");
+    if (lang === "en") {
+      const cop = person === "1s" ? "am" : person === "3m" || person === "3f" ? "is" : "are";
+      return `${subj} ${cop}${s.neg ? " not" : ""} ${pred}`;
+    }
+    if (lang === "fr") {
+      const cop = { "1s": "suis", "2m": "es", "2f": "es", "3m": "est", "3f": "est", "1p": "sommes", "2p": "êtes", "3p": "sont" }[person];
+      if (s.neg) {
+        const neCop = /^[aeiouéèê]/.test(cop) ? `n'${cop}` : `ne ${cop}`;
+        return `${subj} ${neCop} pas ${pred}`;
+      }
+      return `${subj} ${cop} ${pred}`;
+    }
+    const cop = { "1s": "bin", "2m": "bist", "2f": "bist", "3m": "ist", "3f": "ist", "1p": "sind", "2p": "seid", "3p": "sind" }[person];
+    return `${subj} ${cop}${s.neg ? " nicht" : ""} ${pred}`;
+  }
+  // verbal
+  let body;
+  if (lang === "ar") body = renderVerbal_AR(s);
+  else if (lang === "en") body = renderVerbal_EN(s);
+  else if (lang === "fr") body = renderVerbal_FR(s);
+  else body = renderVerbal_DE(s);
+  if (s.qword) {
+    if (lang === "ar") {
+      let b = body;
+      if (s.qword === "ⲛⲓⲙ" && !s.subjectNP) b = b.replace(/^(أنا|أنتَ|أنتِ|هو|هي|نحن|أنتم|أنتن|هم|هن) /, "");
+      return `${s.qword === "ⲉⲑⲃⲉ ⲟⲩ" ? "لماذا" : QWORD_GLOSS[s.qword].ar} ${b}؟`;
+    }
+    const qw = s.qword === "ⲉⲑⲃⲉ ⲟⲩ" ? { en: "Why", fr: "Pourquoi", de: "Warum" }[lang] : QWORD_GLOSS[s.qword][lang];
+    if (s.qword === "ⲙⲏ") {
+      // Yes/no question: invert (EN). FR/DE use intonation ("J'aime Dieu ?").
+      if (lang === "en") {
+        const aux = s.verb.tense === "past" ? "Did" : s.verb.tense === "future" ? "Will" : (s.verb.person === "3m" || s.verb.person === "3f") ? "Does" : "Do";
+        const gloss = reverseVerbGloss(s.verb, "en");
+        const subj = s.subjectNP ? renderNP_EN(s.subjectNP) : EN_SUBJ[s.verb.person];
+        const subjLower = subj === "I" ? "I" : subj[0].toLowerCase() + subj.slice(1);
+        return `${aux} ${subjLower} ${gloss?.inf ?? ""}${s.object ? " " + renderNP_EN(s.object) : ""}?`;
+      }
+      return `${body}?`;
+    }
+    if (lang === "en") return renderWhQuestion_EN(s, qw, body);
+    if (lang === "fr") return renderWhQuestion_FR(s, qw, body);
+    return renderWhQuestion_DE(s, qw, body);
+  }
+  return body;
+}
+function capitalizeSentence(text, lang) {
+  if (lang === "ar" || !text) return text;
+  return text[0].toUpperCase() + text.slice(1);
+}
+// Coptic → Arabic / English / French / German. Returns {ok, text, unknown}.
+export function translateReverse(input, target = "ar") {
+  const lang = ["ar", "en", "fr", "de"].includes(target) ? target : "ar";
+  const parsed = parseReverseSentence(input);
+  // Sentence-case only for full sentences; a bare word/phrase keeps its gloss
+  // casing (book / livre / Buch — German nouns stay capitalised on their own).
+  const isSentence = (s) => ["verbal", "nominal", "exists", "have"].includes(s?.kind);
+  const needsCap = isSentence(parsed) || (parsed.kind === "list" && isSentence(parsed.parts?.[0]));
+  const text = needsCap ? capitalizeSentence(renderSentence(parsed, lang), lang) : renderSentence(parsed, lang);
+  return { ok: !!text, text, unknown: parsed.unknown ?? [] };
+}
+// Format a reverse translation for display (mirrors formatTranslation).
+export function formatReverseTranslation(input, target = "ar") {
+  const r = translateReverse(input, target);
+  if (!r.ok || !r.text) {
+    const unk = r.unknown?.length ? `\n⚠️ كلمات غير معروفة: ${[...new Set(r.unknown)].join("، ")}` : "";
+    return `لم أفهم الجملة القبطية.${unk}`;
+  }
+  let out = r.text;
+  if (r.unknown.length) out += `\n⚠️ كلمات غير معروفة: ${[...new Set(r.unknown)].join("، ")}`;
+  return out;
+}
+

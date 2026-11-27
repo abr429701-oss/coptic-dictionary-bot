@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { translateSentence, formatTranslation } from "../src/translate.js";
+import { translateSentence, formatTranslation, translateReverse, formatReverseTranslation, setReverseTarget, getReverseTarget } from "../src/translate.js";
 
 function t(input) {
   const r = translateSentence(input);
@@ -418,4 +418,165 @@ test("predicate adjectives are not verbs", () => {
   check("النور حكيم", "ⲡⲓⲟⲩⲱⲓⲛⲓ ⲟⲩⲥⲁⲃⲉ ⲡⲉ");
   check("النور كبير", "ⲡⲓⲟⲩⲱⲓⲛⲓ ⲟⲩⲛⲓϣϯ ⲡⲉ");
   check("هو جميل", "ⲛ̀ⲑⲟϥ ⲟⲩⲥⲁⲓⲉ̀ ⲡⲉ");
+});
+
+// ---------- Reverse translation (Coptic → Arabic / English / French / German) ----------
+function rt(input, lang = "ar") {
+  const r = translateReverse(input, lang);
+  assert.equal(r.ok, true, `${input} (${lang}) → ${JSON.stringify(r)}`);
+  assert.deepEqual(r.unknown, [], `${input} (${lang}) should have no unknown words`);
+  return r.text;
+}
+
+test("reverse: word level", () => {
+  assert.equal(rt("ϫⲱⲱⲙ", "ar"), "كتاب");
+  assert.equal(rt("ϫⲱⲱⲙ", "en"), "book");
+  assert.equal(rt("ϫⲱⲱⲙ", "fr"), "livre");
+  assert.equal(rt("ϫⲱⲱⲙ", "de"), "Buch");
+  assert.equal(rt("ⲉⲕⲕⲗⲏⲥⲓⲁ", "ar"), "كنيسة");
+  assert.equal(rt("ⲉⲕⲕⲗⲏⲥⲓⲁ", "en"), "church");
+  assert.equal(rt("ⲉⲕⲕⲗⲏⲥⲓⲁ", "fr"), "église");
+  assert.equal(rt("ⲉⲕⲕⲗⲏⲥⲓⲁ", "de"), "Kirche");
+  assert.equal(rt("ⲙⲱⲟⲩ", "ar"), "ماء");
+  assert.equal(rt("ⲙⲱⲟⲩ", "en"), "water");
+  assert.equal(rt("ⲙⲱⲟⲩ", "fr"), "eau");
+  assert.equal(rt("ⲙⲱⲟⲩ", "de"), "Wasser");
+  // articles and plurals derive from the singular
+  assert.equal(rt("ⲡⲓϫⲱⲱⲙ", "ar"), "الكتاب");
+  assert.equal(rt("ⲡⲓϫⲱⲱⲙ", "en"), "the book");
+  assert.equal(rt("ⲡⲓϫⲱⲱⲙ", "fr"), "le livre");
+  assert.equal(rt("ⲡⲓϫⲱⲱⲙ", "de"), "das Buch");
+  assert.equal(rt("ⲛⲓϫⲱⲱⲙ", "ar"), "الكتب");
+  assert.equal(rt("ⲛⲓϫⲱⲱⲙ", "en"), "the books");
+  assert.equal(rt("ⲛⲓϫⲱⲱⲙ", "fr"), "les livres");
+  assert.equal(rt("ⲛⲓϫⲱⲱⲙ", "de"), "die Bücher");
+});
+
+test("reverse: sentences to Arabic", () => {
+  assert.equal(rt("Ϯⲙⲉⲓ ⲙ̀ Ⲫ̀ⲛⲟⲩϯ"), "أنا أحب الله");
+  assert.equal(rt("Ϯⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ"), "أنا أكتب الدرس");
+  assert.equal(rt("ⲡⲓⲟⲩⲱⲓⲛⲓ ⲙ̀ⲡⲓⲕⲟⲥⲙⲟⲥ"), "نور العالم");
+  assert.equal(rt("ⲡⲁⲥⲟⲛ ⲟⲩⲟϩ ⲧⲁⲥⲱⲛⲓ"), "أخي وأختي");
+  assert.equal(rt("ⲛⲁϣ̀ⲫⲉⲣⲓ"), "أصدقائي");
+});
+
+test("reverse: same sentences to English, French, German", () => {
+  assert.equal(rt("Ϯⲙⲉⲓ ⲙ̀ Ⲫ̀ⲛⲟⲩϯ", "en"), "I love God");
+  assert.equal(rt("Ϯⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ", "en"), "I write the lesson");
+  assert.equal(rt("ⲡⲓⲟⲩⲱⲓⲛⲓ ⲙ̀ⲡⲓⲕⲟⲥⲙⲟⲥ", "en"), "the light of the world");
+  assert.equal(rt("Ϯⲙⲉⲓ ⲙ̀ Ⲫ̀ⲛⲟⲩϯ", "fr"), "J'aime Dieu");
+  assert.equal(rt("Ϯⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ", "fr"), "J'écris la leçon");
+  assert.equal(rt("ⲡⲓⲟⲩⲱⲓⲛⲓ ⲙ̀ⲡⲓⲕⲟⲥⲙⲟⲥ", "fr"), "la lumière du monde");
+  assert.equal(rt("Ϯⲙⲉⲓ ⲙ̀ Ⲫ̀ⲛⲟⲩϯ", "de"), "Ich liebe Gott");
+  assert.equal(rt("Ϯⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ", "de"), "Ich schreibe die Lektion");
+  assert.equal(rt("ⲡⲓⲟⲩⲱⲓⲛⲓ ⲙ̀ⲡⲓⲕⲟⲥⲙⲟⲥ", "de"), "das Licht der Welt");
+  assert.equal(rt("ⲛⲁϣ̀ⲫⲉⲣⲓ", "en"), "my friends");
+  assert.equal(rt("ⲛⲁϣ̀ⲫⲉⲣⲓ", "fr"), "mes amis");
+  assert.equal(rt("ⲛⲁϣ̀ⲫⲉⲣⲓ", "de"), "meine Freunde");
+});
+
+test("reverse: past and future tenses", () => {
+  assert.equal(rt("ⲁⲓⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ"), "أنا كتبت الدرس");
+  assert.equal(rt("ⲁⲓⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ", "en"), "I wrote the lesson");
+  // the future drops the Arabic subject pronoun (سأكتب الدرس, not أنا سأكتب الدرس)
+  assert.equal(rt("ϯⲛⲁⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ"), "سأكتب الدرس");
+  assert.equal(rt("ϯⲛⲁⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ", "en"), "I will write the lesson");
+  assert.equal(rt("ⲁϥⲥⲱⲧⲉⲙ ⲙ̀ ⲡⲓⲥⲁϫⲓ"), "هو سمع الكلمة");
+  assert.equal(rt("ⲁϥⲥⲱⲧⲉⲙ ⲙ̀ ⲡⲓⲥⲁϫⲓ", "en"), "He heard the word");
+});
+
+test("reverse: persons, negation, noun subjects", () => {
+  assert.equal(rt("ϥ̀ⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ"), "هو يكتب الدرس");
+  assert.equal(rt("ϥ̀ⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ", "en"), "He writes the lesson");
+  assert.equal(rt("ϥ̀ⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ", "fr"), "Il écrit la leçon");
+  assert.equal(rt("ϥ̀ⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ", "de"), "Er schreibt die Lektion");
+  assert.equal(rt("ⲕ̀ⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ"), "أنتَ تكتب الدرس");
+  assert.equal(rt("ⲭ̀ⲙⲉⲓ ⲙ̀ Ⲫ̀ⲛⲟⲩϯ"), "أنتَ تحب الله"); // ⲕ̀ → ⲭ̀ before ⲙ
+  assert.equal(rt("ⲓⲱϣ ⲙ̀ ⲡⲓϫⲱⲱⲙ"), "أنا أقرأ الكتاب"); // Ϯ → ⲓ before a vowel verb
+  assert.equal(rt("Ϯⲥ̀ϧⲁⲓ ⲁⲛ"), "أنا لا أكتب");
+  assert.equal(rt("Ϯⲥ̀ϧⲁⲓ ⲁⲛ", "en"), "I don't write");
+  assert.equal(rt("Ϯⲥ̀ϧⲁⲓ ⲁⲛ", "fr"), "Je n'écris pas");
+  assert.equal(rt("Ϯⲥ̀ϧⲁⲓ ⲁⲛ", "de"), "Ich schreibe nicht");
+  assert.equal(rt("ⲙ̀ⲡⲓⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ"), "أنا لم أكتب الدرس");
+  assert.equal(rt("ⲙ̀ⲡⲓⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ", "en"), "I didn't write the lesson");
+  assert.equal(rt("ⲡⲓⲣⲱⲙⲓ ⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ"), "الرجل يكتب الدرس");
+  assert.equal(rt("ⲡⲓⲣⲱⲙⲓ ⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ", "en"), "The man writes the lesson");
+  assert.equal(rt("ⲁ ⲡⲓⲣⲱⲙⲓ ⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ"), "الرجل كتب الدرس");
+  assert.equal(rt("ⲁ ⲡⲓⲣⲱⲙⲓ ⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ", "en"), "The man wrote the lesson");
+});
+
+test("reverse: nominal, existential, have, prepositions, adjectives", () => {
+  assert.equal(rt("ⲛ̀ⲑⲟⲕ ⲡⲉ Ⲡⲉⲧⲣⲟⲥ"), "أنتَ بطرس");
+  assert.equal(rt("ⲛ̀ⲑⲟⲕ ⲡⲉ Ⲡⲉⲧⲣⲟⲥ", "en"), "You are Peter");
+  assert.equal(rt("ⲛ̀ⲑⲟⲕ ⲡⲉ Ⲡⲉⲧⲣⲟⲥ", "fr"), "Tu es Pierre");
+  assert.equal(rt("ⲛ̀ⲑⲟⲕ ⲡⲉ Ⲡⲉⲧⲣⲟⲥ", "de"), "Du bist Petrus");
+  assert.equal(rt("ⲡⲓⲣⲱⲙⲓ ⲟⲩⲥⲁⲃⲉ ⲡⲉ"), "الرجل حكيم");
+  assert.equal(rt("ⲡⲓⲣⲱⲙⲓ ⲟⲩⲥⲁⲃⲉ ⲡⲉ", "en"), "The man is wise");
+  assert.equal(rt("ⲡⲓⲣⲱⲙⲓ ⲟⲩⲥⲁⲃⲉ ⲡⲉ", "de"), "Der Mann ist weise");
+  assert.equal(rt("ⲟⲩⲟⲛ ⲡⲓϫⲱⲱⲙ"), "يوجد الكتاب");
+  assert.equal(rt("ⲟⲩⲟⲛ ⲡⲓϫⲱⲱⲙ", "en"), "There is the book");
+  assert.equal(rt("ⲙ̀ⲙⲟⲛ ⲡⲓϫⲱⲱⲙ"), "لا يوجد كتاب");
+  assert.equal(rt("ⲙ̀ⲙⲟⲛ ⲡⲓϫⲱⲱⲙ", "en"), "There is no book");
+  assert.equal(rt("ⲟⲩⲛⲧⲏⲓ ⲡⲓϫⲱⲱⲙ"), "عندي الكتاب");
+  assert.equal(rt("ⲟⲩⲛⲧⲏⲓ ⲡⲓϫⲱⲱⲙ", "en"), "I have the book");
+  assert.equal(rt("Ϯⲥ̀ϧⲁⲓ ϧⲉⲛ ⲡⲓⲏⲓ"), "أنا أكتب في البيت");
+  assert.equal(rt("Ϯⲥ̀ϧⲁⲓ ϧⲉⲛ ⲡⲓⲏⲓ", "en"), "I write in the house");
+  assert.equal(rt("ⲡⲓⲣⲱⲙⲓ ⲛ̀ⲥⲁⲃⲉ"), "الرجل حكيم");
+  assert.equal(rt("ⲡⲓⲣⲱⲙⲓ ⲛ̀ⲥⲁⲃⲉ", "en"), "the wise man");
+  assert.equal(rt("ⲡⲓⲣⲱⲙⲓ ⲛ̀ⲥⲁⲃⲉ", "fr"), "l'homme sage");
+  assert.equal(rt("ⲡⲓⲣⲱⲙⲓ ⲛ̀ⲥⲁⲃⲉ", "de"), "der weise Mann");
+  assert.equal(rt("ⲛⲓⲙ ⲫⲁⲓ"), "من هذا؟");
+  assert.equal(rt("ⲛⲓⲙ ⲫⲁⲓ", "en"), "Who is this?");
+  assert.equal(rt("ⲫⲁⲓ ⲡⲉ ⲡⲓⲣⲱⲙⲓ", "en"), "This is the man");
+  assert.equal(rt("ⲁϣ ⲉⲧⲉⲥ̀ⲥ̀ϧⲁⲓ"), "ماذا هي تكتب؟");
+  assert.equal(rt("ⲁϣ ⲉⲧⲉⲥ̀ⲥ̀ϧⲁⲓ", "en"), "What does she write?");
+  assert.equal(rt("ⲁϣ ⲉⲧⲉⲥ̀ⲥ̀ϧⲁⲓ", "fr"), "Qu'est-ce qu'elle écrit?");
+  assert.equal(rt("ⲁϣ ⲉⲧⲉⲥ̀ⲥ̀ϧⲁⲓ", "de"), "Was schreibt sie?");
+  assert.equal(rt("ⲛⲓⲙ ⲉⲧⲉϥⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ"), "من يكتب الدرس؟");
+  assert.equal(rt("ⲛⲓⲙ ⲉⲧⲉϥⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ", "en"), "Who writes the lesson?");
+  assert.equal(rt("ⲛⲓⲙ ⲉⲧⲉϥⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ", "fr"), "Qui écrit la leçon?");
+  assert.equal(rt("ⲛⲓⲙ ⲉⲧⲉϥⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ", "de"), "Wer schreibt die Lektion?");
+  assert.equal(rt("ⲑⲱⲛ ⲉⲧⲉϥⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ", "en"), "Where does he write the lesson?");
+  assert.equal(rt("ⲑⲱⲛ ⲉⲧⲉϥⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ", "fr"), "Où est-ce qu'il écrit la leçon?");
+  assert.equal(rt("ⲑⲱⲛ ⲉⲧⲉϥⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ", "de"), "Wo schreibt er die Lektion?");
+  assert.equal(rt("ⲑⲱⲛ ⲡⲉ Ⲡⲉⲧⲣⲟⲥ"), "أين بطرس؟");
+  assert.equal(rt("ⲑⲱⲛ ⲡⲉ Ⲡⲉⲧⲣⲟⲥ", "en"), "Where is Peter?");
+  assert.equal(rt("ⲑⲱⲛ ⲡⲉ Ⲡⲉⲧⲣⲟⲥ", "fr"), "Où est Pierre?");
+  assert.equal(rt("ⲑⲱⲛ ⲡⲉ Ⲡⲉⲧⲣⲟⲥ", "de"), "Wo ist Petrus?");
+});
+
+test("reverse: unknown words are reported, never guessed", () => {
+  const r = translateReverse("Ϯⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲃⲗⲁϩⲃⲗⲁϩ", "ar");
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.unknown, ["ⲡⲓⲃⲗⲁϩⲃⲗⲁϩ"]);
+  assert.match(formatReverseTranslation("Ϯⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲃⲗⲁϩⲃⲗⲁϩ", "ar"), /⚠️ كلمات غير معروفة: ⲡⲓⲃⲗⲁϩⲃⲗⲁϩ/);
+  const noSense = translateReverse("ⲃⲗⲁϩⲃⲗⲁϩ", "ar");
+  assert.equal(noSense.ok, false);
+});
+
+test("reverse: session target switching", () => {
+  assert.equal(getReverseTarget(), "ar");
+  assert.equal(setReverseTarget("en"), "en");
+  assert.equal(getReverseTarget(), "en");
+  assert.equal(setReverseTarget("xx"), "en"); // invalid target keeps the old one
+  assert.equal(setReverseTarget("ar"), "ar");
+});
+
+test("reverse: formatTranslation routes Coptic input to the reverse engine", () => {
+  assert.equal(formatTranslation("Ϯⲙⲉⲓ ⲙ̀ Ⲫ̀ⲛⲟⲩϯ"), "أنا أحب الله");
+  setReverseTarget("en");
+  assert.equal(formatTranslation("Ϯⲙⲉⲓ ⲙ̀ Ⲫ̀ⲛⲟⲩϯ"), "I love God");
+  setReverseTarget("ar");
+  // Arabic and Latin input keep the existing forward engine byte-identical
+  assert.equal(formatTranslation("أنا أكتب الدرس"), "Ϯⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ");
+  assert.equal(formatTranslation("I write the lesson"), "Ϯⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ");
+});
+
+test("reverse: round-trip with the forward engine", () => {
+  const fwd = (ar) => translateSentence(ar).coptic;
+  assert.equal(rt(fwd("أنا أكتب الدرس")), "أنا أكتب الدرس");
+  assert.equal(rt(fwd("سأكتب الدرس")), "سأكتب الدرس");
+  assert.equal(rt(fwd("أنا أحب الله")), "أنا أحب الله");
+  assert.equal(rt(fwd("هو يكتب الدرس"), "en"), "He writes the lesson");
+  assert.equal(rt(fwd("الرجل يكتب الدرس"), "en"), "The man writes the lesson");
 });
