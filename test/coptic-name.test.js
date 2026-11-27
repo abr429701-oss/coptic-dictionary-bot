@@ -97,6 +97,8 @@ test("coptic-name: curated names are spelled correctly (Arabic + English)", () =
   assert.equal(transliterateNameToCoptic("كرستين"), "Ⲭⲣⲓⲥⲧⲓⲛⲏ");
   assert.equal(transliterateNameToCoptic("عبدالله"), "ⲀⲃⲇⲀⲗⲗⲁϩ");
   assert.equal(transliterateNameToCoptic("عبدالرحمن"), "ⲀⲃⲇⲀⲗⲣⲁϩⲙⲁⲛ");
+  assert.equal(transliterateNameToCoptic("عماد"), "Ⲉⲙⲁⲇ");
+  assert.equal(transliterateNameToCoptic("باسم"), "ⲃⲁⲥⲓⲙ");
   assert.equal(transliterateNameToCoptic("جورج"), "Ⲅⲉⲱⲣⲅⲓⲟⲥ");
   assert.equal(transliterateNameToCoptic("George"), "Ⲅⲉⲱⲣⲅⲓⲟⲥ");
   assert.equal(transliterateNameToCoptic("فاطمة"), "Ⲫⲁϯⲙⲁ");
