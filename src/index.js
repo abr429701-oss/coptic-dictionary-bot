@@ -868,10 +868,11 @@ async function sendLearnLesson(env, chatId, userId, lessonId, reactMessageId = u
   if (stepRow.length) navRows.push(stepRow);
   navRows.push([{ text: "🔙 رجوع" }, { text: "🏠 الرئيسية" }]);
   // Oral attendance (إثبات حضور, 2026-11-28): lessons with a ورقة شفوي
-  // get a "🎙 سجّل الشفوي" row under the nav, so the student can record
-  // the 3 words from the oral paper. Lessons without an oral item get no
+  // get a "🎙 سجّل الشفوي" row under the nav — ADMIN ONLY while the user
+  // trials the feature (2026-11-28): it must not appear to any student
+  // until he opens it to them. Lessons without an oral item get no
   // button at all (L1 intro lessons + all of L2).
-  const hasOral = lessonHasOral(lesson);
+  const hasOral = lessonHasOral(lesson) && isAdmin(env, userId);
   if (hasOral) navRows.push([{ text: ORAL_RECORD_BUTTON }]);
   const smallNavKeyboard = { keyboard: navRows, resize_keyboard: true };
   // The level menu keyboard (lesson names, cert, search, back, home)
@@ -8156,6 +8157,9 @@ async function handleUpdate(update, env, ctx) {
     // ورقة شفوي starts the recording wait for that lesson (lastLessonId).
     // Like the other flows it ends any cert/get-code/name/translate wait.
     if (text === ORAL_RECORD_BUTTON) {
+      // Admin-only trial (2026-11-28): the button is hidden from
+      // students, and a typed copy of its label from anyone else is ignored.
+      if (!isAdmin(env, userId)) return;
       const oralUser = await getUser(env, userId);
       const lesson = findOralLesson(oralUser?.lastLessonId);
       if (!lesson) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: ORAL_NO_LESSON_TEXT }); return; }
@@ -8849,8 +8853,8 @@ async function handleUpdate(update, env, ctx) {
     if (text === "/khmi") { await handleKhmiStatus(env, message.chat.id); return; }
     // Oral attendance (إثبات حضور) — admin only, hidden: the full list of
     // which student recorded which lesson. Not in /start, /help or the
-    // side menu; a student typing /attendance gets only their own list
-    // (handled in the general section below).
+    // side menu; during the admin-only trial (2026-11-28) a student
+    // typing /attendance gets no reply at all (general section below).
     if (text === "/attendance") {
       const entries = await listOralAttendance((payload) => storeCall(env, payload));
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: oralAdminListText(entries) });
@@ -9121,10 +9125,10 @@ async function handleUpdate(update, env, ctx) {
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: lines.join("\n").slice(0, 3800), parse_mode: "HTML" });
     return;
   }
-  // Oral attendance — a student sees only their own attended lessons.
+  // Oral attendance — admin-only trial (2026-11-28): a student typing
+  // /attendance gets no reply at all. (The student's own list returns
+  // when the user opens the feature to students.)
   if (text === "/attendance") {
-    const record = await getOralAttendance((payload) => storeCall(env, payload), userId);
-    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: oralOwnListText(record) });
     return;
   }
   if (text === "/mystats") { await sendMyStats(env, message.chat.id, userId, displayName(message.from)); return; }
@@ -9160,7 +9164,13 @@ async function handleUpdate(update, env, ctx) {
   // recording is never kept or forwarded anywhere).
   if (message.voice || message.audio) {
     const oralUser = await getUser(env, userId);
-    if (oralUser?.oralAwaiting) {
+    // Admin-only trial (2026-11-28): a stale oral wait left from before
+    // the gating must not mark attendance for a student — drop it and
+    // fall through to the normal voice handling below.
+    if (oralUser?.oralAwaiting && !isAdmin(env, userId)) {
+      await saveUser(env, userId, { ...oralUser, oralAwaiting: undefined });
+    }
+    if (oralUser?.oralAwaiting && isAdmin(env, userId)) {
       const lesson = findOralLesson(oralUser.oralAwaiting);
       if (!lesson || !lessonHasOral(lesson)) {
         await saveUser(env, userId, { ...oralUser, oralAwaiting: undefined });

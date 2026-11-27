@@ -190,87 +190,104 @@ test("own/admin list texts: student sees their lessons, admin sees everyone", as
 test("record button → prompt → voice → accepted, then duplicate is refused", async () => {
   const kv = fakeKv();
   const kvEnv = { ...env, USERS: kv };
-  seedStudent(kv);
+  seedAdmin(kv);
 
-  const tapCalls = await say(kvEnv, STUDENT, ORAL_RECORD_BUTTON);
+  const tapCalls = await say(kvEnv, ADMIN, ORAL_RECORD_BUTTON);
   assert.match(sent(tapCalls).map((p) => p.text).join("\n"), /3 كلمات/);
-  const waiting = kv.store.get(`user:${STUDENT}`);
+  const waiting = kv.store.get(`user:${ADMIN}`);
   assert.equal(waiting.oralAwaiting, "m_learn_l1_03");
 
-  const voiceCalls = await sendVoice(kvEnv, STUDENT, { file_id: "voice1", duration: 5, file_size: 5000 });
+  const voiceCalls = await sendVoice(kvEnv, ADMIN, { file_id: "voice1", duration: 5, file_size: 5000 });
   assert.match(sent(voiceCalls).map((p) => p.text).join("\n"), /تم تسجيل حضورك/);
-  const after = kv.store.get(`user:${STUDENT}`);
+  const after = kv.store.get(`user:${ADMIN}`);
   assert.equal(after.oralAwaiting, undefined);
-  const record = kv.store.get(`oral:att:${STUDENT}`);
+  const record = kv.store.get(`oral:att:${ADMIN}`);
   assert.equal(record.lessons["m_learn_l1_03"] !== undefined, true);
   // The recording itself is never stored: no file_id anywhere in the record.
   assert.equal(JSON.stringify(record).includes("voice1"), false);
 
-  const dupCalls = await say(kvEnv, STUDENT, ORAL_RECORD_BUTTON);
+  const dupCalls = await say(kvEnv, ADMIN, ORAL_RECORD_BUTTON);
   assert.match(sent(dupCalls).map((p) => p.text).join("\n"), /انت سجلت الدرس ده خلاص/);
-  assert.equal(Object.keys(kv.store.get(`oral:att:${STUDENT}`).lessons).length, 1);
+  assert.equal(Object.keys(kv.store.get(`oral:att:${ADMIN}`).lessons).length, 1);
 });
 
 test("too-short voice is rejected and the wait stays open for a retry", async () => {
   const kv = fakeKv();
   const kvEnv = { ...env, USERS: kv };
-  seedStudent(kv);
-  await say(kvEnv, STUDENT, ORAL_RECORD_BUTTON);
+  seedAdmin(kv);
+  await say(kvEnv, ADMIN, ORAL_RECORD_BUTTON);
 
-  const shortCalls = await sendVoice(kvEnv, STUDENT, { file_id: "voice2", duration: 1, file_size: 3000 });
+  const shortCalls = await sendVoice(kvEnv, ADMIN, { file_id: "voice2", duration: 1, file_size: 3000 });
   assert.match(sent(shortCalls).map((p) => p.text).join("\n"), /قصير/);
-  assert.equal(kv.store.get(`user:${STUDENT}`).oralAwaiting, "m_learn_l1_03");
-  assert.equal(kv.store.get(`oral:att:${STUDENT}`), undefined);
+  assert.equal(kv.store.get(`user:${ADMIN}`).oralAwaiting, "m_learn_l1_03");
+  assert.equal(kv.store.get(`oral:att:${ADMIN}`), undefined);
 
-  const goodCalls = await sendVoice(kvEnv, STUDENT, { file_id: "voice3", duration: 4, file_size: 4000 });
+  const goodCalls = await sendVoice(kvEnv, ADMIN, { file_id: "voice3", duration: 4, file_size: 4000 });
   assert.match(sent(goodCalls).map((p) => p.text).join("\n"), /تم تسجيل حضورك/);
 });
 
 test("record button on a lesson without an oral paper answers plainly", async () => {
   const kv = fakeKv();
   const kvEnv = { ...env, USERS: kv };
-  seedStudent(kv, { lastLessonId: "m_learn_l1_02" });
-  const calls = await say(kvEnv, STUDENT, ORAL_RECORD_BUTTON);
+  seedAdmin(kv, { lastLessonId: "m_learn_l1_02" });
+  const calls = await say(kvEnv, ADMIN, ORAL_RECORD_BUTTON);
   assert.match(sent(calls).map((p) => p.text).join("\n"), /مفيهوش ورقة شفوي/);
-  assert.equal(kv.store.get(`user:${STUDENT}`).oralAwaiting, undefined);
+  assert.equal(kv.store.get(`user:${ADMIN}`).oralAwaiting, undefined);
 });
 
 test("/cancel clears the oral wait", async () => {
   const kv = fakeKv();
   const kvEnv = { ...env, USERS: kv };
-  seedStudent(kv);
-  await say(kvEnv, STUDENT, ORAL_RECORD_BUTTON);
-  assert.equal(kv.store.get(`user:${STUDENT}`).oralAwaiting, "m_learn_l1_03");
-  const calls = await say(kvEnv, STUDENT, "/cancel");
+  seedAdmin(kv);
+  await say(kvEnv, ADMIN, ORAL_RECORD_BUTTON);
+  assert.equal(kv.store.get(`user:${ADMIN}`).oralAwaiting, "m_learn_l1_03");
+  const calls = await say(kvEnv, ADMIN, "/cancel");
   assert.match(sent(calls).map((p) => p.text).join("\n"), /تم إلغاء تسجيل الشفوي/);
-  assert.equal(kv.store.get(`user:${STUDENT}`).oralAwaiting, undefined);
+  assert.equal(kv.store.get(`user:${ADMIN}`).oralAwaiting, undefined);
 });
 
-test("/attendance: student sees only their own list, admin sees everyone", async () => {
+test("/attendance: admin sees everyone", async () => {
   const kv = fakeKv();
   const kvEnv = { ...env, USERS: kv };
-  seedStudent(kv);
-  await say(kvEnv, STUDENT, ORAL_RECORD_BUTTON);
-  await sendVoice(kvEnv, STUDENT, { file_id: "voice4", duration: 6, file_size: 6000 });
-
-  const mineCalls = await say(kvEnv, STUDENT, "/attendance");
-  const mine = sent(mineCalls).map((p) => p.text).join("\n");
-  assert.match(mine, /1 من 15/);
-  assert.match(mine, /الدرس الاول/);
+  seedAdmin(kv);
+  await say(kvEnv, ADMIN, ORAL_RECORD_BUTTON);
+  await sendVoice(kvEnv, ADMIN, { file_id: "voice4", duration: 6, file_size: 6000 });
 
   const adminCalls = await say(kvEnv, ADMIN, "/attendance");
   const adminText = sent(adminCalls).map((p) => p.text).join("\n");
-  assert.match(adminText, /Test Student/);
+  assert.match(adminText, /Admin Test/);
   assert.match(adminText, /1 درس/);
   assert.match(adminText, /الدرس الاول/);
 });
 
-test("/attendance for a student with no recordings says so", async () => {
+// --- admin-only trial (2026-11-28): the feature must not appear to any
+// student until the user opens it to them -------------------------------
+
+test("student tapping the record button gets no reply and no wait is set", async () => {
+  const kv = fakeKv();
+  const kvEnv = { ...env, USERS: kv };
+  seedStudent(kv);
+  const calls = await say(kvEnv, STUDENT, ORAL_RECORD_BUTTON);
+  assert.equal(sent(calls).length, 0);
+  assert.equal(kv.store.get(`user:${STUDENT}`).oralAwaiting, undefined);
+});
+
+test("student typing /attendance gets no reply", async () => {
   const kv = fakeKv();
   const kvEnv = { ...env, USERS: kv };
   seedStudent(kv);
   const calls = await say(kvEnv, STUDENT, "/attendance");
-  assert.match(sent(calls).map((p) => p.text).join("\n"), /لسه ما سجلتش/);
+  assert.equal(sent(calls).length, 0);
+});
+
+test("a stale oral wait left before the gating does not mark attendance for a student", async () => {
+  const kv = fakeKv();
+  const kvEnv = { ...env, USERS: kv };
+  kv.store.set(`user:${STUDENT}`, { name: "Test Student", registeredAt: "2026-11-28T00:00:00.000Z", lastLessonId: "m_learn_l1_03", oralAwaiting: "m_learn_l1_03" });
+  const calls = await sendVoice(kvEnv, STUDENT, { file_id: "voice-stale", duration: 5, file_size: 5000 });
+  assert.doesNotMatch(sent(calls).map((p) => p.text).join("\n"), /تم تسجيل حضورك/);
+  assert.equal(kv.store.get(`user:${STUDENT}`).oralAwaiting, undefined);
+  assert.equal(kv.store.get(`oral:att:${STUDENT}`), undefined);
 });
 
 // --- oral vs dictionary-word recording: the two voice flows must never
