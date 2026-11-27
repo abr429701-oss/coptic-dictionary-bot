@@ -140,3 +140,34 @@ test("audit-rule regressions (R3/R7/R9/R10/R13/R14/R15/R16/R18/R23/R28/G1)", () 
   assert.equal(t("نحن كتبنا الدرس"), "ⲁⲛⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ");
   assert.equal(t("هي امرأة حكيمة"), "ⲛ̀ⲑⲟⲥ ⲟⲩⲥϩⲓⲙⲓ ⲛ̀ⲥⲁⲃⲏ ⲧⲉ");
 });
+
+test("unknown-word fixes: wider index, plurals, و, genitive", () => {
+  const check = (input, expected) => {
+    const r = translateSentence(input);
+    assert.equal(r.ok, true, `${input} → ${r.error ?? JSON.stringify(r)}`);
+    assert.equal(r.coptic, expected);
+    assert.deepEqual(r.unknown, [], `${input} should have no unknown words`);
+  };
+  check("صديق", "ⲟⲩϣ̀ⲫⲉⲣ");
+  check("الصديقين", "ⲛⲓϣ̀ⲫⲉⲣⲓ");
+  check("الصديقون", "ⲛⲓϣ̀ⲫⲉⲣⲓ");
+  check("صديقي", "ⲡⲁϣ̀ⲫⲉⲣ");
+  check("تهليل الصديقين", "ⲡⲓⲑⲉⲗⲏⲗ ⲛ̀ⲛⲓϣ̀ⲫⲉⲣⲓ");
+  check("نور العالم", "ⲡⲓⲟⲩⲱⲓⲛⲓ ⲙ̀ⲡⲓⲕⲟⲥⲙⲟⲥ");
+  check("العالم", "ⲡⲓⲕⲟⲥⲙⲟⲥ");
+  check("أخي وأختي", "ⲡⲁⲥⲟⲛ ⲟⲩⲟϩ ⲧⲁⲥⲱⲛⲓ");
+  check("أخي و أختي", "ⲡⲁⲥⲟⲛ ⲟⲩⲟϩ ⲧⲁⲥⲱⲛⲓ");
+  // plurals of other stems (article-only plural, book 1 §5)
+  check("المعلمون", "ⲛⲓⲣⲉϥϯⲥ̀ⲃⲱ");
+  check("المؤمنون", "ⲛⲓⲡⲓⲥⲧⲓⲕⲟⲥ");
+  check("الكلمات", "ⲛⲓⲥⲁϫⲓ");
+  // genitive: first noun takes the definite article, link assimilates to ⲙ̀ before labials
+  check("كتاب المعلم", "ⲡⲓϫⲱⲱⲙ ⲙ̀ⲡⲓⲣⲉϥϯⲥ̀ⲃⲱ");
+  // NOTE: "نور العالم" is NOT asserted here — the genitive structure is right but عالم
+  // currently resolves to the astronomer (ⲁⲥⲧⲣⲟⲛⲟⲙⲟⲥ) instead of the world (ⲕⲟⲥⲙⲟⲥ);
+  // that sense disambiguation is a separate issue, not part of the unknown-word fix.
+  // names ending in plural suffixes must NOT be stripped (stay unknown, never wrong)
+  assert.deepEqual(translateSentence("شعبان").unknown, ["شعبان"]);
+  assert.deepEqual(translateSentence("الرحمن").unknown, ["الرحمن"]);
+  assert.deepEqual(translateSentence("فرحان").unknown, ["فرحان"]);
+});

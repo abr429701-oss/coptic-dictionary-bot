@@ -266,6 +266,8 @@ export const CURATED_NOUNS = normalizeKeys({
   "اولاد": { coptic: "ⲁⲗⲱⲟⲩⲓ", gender: "pl" },
   "ايام": { coptic: "ⲉ̀ϩⲟⲟⲩ", gender: "pl" },
   "كتب": { coptic: "ϫⲱⲱⲙ", gender: "pl" },
+  "صديق": { coptic: "ϣ̀ⲫⲉⲣ", gender: "m", plural: "ϣ̀ⲫⲉⲣⲓ" },
+  "عالم": { coptic: "ⲕⲟⲥⲙⲟⲥ", gender: "m" }, // world (not astronomer/scholar)
 });
 
 // ---------- Curated adjectives ----------
@@ -281,6 +283,19 @@ export const CURATED_ADJ = normalizeKeys({
   "ميت": { m: "ⲙⲟⲩⲧ", f: "ⲙⲟⲩⲧ" }, "طاهر": { m: "ⲧⲟⲩⲃⲟ", f: "ⲧⲟⲩⲃⲟ" },
   "صادق": { m: "ⲙⲉⲑⲙⲏⲓ", f: "ⲙⲉⲑⲙⲏⲓ" },
 });
+
+
+// Function words never enter the reverse index and never resolve as nouns/verbs (R7/R23 guards).
+const FUNCTION_WORDS = new Set(["لا", "لم", "لن", "ما", "في", "الي", "الى", "من", "مع", "علي", "على", "عن", "ان", "او", "ثم", "و", "هذا", "هذه", "ذلك", "تلك", "هؤلاء", "كل", "بعض", "غير", "بين", "بعد", "قبل", "حتي", "حتى", "بدون", "عند", "فوق", "تحت", "امام", "ليس", "يوجد", "سوف"].map(normalizeArabic));
+// Table words (question words, prepositions, demonstratives, pronouns) are grammar, not nouns:
+// a later word in a gloss (e.g. متى) must not become a noun/verb entry.
+const TABLE_WORDS = new Set([...Object.keys(QUESTION_WORDS), ...Object.keys(PREPOSITIONS), ...Object.keys(DEMONSTRATIVE), ...Object.keys(SUBJ_PRONOUNS)]);
+// Bare stems that end in a plural/dual suffix but are NOT plurals (verified against the
+// dictionary: the stripped stem IS reachable as a noun, so whole-word-first does not save them):
+// الرحمن→رحم، شعبان→شعب، سليمان→سليم، نسرين→نسر، فرحان→فرح، عدنان→عدن، عمران→عمر، شمعون→شمع، سمعون→سمع.
+// (حسين/شاهين/حنين/رمضان/عثمان/لقمان/مروان/غسان/زيدان need no entry: their stems are not in the
+// dictionary, so stripping simply fails to match. بنات/أخوات are handled by the +ت stem variant.)
+const NON_PLURAL = new Set(["رحمن", "شعبان", "سليمان", "نسرين", "فرحان", "عدنان", "عمران", "شمعون", "سمعون"].map(normalizeArabic));
 
 // ---------- Dictionary reverse index (lazy) ----------
 let INDEX = null;
@@ -301,19 +316,60 @@ function verbFormFromKind(kind) {
 }
 function buildIndex() {
   if (INDEX) return INDEX;
-  const byArabic = new Map(); // normalized arabic first-meaning word → [{coptic, gender, kind, form}]
+  // key → {pos, entries[]}: every word of the FIRST meaning segment is indexed, not just
+  // the first word (a word like صديق is never a first word). Priority: earlier position
+  // wins; the first word still beats later words; within the same position, the first
+  // record in file order wins.
+  const byArabic = new Map();
+  // pass 1: position-0 keys (the v1 index). A later gloss word that is a possessed form
+  // of one of these (stem + ه/ها/ك/…) is a morphological form, not a lemma, and must
+  // not become a key: "امه" in "قاتل امه" (matricide) must not beat أم + ه = "his mother".
+  // The suffix ي is NOT in this guard — it is also the nisba adjective ending
+  // (مصري/عربي/قبطي are real lemmas).
+  const pos0 = new Set();
   for (const r of records) {
     const meaning = r.meaning ?? "";
     if (!meaning) continue;
     const first = normalizeArabic(meaning.split("،")[0].split(",")[0]).split(" ")[0];
-    if (!first || first.length < 2) continue;
+    if (first && first.length >= 2) pos0.add(first);
+  }
+  const POSSESSIVE_TAILS = ["ها", "كما", "هما", "كم", "هم", "هن", "نا", "ه", "ك"];
+  const isPossessedForm = (w) => {
+    for (const suf of POSSESSIVE_TAILS) {
+      if (w.endsWith(suf) && w.length - suf.length >= 2) {
+        const stem = w.slice(0, -suf.length);
+        if (pos0.has(stem) || CURATED_NOUNS[stem]) return true;
+      }
+    }
+    return false;
+  };
+  for (const r of records) {
+    const meaning = r.meaning ?? "";
+    if (!meaning) continue;
+    const seg = normalizeArabic(meaning.split("،")[0].split(",")[0]);
+    const words = seg.split(" ").filter((w) => w.length >= 2);
     const coptic = cleanCoptic(r.coptic ?? "").split(" ")[0].replace(/-$/, ""); // bound-form marker: ⲁϫⲉ- → ⲁϫⲉ (R30)
     if (!coptic) continue;
     const entry = { coptic, gender: genderFromRecord(r), kind: r.kind ?? "", form: verbFormFromKind(r.kind ?? "") };
-    if (!byArabic.has(first)) byArabic.set(first, []);
-    byArabic.get(first).push(entry);
+    words.forEach((w, p) => {
+      if (p > 0) {
+        // New (position > 0) entries only: function/table words never enter the index,
+        // junk (parentheses, digits, references) is skipped, and verb/adjective records
+        // at pos > 0 are gloss artifacts — a verb's later words must not hijack verb
+        // lookup ("اليوم الاول" must not become a verbal sentence) and adjectives must
+        // not hijack noun lookup. Position-0 entries are unchanged from v1.
+        if (FUNCTION_WORDS.has(w) || TABLE_WORDS.has(w)) return;
+        if (!/^[ء-ي]+$/u.test(w)) return;
+        if (/^(فعل|صفة)/.test(r.kind ?? "")) return;
+        if (isPossessedForm(w)) return;
+      }
+      const cur = byArabic.get(w);
+      if (!cur) byArabic.set(w, { pos: p, entries: [entry] });
+      else if (cur.pos === p) cur.entries.push(entry);
+      else if (cur.pos > p) byArabic.set(w, { pos: p, entries: [entry] });
+    });
   }
-  INDEX = byArabic;
+  INDEX = new Map([...byArabic].map(([k, v]) => [k, v.entries]));
   return INDEX;
 }
 export function lookupArabic(word) {
@@ -323,33 +379,69 @@ export function lookupArabic(word) {
 // Function-word kinds (verbs, pronouns, particles, adverbs) are never nouns:
 // "هو" must not return the ⲛ̀ⲑⲟϥ pronoun record, "ليس" must not return ⲉ̀ⲃⲏⲗ (R18/R23).
 const FUNCTION_KINDS = /^(فعل|ضمير|حرف|أداة|ظرف|توكيد)/;
+// Curated plural form: a plural-stripped match uses entry.plural when present,
+// else the singular form with the plural article (book 1 §5: plural by article alone).
+function pluralizeCurated(entry, plural) {
+  if (!plural) return { ...entry };
+  return { ...entry, coptic: entry.plural ?? entry.coptic, gender: "pl", plural: true };
+}
 function lookupNoun(word) {
   const norm = normalizeArabic(word);
-  const base = [norm];
+  // candidates: {w, plural} — whole word first, stripping only as a fallback.
+  const cands = [];
+  const seen = new Set();
+  const push = (w, plural = false) => {
+    if (!w || w.length < 2) return;
+    const key = w + (plural ? "!" : "");
+    if (seen.has(key)) return;
+    seen.add(key);
+    cands.push({ w, plural });
+  };
+  push(norm);
   // hamzat waṣl: "المرأة" is ال + مرأة, but the word itself is "امرأة" (ا + مرأة) (R17)
-  if (norm.startsWith("ال") && norm.length > 3) base.push("ا" + norm.slice(2));
+  if (norm.startsWith("ال") && norm.length > 3) push("ا" + norm.slice(2));
   // accusative ـاً: "رجلا" → "رجل" (G1)
-  if (norm.endsWith("ا") && norm.length > 2) base.push(norm.slice(0, -1));
-  const cands = [...base];
+  if (norm.endsWith("ا") && norm.length > 2) push(norm.slice(0, -1));
+  // plural/dual stripping on the bare stems (after ال removal): ين/ون (sound masculine
+  // plural), ان (dual), ات (sound feminine plural). For ات the stem may need its ة/ه/ت
+  // back: كلمات → كلمة (stem+ة), بنات → بنت (stem+ت, tried before the bare stem so
+  // "بن" does not win), أخوات → أخت. Whole word is always tried first (above).
+  const bareStems = [stripDefinite(norm)];
+  if (norm.startsWith("ال") && norm.length > 3) bareStems.push("ا" + norm.slice(2));
+  for (const stem of bareStems) {
+    if (NON_PLURAL.has(stem)) continue;
+    for (const suf of ["ين", "ون", "ان", "ات"]) {
+      if (stem.endsWith(suf) && stem.length - suf.length >= 2) {
+        const base = stem.slice(0, -suf.length);
+        if (suf === "ات") push(base + "ت", true);
+        push(base, true);
+        if (suf === "ات") { push(base + "ة", true); push(base + "ه", true); }
+        // هات-plural: أمهات = أم + هات — the singular is the stem minus a trailing ه.
+        if (suf === "ات" && base.endsWith("ه") && base.length - 1 >= 2) push(base.slice(0, -1), true);
+      }
+    }
+  }
   // ة → ه fallback: CURATED keys are written with ه, inputs may carry ة (كنيسة → كنيسه).
   // Only this direction: the reverse would re-create the R7 "كتابه" collision.
-  for (const b of base) if (b.includes("ة")) cands.push(b.replace(/ة/g, "ه"));
-  const uniq = [...new Set(cands)];
+  const withHe = [];
+  for (const c of cands) if (c.w.includes("ة")) withHe.push({ w: c.w.replace(/ة/g, "ه"), plural: c.plural });
+  cands.push(...withHe);
   // phase 1: curated entries for ALL spelling candidates first — a curated value
   // (e.g. كنيسه → ⲉⲕⲕⲗⲏⲥⲓⲁ, the book spelling) must beat a dictionary record
   // for the same word (e.g. ⲉⲕⲕ̀ⲗⲏⲥⲓⲁ with jinkim)
-  for (const cand of uniq) {
-    if (CURATED_NOUNS[cand]) return { ...CURATED_NOUNS[cand] };
-    const bare = stripDefinite(cand);
-    if (CURATED_NOUNS[bare]) return { ...CURATED_NOUNS[bare] };
+  for (const cand of cands) {
+    if (CURATED_NOUNS[cand.w]) return pluralizeCurated(CURATED_NOUNS[cand.w], cand.plural);
+    const bare = stripDefinite(cand.w);
+    if (CURATED_NOUNS[bare]) return pluralizeCurated(CURATED_NOUNS[bare], cand.plural);
   }
-  // phase 2: dictionary
-  for (const cand of uniq) {
-    const bare = stripDefinite(cand);
+  // phase 2: dictionary. A plural-stripped stem must match a NOUN kind only — the
+  // fallback (non-function kinds) would let a صفة/verb stem hijack the plural.
+  for (const cand of cands) {
+    const bare = stripDefinite(cand.w);
     const hits = lookupArabic(bare);
     if (!hits) continue;
-    const noun = hits.find((h) => h.kind.includes("اسم")) ?? hits.find((h) => !FUNCTION_KINDS.test(h.kind));
-    if (noun) return { coptic: noun.coptic, gender: noun.gender };
+    const noun = hits.find((h) => h.kind.includes("اسم")) ?? (cand.plural ? null : hits.find((h) => !FUNCTION_KINDS.test(h.kind)));
+    if (noun) return { coptic: noun.coptic, gender: cand.plural ? "pl" : noun.gender, plural: cand.plural || undefined };
   }
   return null;
 }
@@ -372,8 +464,6 @@ function lookupVerbStem(stem) {
 
 // ---------- Arabic verb form analysis ----------
 // Returns {stem, tense, person} or null. Strips سوف/سـ, present prefixes, past suffixes.
-const FUNCTION_WORDS = new Set(["لا", "لم", "لن", "ما", "في", "الي", "الى", "من", "مع", "علي", "على", "عن", "ان", "او", "ثم", "و", "هذا", "هذه", "ذلك", "تلك", "هؤلاء", "كل", "بعض", "غير", "بين", "بعد", "قبل", "حتي", "حتى", "بدون", "عند", "فوق", "تحت", "امام", "ليس", "يوجد", "سوف"].map(normalizeArabic));
-
 export function analyzeVerbToken(token) {
   const t = normalizeArabic(token);
   if (FUNCTION_WORDS.has(t)) return null;
@@ -417,6 +507,17 @@ export function analyzeVerbToken(token) {
 // ---------- Noun phrase ----------
 // token → {coptic, gender, definite, possessive?, adj?} ; consumes following adjective token too
 function parseNounToken(token, nextToken) {
+  const res = parseNounTokenInner(token, nextToken);
+  if (res) return res;
+  const t = normalizeArabic(token);
+  // leading conjunction و-: "واختي" → "اختي" (whole word tried first; never strip
+  // when the remainder is a verb — "وذهب" is "and he went", not "gold")
+  if (t.startsWith("و") && t.length > 2 && !analyzeVerbToken(t.slice(1))) {
+    return parseNounTokenInner(t.slice(1), nextToken);
+  }
+  return null;
+}
+function parseNounTokenInner(token, nextToken) {
   let t = normalizeArabic(token);
   // accusative ـاً ("درسا", "رجلا"): strip the final ا; the object takes the article (G1)
   let accusative = false;
@@ -694,6 +795,51 @@ export function translateSentence(input) {
         return { ok: true, coptic: text, unknown, via: "prep-phrase" };
       }
     }
+    // genitive (إضافة): indefinite NP + definite NP → NP1 (definite article) + ⲛ̀/ⲙ̀ + NP2.
+    // book 1: Noun + ⲛ̀ (ⲙ̀ before βμπφψ) + noun — "the book of Mark", "the feast of Christ".
+    // The first noun never takes ال in Arabic, so a definite NP1 rules the genitive out;
+    // a dictionary proper noun (kind "اسم علم", e.g. مرقس) is apposition, not a genitive.
+    if (!neg && rest.length === 2 && !SUBJ_PRONOUNS[rest[0]] && !SUBJ_PRONOUNS[rest[1]]) {
+      const g1 = parseNounToken(rest[0], null);
+      const g2 = parseNounToken(rest[1], null);
+      const g1Hits = lookupArabic(stripDefinite(rest[0]));
+      const g1Proper = g1Hits?.some((h) => (h.kind || "").includes("علم"));
+      if (g1 && g2 && !g1.definite && !g1Proper && g2.definite) {
+        const bare1 = cleanCoptic(g1.text).replace(/^(ⲟⲩ|ϩⲁⲛ)/, "");
+        const first1 = definiteArticle(g1.gender, bare1);
+        const link = objectMarker(g2.text) === "ⲙ̀" ? "ⲙ̀" : "ⲛ̀";
+        let out = `${first1} ${link}${g2.text}`;
+        if (qword) out = `${qword} ${out}`;
+        return { ok: true, coptic: out, unknown, via: "genitive" };
+      }
+    }
+    // conjunction و joining noun phrases (standalone or attached):
+    // "أخي و أختي" / "أخي وأختي" → ⲡⲁⲥⲟⲛ ⲟⲩⲟϩ ⲧⲁⲥⲱⲛⲓ
+    if (!neg) {
+      const groups = [[]];
+      let foundConj = false;
+      for (const tok of rest) {
+        if (tok === "و") { groups.push([]); foundConj = true; continue; }
+        if (tok.startsWith("و") && tok.length > 2 && !lookupNoun(tok)) {
+          const rem = tok.slice(1);
+          if (!analyzeVerbToken(rem) && parseNounToken(rem, null)) { groups.push([rem]); foundConj = true; continue; }
+        }
+        groups[groups.length - 1].push(tok);
+      }
+      if (foundConj && groups.length >= 2 && groups.every((g) => g.length === 1)) {
+        const texts = groups.map((g) => {
+          const t = g[0];
+          if (SUBJ_PRONOUNS[t]) return SUBJ_PRONOUNS[t].separate;
+          const np = parseNounToken(t, null);
+          return np ? np.text : null;
+        });
+        if (texts.every(Boolean)) {
+          let out = texts.join(" ⲟⲩⲟϩ ");
+          if (qword) out = `${qword} ${out}`;
+          return { ok: true, coptic: out, unknown, via: "conjunction-np" };
+        }
+      }
+    }
     const subjTok = rest[i];
     const predTok = rest[i + 1];
     let subj = nounSubject
@@ -778,8 +924,8 @@ export function translateSentence(input) {
       if (qword) out = `${qword} ${out}`;
       return { ok: true, coptic: out, unknown, via: "nominal" };
     }
-    if (subjTok) unknown.push(subjTok);
-    if (predTok) unknown.push(predTok);
+    if (subjTok && !subj) unknown.push(subjTok);
+    if (predTok && !pred) unknown.push(predTok);
     return { ok: true, coptic: null, unknown, via: "unknown" };
   }
 
@@ -832,6 +978,12 @@ function buildTail(after, verb, unknown) {
   let k = 0;
   while (k < after.length) {
     const tok = after[k];
+    if (tok === "و") {
+      // standalone conjunction joining two objects: "أحب الله و أخي"
+      const nxt = parseNounToken(after[k + 1] ?? "", after[k + 2]);
+      if (nxt && !analyzeVerbToken(after[k + 1] ?? "")) { parts.push("ⲟⲩⲟϩ"); k += 1; continue; }
+      unknown.push(tok); k += 1; continue;
+    }
     if (PREPOSITIONS[tok]) {
       const np = parseNounToken(after[k + 1] ?? "", after[k + 2]);
       if (np) { parts.push(`${PREPOSITIONS[tok]} ${np.text}`); k += 2 + (np.consumed || 0); continue; }

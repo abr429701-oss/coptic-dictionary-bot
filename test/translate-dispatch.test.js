@@ -89,9 +89,11 @@ test("translate dispatch: bare /translate asks, then the sentence is translated"
   assert.match(texts(await say(kvEnv, ADMIN, "/translate")), /اكتب الجملة بالعربي/);
   const out = texts(await say(kvEnv, ADMIN, "هو يكتب الدرس"));
   assert.equal(out, "ϥ̀ⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ");
-  // one shot: the next word searches the dictionary again, it is not translated
+  // persistent session: the next message is translated too, no re-typing /translate
+  const second = texts(await say(kvEnv, ADMIN, "أنا أحب الله"));
+  assert.equal(second, "Ϯⲙⲉⲓ ⲙ̀ Ⲫ̀ⲛⲟⲩϯ");
   const after = texts(await say(kvEnv, ADMIN, "كتاب"));
-  assert.doesNotMatch(after, /اكتب الجملة/);
+  assert.equal(after, "ⲟⲩϫⲱⲱⲙ");
 });
 
 test("translate dispatch: /cancel ends the awaiting state", async () => {

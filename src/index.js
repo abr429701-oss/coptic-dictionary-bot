@@ -8818,9 +8818,17 @@ async function handleUpdate(update, env, ctx) {
     // /translate — sentence translator (admin-only, Telegram-only experiment):
     // multi-word input → sentence translation; a single word falls through to
     // the public /translate word view; bare /translate asks for a sentence.
+    // The session stays open until /cancel, /menu or /start (like the cert
+    // flow): after one translation the next message is translated too.
     if (text === "/translate" || text.startsWith("/translate ")) {
       const arg = text.slice("/translate".length).trim();
-      if (arg && arg.includes(" ")) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: formatTranslation(arg) }); return; }
+      if (arg && arg.includes(" ")) {
+        const u = known ?? await getUser(env, userId);
+        await saveUser(env, userId, { ...(u ?? {}), translateAwaiting: true });
+        patchRegisteredCache(userId, { translateAwaiting: true });
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: formatTranslation(arg) });
+        return;
+      }
       if (!arg) {
         const u = known ?? await getUser(env, userId);
         await saveUser(env, userId, { ...(u ?? {}), translateAwaiting: true });
@@ -9209,10 +9217,9 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     // /translate: the admin sent /translate and this text is their sentence.
-    // One shot: the state clears after the reply.
+    // Persistent session: the state stays set after the reply, so the next
+    // message is translated too; it ends only on /cancel, /menu or /start.
     if (user?.translateAwaiting) {
-      await saveUser(env, userId, { ...user, translateAwaiting: undefined });
-      patchRegisteredCache(userId, { translateAwaiting: undefined });
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: formatTranslation(text) });
       return;
     }
