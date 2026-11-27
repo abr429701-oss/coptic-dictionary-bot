@@ -48,12 +48,12 @@ test("noun subject", () => {
 test("negation", () => {
   assert.equal(t("لا أكتب"), "Ϯⲥ̀ϧⲁⲓ ⲁⲛ");
   assert.equal(t("لم أكتب"), "ⲙ̀ⲡⲓⲥ̀ϧⲁⲓ");
-  assert.equal(t("أنا لا أحب الظلمة"), "Ϯⲙⲉⲓ ⲛ̀ ⲡⲓⲥⲕⲟⲧⲟⲥ ⲁⲛ");
+  assert.equal(t("أنا لا أحب الظلمة"), "Ϯⲙⲉⲓ ⲙ̀ ⲡⲓⲥⲕⲟⲧⲟⲥ ⲁⲛ");
 });
 
 test("possessives, يوجد, عندي", () => {
   assert.equal(t("كتابي"), "ⲡⲁϫⲱⲱⲙ");
-  assert.equal(t("الكتاب الجديد"), "ⲡⲓϫⲱⲱⲙ ⲛ̀ⲃⲉⲣⲓ");
+  assert.equal(t("الكتاب الجديد"), "ⲡⲓϫⲱⲱⲙ ⲙ̀ⲃⲉⲣⲓ");
   assert.equal(t("في الكنيسة"), "ϧⲉⲛ ϯⲉⲕⲕⲗⲏⲥⲓⲁ");
   assert.equal(t("يوجد كتاب"), "ⲟⲩⲟⲛ ⲟⲩϫⲱⲱⲙ");
   assert.equal(t("عندي كتاب"), "ⲟⲩⲛⲧⲏⲓ ⲟⲩϫⲱⲱⲙ");
@@ -62,9 +62,9 @@ test("possessives, يوجد, عندي", () => {
 test("questions, imperative, prohibition", () => {
   assert.equal(t("من هذا؟"), "ⲛⲓⲙ ⲫⲁⲓ");
   assert.equal(t("اجلس"), "ϩⲉⲙⲥⲓ");
-  assert.equal(t("افتح الباب"), "ⲁⲟⲩⲱⲛ ⲛ̀ ⲡⲓⲣⲟ");
+  assert.equal(t("افتح الباب"), "ⲁⲟⲩⲱⲛ ⲙ̀ ⲡⲓⲣⲟ");
   assert.equal(t("لا تتكلم"), "ⲙ̀ⲡⲉⲣⲥⲁϫⲓ");
-  assert.equal(t("قل الحق"), "ⲁϫⲉ ⲉ̀ ϯⲁⲗⲏⲑⲓⲁ");
+  assert.equal(t("قل الحق"), "ⲁϫⲉ ⲛ̀ ϯⲁⲗⲏⲑⲓⲁ");
 });
 
 test("prepositional phrases", () => {
@@ -76,7 +76,7 @@ test("unknown words are reported, not guessed", () => {
   const r = translateSentence("أنا أحب البرمجة");
   assert.equal(r.ok, true);
   assert.equal(r.coptic, "Ϯⲙⲉⲓ");
-  assert.deepEqual(r.unknown, ["البرمجه"]);
+  assert.deepEqual(r.unknown, ["البرمجة"]);
   assert.match(formatTranslation("أنا أحب البرمجة"), /كلمات غير معروفة/);
 });
 
@@ -84,4 +84,59 @@ test("invalid input", () => {
   assert.equal(translateSentence("").ok, false);
   assert.equal(translateSentence("hello world").ok, false);
   assert.equal(translateSentence("أنا أكتب الدرس في الكنيسة كل يوم في الصباح الباكر جدا قبل الظهر").ok, false);
+});
+
+test("second-person feminine (R4)", () => {
+  assert.equal(t("أنتِ تكتبين الدرس"), "ⲧⲉⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ");
+  assert.equal(t("أنتِ كتبتِ الدرس"), "ⲁⲣⲉⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ");
+  assert.equal(t("أنتِ ستكتبين الدرس"), "ⲧⲉⲣⲁⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ");
+  assert.equal(t("أنتِ تحبين الله"), "ⲧⲉⲙⲉⲓ ⲙ̀ Ⲫ̀ⲛⲟⲩϯ");
+  assert.equal(t("أنت تكتب الدرس"), "ⲕ̀ⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ");
+});
+
+test("لن future negation (R2)", () => {
+  assert.equal(t("لن أكتب الدرس"), "ϯⲛⲁⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ ⲁⲛ");
+  assert.equal(t("لن تكتب الدرس"), "ⲭ̀ⲛⲁⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ ⲁⲛ");
+  assert.equal(t("بطرس لن يكتب الدرس"), "Ⲡⲉⲧⲣⲟⲥ ⲛⲁⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ ⲁⲛ");
+});
+
+test("عندي forms (R5/R6)", () => {
+  assert.equal(t("عندهم كتاب"), "ⲟⲩⲛⲧⲟⲩ ⲟⲩϫⲱⲱⲙ");
+  assert.equal(t("عندكي كتاب"), "ⲟⲩⲛⲧⲉ ⲟⲩϫⲱⲱⲙ");
+});
+
+test("demonstratives (R17/R31)", () => {
+  assert.equal(t("هذا الرجل"), "ⲡⲁⲓⲣⲱⲙⲓ");
+  assert.equal(t("هذه المرأة"), "ⲧⲁⲓⲥϩⲓⲙⲓ");
+  assert.equal(t("هؤلاء الرجال"), "ⲛⲁⲓⲣⲱⲙⲓ");
+  assert.equal(t("أولئك الرجال"), "ⲛⲏⲉⲧⲣⲱⲙⲓ");
+  assert.equal(t("هذا هو الرجل"), "ⲫⲁⲓ ⲡⲉ ⲡⲓⲣⲱⲙⲓ");
+  assert.equal(t("هؤلاء يكتبون الدرس"), "ⲛⲁⲓ ⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ");
+});
+
+test("questions: أين/كم and ⲉⲧⲉ- (R24/R25/R26/R27)", () => {
+  assert.equal(t("أين الكتاب؟"), "ⲑⲱⲛ ⲡⲓϫⲱⲱⲙ");
+  assert.equal(t("كم كتابا؟"), "ⲟⲩⲏⲣ ⲛ̀ϫⲱⲱⲙ");
+  assert.equal(t("كم رجلا؟"), "ⲟⲩⲏⲣ ⲛ̀ⲣⲱⲙⲓ");
+  assert.equal(t("من يكتب الدرس؟"), "ⲛⲓⲙ ⲉⲧⲉϥ̀ⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ");
+  assert.equal(t("ماذا تكتب؟"), "ⲁϣ ⲉⲧⲉⲕ̀ⲥ̀ϧⲁⲓ");
+  assert.equal(t("متى تكتب الدرس؟"), "ⲑ̀ⲛⲁⲩ ⲉⲧⲉⲕ̀ⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ");
+  assert.equal(t("هل أنت بطرس؟"), "ⲙⲏ ⲛ̀ⲑⲟⲕ ⲡⲉ Ⲡⲉⲧⲣⲟⲥ");
+});
+
+test("audit-rule regressions (R3/R7/R9/R10/R13/R14/R15/R16/R18/R23/R28/G1)", () => {
+  assert.equal(t("بطرس لم يكتب الدرس"), "ⲙ̀ⲡⲉ Ⲡⲉⲧⲣⲟⲥ ⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ");
+  assert.equal(t("هذا كتابه"), "ⲡⲁⲓⲡⲉϥϫⲱⲱⲙ");
+  assert.equal(t("كنيستي"), "ⲧⲁⲉⲕⲕⲗⲏⲥⲓⲁ");
+  assert.equal(t("الأم"), "ⲑ̀ⲙⲁⲩ");
+  assert.equal(t("الشمس"), "ⲫ̀ⲣⲏ");
+  assert.equal(t("امش إلى الكنيسة"), "ⲙⲟϣⲓ ⲉ ϯⲉⲕⲕⲗⲏⲥⲓⲁ");
+  assert.equal(t("أعطني الكتاب"), "ⲙⲟⲓ ⲛⲏⲓ ⲙ̀ ⲡⲓϫⲱⲱⲙ");
+  assert.equal(t("لا تخف"), "ⲙ̀ⲡⲉⲣⲉⲣϩⲟϯ");
+  assert.equal(t("الله ليس محبة"), "Ⲫ̀ⲛⲟⲩϯ ⲟⲩⲁⲅⲁⲡⲏ ⲁⲛ ⲡⲉ");
+  assert.equal(t("هو يحب رجلا"), "ϥ̀ⲙⲉⲓ ⲛ̀ ⲟⲩⲣⲱⲙⲓ");
+  assert.equal(t("هو رأى رجلا"), "ⲁϥⲛⲁⲩ ⲉⲟⲩⲣⲱⲙⲓ");
+  assert.equal(t("كتب درسا"), "ⲁϥⲥ̀ϧⲁⲓ ⲙ̀ ⲟⲩⲙⲁⲑⲏⲙⲁ");
+  assert.equal(t("نحن كتبنا الدرس"), "ⲁⲛⲥ̀ϧⲁⲓ ⲙ̀ ⲡⲓⲙⲁⲑⲏⲙⲁ");
+  assert.equal(t("هي امرأة حكيمة"), "ⲛ̀ⲑⲟⲥ ⲟⲩⲥϩⲓⲙⲓ ⲛ̀ⲥⲁⲃⲏ ⲧⲉ");
 });

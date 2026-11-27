@@ -18,12 +18,26 @@ export function normalizeArabic(s) {
   return String(s ?? "")
     .replace(/[ً-ْٰـ]/gu, "") // diacritics + tatweel
     .replace(/[أإآٱ]/g, "ا")
-    .replace(/ة/g, "ه")
+    // NOTE: ة is NOT mapped to ه — "كتابه" (his book, ه) must stay distinct
+    // from "كتابة" (writing, ة); callers that need ة/ه tolerance handle it (R7).
     .replace(/ى/g, "ي")
     .replace(/ؤ/g, "و")
     .replace(/ئ/g, "ي")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+// Normalize every key of a lookup table with normalizeArabic at load time, so
+// keys written with un-normalized forms (على/متى/هؤلاء/اولئك…) match normalized input (R12/R25/R31).
+function normalizeKeys(obj) {
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) out[normalizeArabic(k)] = v;
+  return out;
+}
+
+// Phrasebook lookup, tolerant of ة/ه spelling (the key may be written either way).
+function phraseLookup(norm) {
+  return PHRASES[norm] ?? PHRASES[norm.replace(/ة/g, "ه")] ?? PHRASES[norm.replace(/ه/g, "ة")] ?? null;
 }
 
 function stripDefinite(w) {
@@ -44,7 +58,7 @@ function objectMarker(copticWord) {
 }
 
 // ---------- Pronouns / tense prefixes (book 1, verified) ----------
-export const SUBJ_PRONOUNS = {
+export const SUBJ_PRONOUNS = normalizeKeys({
   "انا": { person: "1s", separate: "ⲁⲛⲟⲕ" },
   "انت": { person: "2m", separate: "ⲛ̀ⲑⲟⲕ" },
   "انتي": { person: "2f", separate: "ⲛ̀ⲑⲟ" },
@@ -53,7 +67,7 @@ export const SUBJ_PRONOUNS = {
   "نحن": { person: "1p", separate: "ⲁⲛⲟⲛ" },
   "انتم": { person: "2p", separate: "ⲛ̀ⲑⲱⲧⲉⲛ" },
   "هم": { person: "3p", separate: "ⲛ̀ⲑⲱⲟⲩ" },
-};
+});
 
 // prefix + verb (present / past / future). ⲕ̀ → ⲭ̀ before ⲙ/ⲛ/ⲟⲩ and in future.
 export const TENSE_PREFIX = {
@@ -83,32 +97,32 @@ export const POSSESSIVE = {
   "كم": { m: "ⲡⲉⲧⲉⲛ", f: "ⲧⲉⲧⲉⲛ", pl: "ⲛⲉⲧⲉⲛ" },
   "هم": { m: "ⲡⲟⲩ", f: "ⲧⲟⲩ", pl: "ⲛⲟⲩ" },
 };
-export const HAVE_PREFIX = { "ي": "ⲟⲩⲛⲧⲏⲓ", "ك": "ⲟⲩⲛⲧⲁⲕ", "ه": "ⲟⲩⲛⲧⲁϥ", "ها": "ⲟⲩⲛⲧⲁⲥ", "نا": "ⲟⲩⲛⲧⲁⲛ", "كم": "ⲟⲩⲛⲧⲉⲧⲉⲛ", "هم": "ⲟⲩⲛⲧⲱⲟⲩ" };
+export const HAVE_PREFIX = { "ي": "ⲟⲩⲛⲧⲏⲓ", "ك": "ⲟⲩⲛⲧⲁⲕ", "كي": "ⲟⲩⲛⲧⲉ", "ه": "ⲟⲩⲛⲧⲁϥ", "ها": "ⲟⲩⲛⲧⲁⲥ", "نا": "ⲟⲩⲛⲧⲁⲛ", "كم": "ⲟⲩⲛⲧⲉⲧⲉⲛ", "هم": "ⲟⲩⲛⲧⲟⲩ" };
 
 // ---------- Prepositions (book 1 §31) ----------
-export const PREPOSITIONS = {
+export const PREPOSITIONS = normalizeKeys({
   "في": "ϧⲉⲛ", "الى": "ⲉ", "الي": "ⲉ", "من": "ⲉ̀ⲃⲟⲗϧⲉⲛ", "مع": "ⲛⲉⲙ",
   "ل": "ⲛⲁ", "لـ": "ⲛⲁ", "على": "ϩⲓϫⲉⲛ", "عن": "ⲉⲑⲃⲉ", "بعد": "ⲙⲉⲛⲉⲛⲥⲁ",
   "قبل": "ϩⲁϫⲱ", "حتى": "ϣⲁ", "بين": "ⲟⲩⲧⲉ", "ضد": "ⲟⲩⲃⲉ", "بدون": "ⲁϭⲛ",
   "عند": "ϩⲁⲣⲟ", "فوق": "ϩⲓ", "تحت": "ϧⲁ", "امام": "ⲙ̀ⲡⲉ̀ⲙ̀ⲑⲟ",
-};
+});
 
 // ---------- Question words (book 1 §25) ----------
-export const QUESTION_WORDS = {
+export const QUESTION_WORDS = normalizeKeys({
   "من": "ⲛⲓⲙ", "ماذا": "ⲁϣ", "ما": "ⲟⲩ", "اين": "ⲑⲱⲛ", "متى": "ⲑ̀ⲛⲁⲩ",
-  "لماذا": "ⲉⲑⲃⲉ ⲟⲩ", "كيف": "ⲡⲱⲥ", "كم": "ⲟⲩⲏⲣ", "هل": "",
-};
+  "لماذا": "ⲉⲑⲃⲉ ⲟⲩ", "كيف": "ⲡⲱⲥ", "كم": "ⲟⲩⲏⲣ", "هل": "ⲙⲏ",
+});
 
 // ---------- Demonstratives (book 1 §8.5) ----------
-export const DEMONSTRATIVE = {
+export const DEMONSTRATIVE = normalizeKeys({
   "هذا": { adj: "ⲡⲁⲓ", pron: "ⲫⲁⲓ" }, "هذه": { adj: "ⲧⲁⲓ", pron: "ⲑⲁⲓ" },
   "هؤلاء": { adj: "ⲛⲁⲓ", pron: "ⲛⲁⲓ" }, "ذلك": { adj: "ⲫⲏ", pron: "ⲫⲏ" },
-  "تلك": { adj: "ⲑⲏ", pron: "ⲑⲏ" }, "اولئك": { adj: "ⲛⲏ", pron: "ⲛⲏ" },
-};
+  "تلك": { adj: "ⲑⲏ", pron: "ⲑⲏ" }, "اولئك": { adj: "ⲛⲏⲉⲧ", pron: "ⲛⲏ" },
+});
 
 // ---------- Curated phrasebook (book examples only) ----------
-export const PHRASES = {
-  "الله محبه": "Ⲫ̀ⲛⲟⲩϯ ⲟⲩⲁⲅⲁⲡⲏ ⲡⲉ",
+export const PHRASES = normalizeKeys({
+  "الله محبة": "Ⲫ̀ⲛⲟⲩϯ ⲟⲩⲁⲅⲁⲡⲏ ⲡⲉ",
   "انت هو بطرس": "ⲛ̀ⲑⲟⲕ ⲡⲉ Ⲡⲉⲧⲣⲟⲥ",
   "هو رجل حكيم": "ⲛ̀ⲑⲟϥ ⲟⲩⲣⲱⲙⲓ ⲛ̀ⲥⲁⲃⲉ ⲡⲉ",
   "ابانا الذي في السماوات": "Ⲡⲉⲛⲓⲱⲧ ⲉⲧϧⲉⲛ ⲛⲓⲫⲏⲟⲩⲓ",
@@ -118,11 +132,11 @@ export const PHRASES = {
   "لم يكن هو النور": "ⲛⲉ ⲛ̀ⲑⲟϥ ⲁⲛ ⲡⲉ ⲡⲓⲟⲩⲱⲓⲛⲓ",
   "كيف هذا": "ⲡⲱⲥ ⲫⲁⲓ",
   "سلام لك": "ϯⲣⲏⲛⲏ ⲛⲁⲕ",
-};
+});
 
 // ---------- Curated verbs: arabic stem → forms (book 1 §10 tables + dictionary) ----------
 // f1 = absolute form (verb + ⲛ̀/ⲙ̀/ⲉ̀ + noun object); f2 = direct-object form; f3 = pronoun-object form
-export const CURATED_VERBS = {
+export const CURATED_VERBS = normalizeKeys({
   "كتب": { f1: "ⲥ̀ϧⲁⲓ", f3: "ⲥ̀ϧⲏⲧ" },
   "احب": { f1: "ⲙⲉⲓ", f2: "ⲙⲉⲛⲣⲉ", f3: "ⲙⲉⲛⲣⲓⲧ" },
   "قال": { f1: "ϫⲱ", f2: "ϫⲉ", f3: "ϫⲟ" },
@@ -160,17 +174,40 @@ export const CURATED_VERBS = {
   "اخذ": { f1: "ϭⲓ" },
   "خاف": { f1: "ⲉⲣϩⲟϯ" },
   "اعط": { f1: "ϯ" },
-};
+});
 // imperative special forms (book 1 §22): ⲁ- prefix verbs + ϯ family
-export const IMPERATIVE_SPECIAL = {
+export const IMPERATIVE_SPECIAL = normalizeKeys({
   "قل": "ⲁϫⲉ", "افعل": "ⲁⲣⲓ", "احضر": "ⲁⲛⲓ", "ارفع": "ⲁⲗⲓ",
   "افتح": "ⲁⲟⲩⲱⲛ", "انظر": "ⲁⲛⲁⲩ", "اعط": "ⲙⲟⲓ", "اعطي": "ⲙⲟⲓ",
-  "كل": "ⲟⲩⲱⲙ", "خذ": "ϭⲓ", "قم": "ⲧⲱⲛ", "نم": "ⲉⲛⲕⲟⲧ",
+  "كل": "ⲟⲩⲱⲙ", "خذ": "ϭⲓ", "قم": "ⲧⲱⲛ", "نم": "ⲉⲛⲕⲟⲧ", "امش": "ⲙⲟϣⲓ",
+});
+
+// Imperative + pronoun suffix: "أعطني" → ⲙⲟⲓ ⲛⲏⲓ (dative pronouns, book 1 §22) — R16.
+const IMPERATIVE_PRONOUN = {
+  "ني": "ⲛⲏⲓ", "ك": "ⲛⲁⲕ", "كي": "ⲛⲉ", "ه": "ⲛⲁϥ",
+  "ها": "ⲛⲁⲥ", "نا": "ⲛⲁⲛ", "كم": "ⲛⲱⲧⲉⲛ", "هم": "ⲛⲁⲩ",
 };
+// Adjective linker: ⲙ̀ before labials (ⲃ ⲙ ⲡ ⲫ), else ⲛ̀ (book 1 §26) — R20.
+function adjLinker(adjCoptic) {
+  const first = cleanCoptic(adjCoptic).charAt(0);
+  return ["ⲃ", "ⲙ", "ⲡ", "ⲫ"].includes(first) ? "ⲙ̀" : "ⲛ̀";
+}
+// Special definite articles (§4, attested forms only): ⲫ̀ⲣⲏ "the sun", ⲑ̀ⲙⲁⲩ "the mother".
+// The book lists ⲫ̀/ⲑ̀ before ⲃ ⲓ ⲗ ⲙ ⲛ ⲟ ⲣ generally, but its own examples keep
+// ⲡⲓ for ⲙⲁⲑⲏⲙⲁ/ⲣⲱⲙⲓ/ⲟⲩⲱⲓⲛⲓ, so the rule is applied only to the attested nouns — R10.
+function definiteArticle(gender, bare) {
+  if (gender === "m" && bare === "ⲣⲏ") return "ⲫ̀ⲣⲏ";
+  if (gender === "f" && bare === "ⲙⲁⲩ") return "ⲑ̀ⲙⲁⲩ";
+  return gender === "f" ? `ϯ${bare}` : gender === "pl" ? `ⲛⲓ${bare}` : `ⲡⲓ${bare}`;
+}
+// Adjective lookup key: strip the definite article and a trailing ة/ه/ا (حكيمة/حكيما → حكيم).
+function adjKeyOf(token) {
+  return stripDefinite(normalizeArabic(token)).replace(/[هة]$/, "").replace(/ا$/, "");
+}
 
 // ---------- Curated nouns: arabic → {coptic, gender m|f|pl} ----------
 // gender from dictionary `kind` / (ⲡ)/(ⲧ)/(ⲛ) hints, checked live 27 Nov
-export const CURATED_NOUNS = {
+export const CURATED_NOUNS = normalizeKeys({
   "الله": { coptic: "Ⲫ̀ⲛⲟⲩϯ", gender: "m", definite: true },
   "يسوع": { coptic: "Ⲓⲏⲥⲟⲩⲥ", gender: "m", proper: true },
   "المسيح": { coptic: "Ⲡⲓⲭⲣⲓⲥⲧⲟⲥ", gender: "m", definite: true },
@@ -229,15 +266,21 @@ export const CURATED_NOUNS = {
   "اولاد": { coptic: "ⲁⲗⲱⲟⲩⲓ", gender: "pl" },
   "ايام": { coptic: "ⲉ̀ϩⲟⲟⲩ", gender: "pl" },
   "كتب": { coptic: "ϫⲱⲱⲙ", gender: "pl" },
-};
+});
 
 // ---------- Curated adjectives ----------
-export const CURATED_ADJ = {
-  "حكيم": "ⲥⲁⲃⲉ", "جديد": "ⲃⲉⲣⲓ", "قديم": "ⲁⲡⲁⲥ", "كبير": "ⲛⲓϣϯ",
-  "صغير": "ⲕⲟⲩϫⲓ", "صالح": "ⲁⲅⲁⲑⲟⲥ", "مقدس": "ⲉϥⲟⲩⲁⲃ",
-  "جميل": "ⲥⲁⲓⲉ", "طويل": "ϭⲟⲥⲓ", "قصير": "ϣⲏⲣ", "عظيم": "ⲛⲓϣϯ",
-  "حي": "ⲱⲛϧ", "ميت": "ⲙⲟⲩⲧ", "طاهر": "ⲧⲟⲩⲃⲟ", "صادق": "ⲙⲉⲑⲙⲏⲓ",
-};
+// Adjectives as {m, f} (book 1 §26: ⲥⲁⲃⲉ/ⲥⲁⲃⲏ; -ⲓ → -ⲉ and -ⲉ → -ⲏ for the
+// feminine; ⲛⲓϣϯ and the ⲉϥ-/stative forms are invariable) — R21.
+export const CURATED_ADJ = normalizeKeys({
+  "حكيم": { m: "ⲥⲁⲃⲉ", f: "ⲥⲁⲃⲏ" }, "جديد": { m: "ⲃⲉⲣⲓ", f: "ⲃⲉⲣⲉ" },
+  "قديم": { m: "ⲁⲡⲁⲥ", f: "ⲁⲡⲁⲥ" }, "كبير": { m: "ⲛⲓϣϯ", f: "ⲛⲓϣϯ" },
+  "صغير": { m: "ⲕⲟⲩϫⲓ", f: "ⲕⲟⲩϫⲉ" }, "صالح": { m: "ⲁⲅⲁⲑⲟⲥ", f: "ⲁⲅⲁⲑⲏ" },
+  "مقدس": { m: "ⲉϥⲟⲩⲁⲃ", f: "ⲉϥⲟⲩⲁⲃ" }, "جميل": { m: "ⲥⲁⲓⲉ", f: "ⲥⲁⲓⲏ" },
+  "طويل": { m: "ϭⲟⲥⲓ", f: "ϭⲟⲥⲉ" }, "قصير": { m: "ϣⲏⲣ", f: "ϣⲏⲣ" },
+  "عظيم": { m: "ⲛⲓϣϯ", f: "ⲛⲓϣϯ" }, "حي": { m: "ⲱⲛϧ", f: "ⲱⲛϧ" },
+  "ميت": { m: "ⲙⲟⲩⲧ", f: "ⲙⲟⲩⲧ" }, "طاهر": { m: "ⲧⲟⲩⲃⲟ", f: "ⲧⲟⲩⲃⲟ" },
+  "صادق": { m: "ⲙⲉⲑⲙⲏⲓ", f: "ⲙⲉⲑⲙⲏⲓ" },
+});
 
 // ---------- Dictionary reverse index (lazy) ----------
 let INDEX = null;
@@ -264,7 +307,7 @@ function buildIndex() {
     if (!meaning) continue;
     const first = normalizeArabic(meaning.split("،")[0].split(",")[0]).split(" ")[0];
     if (!first || first.length < 2) continue;
-    const coptic = cleanCoptic(r.coptic ?? "").split(" ")[0];
+    const coptic = cleanCoptic(r.coptic ?? "").split(" ")[0].replace(/-$/, ""); // bound-form marker: ⲁϫⲉ- → ⲁϫⲉ (R30)
     if (!coptic) continue;
     const entry = { coptic, gender: genderFromRecord(r), kind: r.kind ?? "", form: verbFormFromKind(r.kind ?? "") };
     if (!byArabic.has(first)) byArabic.set(first, []);
@@ -277,28 +320,59 @@ export function lookupArabic(word) {
   const idx = buildIndex();
   return idx.get(normalizeArabic(word)) ?? null;
 }
+// Function-word kinds (verbs, pronouns, particles, adverbs) are never nouns:
+// "هو" must not return the ⲛ̀ⲑⲟϥ pronoun record, "ليس" must not return ⲉ̀ⲃⲏⲗ (R18/R23).
+const FUNCTION_KINDS = /^(فعل|ضمير|حرف|أداة|ظرف|توكيد)/;
 function lookupNoun(word) {
   const norm = normalizeArabic(word);
-  if (CURATED_NOUNS[norm]) return { ...CURATED_NOUNS[norm] };
-  const bare = stripDefinite(norm);
-  if (CURATED_NOUNS[bare]) return { ...CURATED_NOUNS[bare] };
-  const hits = lookupArabic(bare);
-  if (!hits) return null;
-  const noun = hits.find((h) => h.kind.includes("اسم")) ?? hits[0];
-  return { coptic: noun.coptic, gender: noun.gender };
+  const base = [norm];
+  // hamzat waṣl: "المرأة" is ال + مرأة, but the word itself is "امرأة" (ا + مرأة) (R17)
+  if (norm.startsWith("ال") && norm.length > 3) base.push("ا" + norm.slice(2));
+  // accusative ـاً: "رجلا" → "رجل" (G1)
+  if (norm.endsWith("ا") && norm.length > 2) base.push(norm.slice(0, -1));
+  const cands = [...base];
+  // ة → ه fallback: CURATED keys are written with ه, inputs may carry ة (كنيسة → كنيسه).
+  // Only this direction: the reverse would re-create the R7 "كتابه" collision.
+  for (const b of base) if (b.includes("ة")) cands.push(b.replace(/ة/g, "ه"));
+  const uniq = [...new Set(cands)];
+  // phase 1: curated entries for ALL spelling candidates first — a curated value
+  // (e.g. كنيسه → ⲉⲕⲕⲗⲏⲥⲓⲁ, the book spelling) must beat a dictionary record
+  // for the same word (e.g. ⲉⲕⲕ̀ⲗⲏⲥⲓⲁ with jinkim)
+  for (const cand of uniq) {
+    if (CURATED_NOUNS[cand]) return { ...CURATED_NOUNS[cand] };
+    const bare = stripDefinite(cand);
+    if (CURATED_NOUNS[bare]) return { ...CURATED_NOUNS[bare] };
+  }
+  // phase 2: dictionary
+  for (const cand of uniq) {
+    const bare = stripDefinite(cand);
+    const hits = lookupArabic(bare);
+    if (!hits) continue;
+    const noun = hits.find((h) => h.kind.includes("اسم")) ?? hits.find((h) => !FUNCTION_KINDS.test(h.kind));
+    if (noun) return { coptic: noun.coptic, gender: noun.gender };
+  }
+  return null;
 }
 function lookupVerbStem(stem) {
   if (CURATED_VERBS[stem]) return { ...CURATED_VERBS[stem], curated: true };
   const hits = lookupArabic(stem);
-  if (!hits) return null;
-  const v = hits.find((h) => h.kind.startsWith("فعل"));
-  if (!v) return null;
-  return { [v.form]: v.coptic, curated: false };
+  let dictHit = null;
+  if (hits) {
+    const v = hits.find((h) => h.kind.startsWith("فعل"));
+    if (v) dictHit = { [v.form]: v.coptic, curated: false };
+  }
+  // hollow verbs in jussive/prohibition: خف → خاف، قل → قال، نم → نام — a CURATED hollow form
+  // beats a dictionary hit on the bare 2-letter stem (which is usually a different verb) (R15).
+  if (stem.length === 2) {
+    const hollow = stem[0] + "ا" + stem[1];
+    if (CURATED_VERBS[hollow]) return { ...CURATED_VERBS[hollow], curated: true };
+  }
+  return dictHit;
 }
 
 // ---------- Arabic verb form analysis ----------
 // Returns {stem, tense, person} or null. Strips سوف/سـ, present prefixes, past suffixes.
-const FUNCTION_WORDS = new Set(["لا", "لم", "لن", "ما", "في", "الي", "الى", "من", "مع", "علي", "على", "عن", "ان", "او", "ثم", "و", "هذا", "هذه", "ذلك", "تلك", "هؤلاء", "كل", "بعض", "غير", "بين", "بعد", "قبل", "حتي", "حتى", "بدون", "عند", "فوق", "تحت", "امام", "ليس", "يوجد", "سوف"]);
+const FUNCTION_WORDS = new Set(["لا", "لم", "لن", "ما", "في", "الي", "الى", "من", "مع", "علي", "على", "عن", "ان", "او", "ثم", "و", "هذا", "هذه", "ذلك", "تلك", "هؤلاء", "كل", "بعض", "غير", "بين", "بعد", "قبل", "حتي", "حتى", "بدون", "عند", "فوق", "تحت", "امام", "ليس", "يوجد", "سوف"].map(normalizeArabic));
 
 export function analyzeVerbToken(token) {
   const t = normalizeArabic(token);
@@ -317,7 +391,8 @@ export function analyzeVerbToken(token) {
     const m = re.exec(rest);
     if (m) {
       const stem = m[1] ?? rest.slice(1);
-      const hit = lookupVerbStem(stem) ?? lookupVerbStem("ا" + stem) ?? lookupVerbStem(stem.replace(/ا$/, "")) ?? lookupVerbStem(stem.replace(/ي$/, ""));
+      // the ي-strip fallback must not fire on pronoun suffixes: "عطني" is أعط + ني, not "عطن" (R16)
+      const hit = lookupVerbStem(stem) ?? lookupVerbStem("ا" + stem) ?? lookupVerbStem(stem.replace(/ا$/, "")) ?? (stem.endsWith("ني") ? null : lookupVerbStem(stem.replace(/ي$/, "")));
       if (hit) return { stem, verb: hit, tense: tense ?? "present", person };
     }
   }
@@ -339,62 +414,73 @@ export function analyzeVerbToken(token) {
 
 // ---------- Noun phrase ----------
 // token → {coptic, gender, definite, possessive?, adj?} ; consumes following adjective token too
+// ---------- Noun phrase ----------
+// token → {coptic, gender, definite, possessive?, adj?} ; consumes following adjective token too
 function parseNounToken(token, nextToken) {
   let t = normalizeArabic(token);
+  // accusative ـاً ("درسا", "رجلا"): strip the final ا; the object takes the article (G1)
+  let accusative = false;
+  if (t.endsWith("ا") && t.length > 2 && lookupNoun(t.slice(0, -1))) {
+    accusative = true;
+    t = t.slice(0, -1);
+  }
   // whole word BEFORE stripping ال: "الله" is not ال + له
   const whole0 = lookupNoun(t);
   if (whole0 && (whole0.definite || whole0.proper)) {
     let text = whole0.coptic;
     let consumed = 0;
     if (nextToken) {
-      const adjKey = stripDefinite(normalizeArabic(nextToken)).replace(/ه$/, "");
-      const adj = CURATED_ADJ[adjKey];
-      if (adj) { text = `${text} ⲛ̀${adj}`; consumed = 1; }
+      const adj = CURATED_ADJ[adjKeyOf(nextToken)];
+      if (adj) { const form = adj[whole0.gender] ?? adj.m; text = `${text} ${adjLinker(form)}${form}`; consumed = 1; }
     }
-    return { text, gender: whole0.gender, definite: true, consumed };
+    return { text, gender: whole0.gender, definite: true, consumed, accusative };
   }
+  // an accusative ـاً form ("رجلا") is INDEFINITE — definiteness comes only from ال (G1)
   let definite = false;
   if (t.startsWith("ال") && t.length > 3) { definite = true; t = t.slice(2); }
   // whole word first: "الظلمة" is one word, not "ظلم + ـه"
-  const whole = lookupNoun(t);
+  // (also try with the initial alif restored: "المرأة" -> stem "مراة", word "امرأة")
+  const whole = lookupNoun(t) ?? lookupNoun("ا" + t);
   if (whole) {
     let text;
     if (whole.proper || whole.definite) text = whole.coptic;
-    else if (definite) text = whole.gender === "f" ? `ϯ${whole.coptic}` : whole.gender === "pl" ? `ⲛⲓ${whole.coptic}` : `ⲡⲓ${whole.coptic}`;
+    else if (definite) text = definiteArticle(whole.gender, whole.coptic);
     else text = whole.gender === "pl" ? `ϩⲁⲛ${whole.coptic}` : `ⲟⲩ${whole.coptic}`;
     let consumed = 0;
     if (nextToken) {
-      const adjKey = stripDefinite(normalizeArabic(nextToken)).replace(/ه$/, "");
-      const adj = CURATED_ADJ[adjKey];
-      if (adj) { text = `${text} ⲛ̀${adj}`; consumed = 1; }
+      const adj = CURATED_ADJ[adjKeyOf(nextToken)];
+      if (adj) { const form = adj[whole.gender] ?? adj.m; text = `${text} ${adjLinker(form)}${form}`; consumed = 1; }
     }
-    return { text, gender: whole.gender, definite, consumed };
+    return { text, gender: whole.gender, definite, consumed, accusative };
   }
   // possessive suffix (longest first)
   for (const suf of ["ها", "كم", "هم", "نا", "كي", "ي", "ك", "ه"]) {
-    if (t.length > 3 && t.endsWith(suf)) {
+    if (t.endsWith(suf) && t.length - suf.length >= 2) {
       const stem = t.slice(0, -suf.length);
-      const noun = lookupNoun(stem);
+      // ة → ت before a suffix: "كنيستي" = كنيسة + ي (R9)
+      // ة → ت before a suffix: "كنيستي" = كنيسة + ي — the stem's final ت IS the ة (R9)
+      const noun = lookupNoun(stem)
+        ?? (stem.endsWith("ت") ? lookupNoun(stem.slice(0, -1) + "ه") ?? lookupNoun(stem.slice(0, -1) + "ة") : null)
+        ?? lookupNoun(stem + "ة") ?? lookupNoun(stem + "ه");
       if (noun) {
         const pref = POSSESSIVE[suf][noun.gender] ?? POSSESSIVE[suf].m;
-        return { text: `${pref}${noun.coptic}`, gender: noun.gender, definite: true, consumed: 0 };
+        return { text: `${pref}${noun.coptic}`, gender: noun.gender, definite: true, consumed: 0, accusative };
       }
     }
   }
-  const noun = lookupNoun(t);
+  const noun = lookupNoun(t) ?? lookupNoun("ا" + t);
   if (!noun) return null;
   let text;
   if (noun.proper || noun.definite) text = noun.coptic;
-  else if (definite) text = noun.gender === "f" ? `ϯ${noun.coptic}` : noun.gender === "pl" ? `ⲛⲓ${noun.coptic}` : `ⲡⲓ${noun.coptic}`;
+  else if (definite) text = definiteArticle(noun.gender, noun.coptic);
   else text = noun.gender === "pl" ? `ϩⲁⲛ${noun.coptic}` : `ⲟⲩ${noun.coptic}`;
-  // adjective follows? "رجل حكيم" → noun ⲛ̀ adj
+  // adjective follows? "رجل حكيم" → noun ⲛ̀/ⲙ̀ adj
   let consumed = 0;
   if (nextToken) {
-    const adjKey = stripDefinite(normalizeArabic(nextToken)).replace(/ه$/, "");
-    const adj = CURATED_ADJ[adjKey];
-    if (adj) { text = `${text} ⲛ̀${adj}`; consumed = 1; }
+    const adj = CURATED_ADJ[adjKeyOf(nextToken)];
+    if (adj) { const form = adj[noun.gender] ?? adj.m; text = `${text} ${adjLinker(form)}${form}`; consumed = 1; }
   }
-  return { text, gender: noun.gender, definite, consumed };
+  return { text, gender: noun.gender, definite, consumed, accusative };
 }
 
 // ---------- Main translation ----------
@@ -405,16 +491,29 @@ export function translateSentence(input) {
   if (/[a-zA-Z\u2C80-\u2CFF\u03E2-\u03EF]/.test(norm)) return { ok: false, error: "اكتب الجملة بالعربي بس." };
   const tokens = norm.split(" ").filter(Boolean);
   if (tokens.length > 12) return { ok: false, error: "الجملة طويلة — جرّب جملة أقصر (حتى 12 كلمة)." };
+  // 2nd-person feminine from the raw (pre-normalization) token: "أنتِ" loses its kasra in normalizeArabic (R4)
+  const rawTokens = raw.replace(/[؟?!.،,]+$/u, "").split(/\s+/).filter(Boolean);
+  const has2fSubject = rawTokens.some((t) => t.replace(/[أإآٱ]/g, "ا") === "انتِ");
 
   // 1. exact phrasebook hit
-  if (PHRASES[norm]) return { ok: true, coptic: PHRASES[norm], unknown: [], via: "phrase" };
+  const phrase = phraseLookup(norm);
+  if (phrase) return { ok: true, coptic: phrase, unknown: [], via: "phrase" };
 
   const unknown = [];
   // 2. question?
   let qword = "";
   let body = tokens;
   for (let i = 0; i < Math.min(2, tokens.length); i++) {
-    if (QUESTION_WORDS[tokens[i]] !== undefined) { qword = QUESTION_WORDS[tokens[i]]; body = tokens.slice(i + 1); break; }
+    if (QUESTION_WORDS[tokens[i]] !== undefined) {
+      // "من" + noun is the preposition من ("from"), not the question "who" (R11)
+      if (tokens[i] === "من") {
+        const nxt = tokens[i + 1];
+        if (nxt && !SUBJ_PRONOUNS[nxt] && !DEMONSTRATIVE[nxt] && !analyzeVerbToken(nxt) && parseNounToken(nxt, null)) {
+          continue;
+        }
+      }
+      qword = QUESTION_WORDS[tokens[i]]; body = tokens.slice(i + 1); break;
+    }
   }
 
   // 3. negation (before the verb, or after a subject pronoun: "أنا لا أحب")
@@ -426,6 +525,10 @@ export function translateSentence(input) {
   if (rest[0] === "لا" || rest[0] === "لم" || rest[0] === "لن" || rest[0] === "ما") {
     neg = rest[0]; rest = rest.slice(1);
   }
+  // noun subject + negation: "بطرس لم يسمع" — pull the neg word out, keep the noun (R3)
+  if (!neg && rest.length >= 3 && ["لا", "لم", "لن", "ما"].includes(rest[1]) && !SUBJ_PRONOUNS[rest[0]] && parseNounToken(rest[0], null) && analyzeVerbToken(rest[2])) {
+    neg = rest[1]; rest = [rest[0], ...rest.slice(2)];
+  }
   // يوجد / ليس
   if (rest[0] === "يوجد") {
     const np = parseNounToken(rest[1] ?? "", rest[2]);
@@ -436,7 +539,7 @@ export function translateSentence(input) {
     if (np) return { ok: true, coptic: `ⲙ̀ⲙⲟⲛ ${np.text}`, unknown, via: "exists" };
   }
   // عندي/عندك/عنده + noun
-  const haveMatch = /^عند(ي|ك|ه|ها|نا|كم|هم)$/.exec(rest[0] ?? "");
+  const haveMatch = /^عند(ي|كي|ك|ه|ها|نا|كم|هم)$/.exec(rest[0] ?? "");
   if (haveMatch) {
     const np = parseNounToken(rest[1] ?? "", rest[2]);
     if (np && HAVE_PREFIX[haveMatch[1]]) {
@@ -452,13 +555,30 @@ export function translateSentence(input) {
     if (neg === "لا") return { ok: true, coptic: `ⲙ̀ⲡⲉⲣ${verb}${tail}`, unknown, via: "prohibition" };
     return { ok: true, coptic: `${verb}${tail}`, unknown, via: "imperative" };
   }
+  // imperative + pronoun suffix: "أعطني" → ⲙⲟⲓ ⲛⲏⲓ (R16)
+  if (!neg) {
+    for (const suf of ["ني", "ك", "كي", "ه", "ها", "نا", "كم", "هم"]) {
+      if (impTok.endsWith(suf) && impTok.length - suf.length >= 2) {
+        const stemTok = impTok.slice(0, -suf.length);
+        const imp = IMPERATIVE_SPECIAL[stemTok] ?? (stemTok.startsWith("ا") ? lookupVerbStem(stemTok.slice(1))?.f1 : null);
+        if (imp) {
+          const tail = buildTail(rest.slice(1), { f1: imp }, unknown);
+          return { ok: true, coptic: `${imp} ${IMPERATIVE_PRONOUN[suf]}${tail}`, unknown, via: "imperative" };
+        }
+      }
+    }
+  }
   if (!neg && impTok.startsWith("ا") && impTok.length > 2) {
-    const stem = impTok.slice(1);
-    const v = lookupVerbStem(stem);
-    if (v && v.f1) {
-      const tail = buildTail(rest.slice(1), v, unknown);
-      if (neg === "لا") return { ok: true, coptic: `ⲙ̀ⲡⲉⲣ${v.f1}${tail}`, unknown, via: "prohibition" };
-      return { ok: true, coptic: `${v.f1}${tail}`, unknown, via: "imperative" };
+    // a definite noun is not an imperative: "الأم" is not "اعلم" (R13)
+    const asNoun = parseNounToken(impTok, null);
+    if (!asNoun?.definite) {
+      const stem = impTok.slice(1);
+      const v = lookupVerbStem(stem) ?? lookupVerbStem(stem + "ي");
+      if (v && v.f1) {
+        const tail = buildTail(rest.slice(1), v, unknown);
+        if (neg === "لا") return { ok: true, coptic: `ⲙ̀ⲡⲉⲣ${v.f1}${tail}`, unknown, via: "prohibition" };
+        return { ok: true, coptic: `${v.f1}${tail}`, unknown, via: "imperative" };
+      }
     }
   }
   // prohibition with present 2nd person: "لا تتكلم" → ⲙ̀ⲡⲉⲣ + infinitive
@@ -476,10 +596,28 @@ export function translateSentence(input) {
   let subjectGender = "m";
   let nounSubject = null;
   let i = 0;
+  let subjectAmbiguous2 = false;
   if (SUBJ_PRONOUNS[rest[0]]) {
-    person = SUBJ_PRONOUNS[rest[0]].person;
-    subjectText = SUBJ_PRONOUNS[rest[0]].separate;
-    subjectGender = person === "2f" || person === "3f" ? "f" : person === "3p" ? "pl" : "m";
+    if (rest[0] === "انت" && has2fSubject) {
+      // "أنتِ" with kasra (R4)
+      person = "2f";
+      subjectText = SUBJ_PRONOUNS["انتي"].separate;
+      subjectGender = "f";
+    } else {
+      person = SUBJ_PRONOUNS[rest[0]].person;
+      subjectText = SUBJ_PRONOUNS[rest[0]].separate;
+      subjectGender = person === "2f" || person === "3f" ? "f" : person === "3p" ? "pl" : "m";
+      subjectAmbiguous2 = rest[0] === "انت";
+    }
+    i = 1;
+  } else if (DEMONSTRATIVE[rest[0]] && rest[1] && analyzeVerbToken(rest[1])?.verb) {
+    // demonstrative pronoun as subject: "هؤلاء يكتبون الدرس" → ⲛⲁⲓ + verb (R17/R18)
+    const d = DEMONSTRATIVE[rest[0]];
+    nounSubject = {
+      text: d.pron,
+      gender: rest[0] === "هولاء" || rest[0] === "اوليك" ? "pl" : rest[0] === "هذه" || rest[0] === "تلك" ? "f" : "m",
+      definite: true, consumed: 0,
+    };
     i = 1;
   } else {
     const ns = parseNounToken(rest[0] ?? "", null);
@@ -491,8 +629,24 @@ export function translateSentence(input) {
   let verbInfo = null;
   let verbIdx = -1;
   for (let j = i; j < rest.length; j++) {
+    // a definite noun is not a verb: "الأم" is not the verb "لام" (R13/R18).
+    // Only ال-initial tokens: "كتبنا" also parses as noun+possessive ("our books")
+    // but after a pronoun subject it is the 1p-past verb ("we wrote") — and a verb
+    // never takes ال, so ال is the unambiguous nominal marker.
+    const asNoun = rest[j].startsWith("ال") ? parseNounToken(rest[j], null) : null;
+    if (asNoun?.definite) continue;
     const a = analyzeVerbToken(rest[j]);
     if (a && a.verb) { verbInfo = a; verbIdx = j; break; }
+  }
+
+  // Arabic VSO: verb-initial + noun + object → the noun is the subject (R28)
+  let tailStart = verbIdx + 1;
+  if (verbInfo && !nounSubject && !person && verbIdx === i && rest[verbIdx + 1]) {
+    const candNoun = parseNounToken(rest[verbIdx + 1], null);
+    if (candNoun && rest.length > verbIdx + 2) {
+      nounSubject = candNoun;
+      tailStart = verbIdx + 2;
+    }
   }
 
   // 7. no verb → nominal sentence: subject + predicate + ⲡⲉ/ⲧⲉ/ⲛⲉ
@@ -501,18 +655,44 @@ export function translateSentence(input) {
     if (qword && rest.length === 1 && DEMONSTRATIVE[rest[0]]) {
       return { ok: true, coptic: `${qword} ${DEMONSTRATIVE[rest[0]].pron}`, unknown, via: "question-demonstrative" };
     }
+    // demonstrative adjective + noun: "هذا الرجل" → ⲡⲁⲓⲣⲱⲙⲓ (R17)
+    if (rest.length === 2 && DEMONSTRATIVE[rest[0]]) {
+      const n = parseNounToken(rest[1], null);
+      if (n) {
+        const bare = cleanCoptic(n.text).replace(/^(ⲡⲓ|ϯ|ⲛⲓ|ⲟⲩ|ϩⲁⲛ|ⲫ̀|ⲑ̀)/, "");
+        let text = `${DEMONSTRATIVE[rest[0]].adj}${bare}`;
+        if (qword) text = `${qword} ${text}`;
+        return { ok: true, coptic: text, unknown, via: "demonstrative-np" };
+      }
+    }
     // bare noun phrase alone ("كتابي", "الكتاب الجديد")
     if (rest.length <= 2 && !subjectText && !DEMONSTRATIVE[rest[0]]) {
       const np0 = parseNounToken(rest[0] ?? "", rest[1]);
-      // "الكتاب الجديد" (definite adjective) is a noun phrase; "الكنيسة جديدة" (bare adjective) is a nominal sentence
-      if (np0 && (rest.length === 1 || (np0.consumed === 1 && normalizeArabic(rest[1]).startsWith("ال")))) {
-        return { ok: true, coptic: np0.text, unknown, via: "noun-phrase" };
+      // "الكتاب الجديد" (definite + definite) and "رجل حكيم" (indefinite + indefinite) are
+      // noun phrases; "الكنيسة جديدة" (definite noun + bare adjective) is a nominal sentence (R19)
+      const adjAgrees = rest.length === 2 && np0 && np0.consumed === 1 && normalizeArabic(rest[1]).startsWith("ال") === np0.definite;
+      if (np0 && (rest.length === 1 || adjAgrees)) {
+        let text = np0.text;
+        if (qword) {
+          if (qword === "ⲟⲩⲏⲣ") {
+            // كم + bare noun, no article (R24)
+            const bare = cleanCoptic(text).replace(/^(ⲡⲓ|ϯ|ⲛⲓ|ⲟⲩ|ϩⲁⲛ|ⲫ̀|ⲑ̀)/, "");
+            text = `ⲟⲩⲏⲣ ⲛ̀${bare}`;
+          } else {
+            text = `${qword} ${text}`;
+          }
+        }
+        return { ok: true, coptic: text, unknown, via: "noun-phrase" };
       }
     }
     // bare prepositional phrase alone ("في الكنيسة")
     if (PREPOSITIONS[rest[0]] && rest[1]) {
       const np0 = parseNounToken(rest[1], rest[2]);
-      if (np0) return { ok: true, coptic: `${PREPOSITIONS[rest[0]]} ${np0.text}`, unknown, via: "prep-phrase" };
+      if (np0) {
+        let text = `${PREPOSITIONS[rest[0]]} ${np0.text}`;
+        if (qword) text = `${qword} ${text}`;
+        return { ok: true, coptic: text, unknown, via: "prep-phrase" };
+      }
     }
     const subjTok = rest[i];
     const predTok = rest[i + 1];
@@ -521,10 +701,10 @@ export function translateSentence(input) {
       : subjectText
       ? { text: subjectText, gender: subjectGender }
       : subjTok && DEMONSTRATIVE[subjTok]
-        ? { text: DEMONSTRATIVE[subjTok].pron, gender: subjTok === "هذه" || subjTok === "تلك" ? "f" : subjTok === "هؤلاء" || subjTok === "اولئك" ? "pl" : "m" }
+        ? { text: DEMONSTRATIVE[subjTok].pron, gender: subjTok === "هذه" || subjTok === "تلك" ? "f" : subjTok === "هولاء" || subjTok === "اوليك" ? "pl" : "m" }
         : subjTok ? parseNounToken(subjTok, null) : null;
     if (!subj && subjTok && DEMONSTRATIVE[subjTok]) {
-      subj = { text: DEMONSTRATIVE[subjTok].pron, gender: subjTok === "هذه" || subjTok === "تلك" ? "f" : subjTok === "هؤلاء" || subjTok === "اولئك" ? "pl" : "m" };
+      subj = { text: DEMONSTRATIVE[subjTok].pron, gender: subjTok === "هذه" || subjTok === "تلك" ? "f" : subjTok === "هولاء" || subjTok === "اوليك" ? "pl" : "m" };
     }
     // locative: subject already consumed + PP ("أنا في الكنيسة", "الرجل في الكنيسة")
     if (subj && (subjectText || nounSubject) && subjTok && PREPOSITIONS[subjTok]) {
@@ -544,36 +724,57 @@ export function translateSentence(input) {
         return { ok: true, coptic: out, unknown, via: "locative" };
       }
     }
-    // predicate position: try the adjective FIRST ("جديدة" is an adjective, not "جديد + ـه")
+    // predicate position: try the adjective FIRST ("جديدة" is an adjective, not "جديد + ـه").
+    // Predicate adjectives keep the masculine (citation) form: "الكنيسة جديدة" → ⲟⲩⲃⲉⲣⲓ.
     let pred = null;
-    if (predTok) {
-      const adjKey0 = stripDefinite(normalizeArabic(predTok)).replace(/ه$/, "");
-      const adj0 = CURATED_ADJ[adjKey0];
-      if (adj0) pred = { text: `ⲟⲩ${adj0}`, gender: subj ? subj.gender : "m" };
+    let copulaFirst = false;
+    // pronoun subject + noun + adjective: the predicate is the noun+adj phrase (R22)
+    if (subjectText && subjTok && predTok) {
+      const subjNoun = parseNounToken(subjTok, null);
+      if (subjNoun && CURATED_ADJ[adjKeyOf(predTok)]) {
+        pred = parseNounToken(subjTok, predTok);
+      }
+    }
+    if (!pred && predTok) {
+      const adj0 = CURATED_ADJ[adjKeyOf(predTok)];
+      if (adj0) pred = { text: `ⲟⲩ${adj0.m}`, gender: subj ? subj.gender : "m" };
     }
     if (!pred) pred = predTok ? parseNounToken(predTok, rest[i + 2]) : null;
     // subject already consumed ("أنا بطرس"): the remaining token IS the predicate
     if (!pred && subjectText && subjTok && !predTok) {
       pred = parseNounToken(subjTok, null);
       if (!pred) {
-        const adjKey = stripDefinite(normalizeArabic(subjTok)).replace(/ه$/, "");
-        const adj = CURATED_ADJ[adjKey];
-        if (adj) pred = { text: `ⲟⲩ${adj}`, gender: subj ? subj.gender : "m" };
+        const adj = CURATED_ADJ[adjKeyOf(subjTok)];
+        if (adj) pred = { text: `ⲟⲩ${adj.m}`, gender: subj ? subj.gender : "m" };
       }
     }
     if (!pred && predTok) {
-      const adjKey = stripDefinite(normalizeArabic(predTok)).replace(/ه$/, "");
-      const adj = CURATED_ADJ[adjKey];
-      if (adj) pred = { text: `ⲟⲩ${adj}`, gender: subj ? subj.gender : "m" };
+      const adj = CURATED_ADJ[adjKeyOf(predTok)];
+      if (adj) pred = { text: `ⲟⲩ${adj.m}`, gender: subj ? subj.gender : "m" };
+    }
+    // "الله ليس محبة" — ليس between subject and predicate is a nominal negation (R23)
+    if (!pred && !neg && predTok === "ليس" && rest[i + 2]) {
+      pred = parseNounToken(rest[i + 2], rest[i + 3]);
+      if (pred) neg = true;
+    }
+    // "هذا هو الرجل" — هو/هي between subject and predicate is a copula pronoun (R18)
+    if (!pred && !neg && predTok && SUBJ_PRONOUNS[predTok] && rest[i + 2]) {
+      pred = parseNounToken(rest[i + 2], rest[i + 3]);
+      if (pred) copulaFirst = true;
     }
     // lone demonstrative after a question word: "من هذا؟" → ⲛⲓⲙ ⲫⲁⲓ
-    if (subj && !predTok && qword) {
+    // (must not fire when the remaining token became the predicate: "هل أنت بطرس؟")
+    if (subj && !predTok && !pred && qword) {
       return { ok: true, coptic: `${qword} ${subj.text}`, unknown, via: "question-demonstrative" };
     }
     if (subj && pred) {
       const copula = subj.gender === "f" ? "ⲧⲉ" : subj.gender === "pl" ? "ⲛⲉ" : "ⲡⲉ";
-      let out = `${subj.text} ${pred.text} ${copula}`;
-      if (neg) out = `${subj.text} ${pred.text} ⲁⲛ ${copula}`;
+      let out;
+      // identification after a question word ("هل أنت بطرس؟" → ⲛ̀ⲑⲟⲕ ⲡⲉ Ⲡⲉⲧⲣⲟⲥ, R27):
+      // pronoun subject + definite predicate takes the copula between subject and predicate
+      if (copulaFirst || (qword && subjectText && pred.definite)) out = `${subj.text} ${copula} ${pred.text}`;
+      else if (neg) out = `${subj.text} ${pred.text} ⲁⲛ ${copula}`;
+      else out = `${subj.text} ${pred.text} ${copula}`;
       if (qword) out = `${qword} ${out}`;
       return { ok: true, coptic: out, unknown, via: "nominal" };
     }
@@ -584,7 +785,8 @@ export function translateSentence(input) {
 
   // 8. verbal sentence
   if (!person) person = verbInfo.person;
-  const tense = neg === "لم" ? "past" : verbInfo.tense;
+  else if (subjectAmbiguous2 && person === "2m" && verbInfo.person === "2f") person = "2f"; // the verb disambiguates أنت (R4)
+  const tense = neg === "لم" ? "past" : neg === "لن" ? "future" : verbInfo.tense;
   const verb = verbInfo.verb;
   const form = verb.f1 ?? verb.f2 ?? verb.f3 ?? null;
   if (!form) return { ok: false, error: "الفعل ده مش في القاموس بصيغة مناسبة." };
@@ -593,26 +795,37 @@ export function translateSentence(input) {
   if (nounSubject) {
     // noun subject: present → noun + verb; past → ⲁ + noun + verb; future → noun + ⲛⲁ + verb
     if (neg === "لم") verbPart = `ⲙ̀ⲡⲉ ${nounSubject.text} ${form}`;
+    else if (neg === "لن") verbPart = `${nounSubject.text} ⲛⲁ${form}`;
     else if (tense === "past") verbPart = `ⲁ ${nounSubject.text} ${form}`;
     else if (tense === "future") verbPart = `${nounSubject.text} ⲛⲁ${form}`;
     else verbPart = `${nounSubject.text} ${form}`;
   } else if (neg === "لم") {
     verbPart = `${PAST_NEG_PREFIX[person]}${form}`;
   } else if (neg === "لن") {
-    const negFut = { "1s": "ⲛ̀ⲛⲁ", "2m": "ⲛ̀ⲛⲉⲕ", "2f": "ⲛ̀ⲛⲉ", "3m": "ⲛ̀ⲛⲉϥ", "3f": "ⲛ̀ⲛⲉⲥ", "1p": "ⲛ̀ⲛⲉⲛ", "2p": "ⲛⲛⲉⲧⲉⲛ", "3p": "ⲛ̀ⲛⲟⲩ" };
-    verbPart = `${negFut[person]}${form}`;
+    // لن → future + ⲁⲛ (book 1 §14), not the old ⲛ̀ⲛⲁ- forms (R2)
+    verbPart = `${tensePrefix("future", person, form)}${form}`;
   } else {
     verbPart = `${tensePrefix(tense, person, form)}${form}`;
   }
 
-  const after = rest.slice(verbIdx + 1);
+  const after = rest.slice(tailStart);
   const tail = buildTail(after, verb, unknown);
   let out = `${verbPart}${tail}`;
-  if (neg === "لا") out += " ⲁⲛ";
-  if (qword) out = `${qword} ${out}`;
+  if (neg === "لا" || neg === "لن") out += " ⲁⲛ";
+  if (qword) {
+    if (!nounSubject) {
+      // question word + verb → ⲉⲧⲉ- before the verb (§25); past → ⲉⲧⲁ- (R26)
+      if (neg === "لم") out = `${qword} ⲉⲧⲉ${out}`;
+      else if (tense === "past") out = `${qword} ⲉⲧⲁ${out.slice(1)}`;
+      else out = `${qword} ⲉⲧⲉ${out}`;
+    } else {
+      out = `${qword} ${out}`;
+    }
+  }
   return { ok: true, coptic: out, unknown, via: nounSubject ? "verbal-noun-subj" : "verbal" };
 }
 
+// tail builder for noun-subject sentences (object + PPs after verb)
 // tail builder for noun-subject sentences (object + PPs after verb)
 function buildTail(after, verb, unknown) {
   const parts = [];
@@ -626,9 +839,22 @@ function buildTail(after, verb, unknown) {
     }
     const np = parseNounToken(tok, after[k + 1]);
     if (np) {
-      const firstLetter = cleanCoptic(np.text).replace(/^(ⲡⲓ|ϯ|ⲛⲓ|ⲟⲩ|ϩⲁⲛ)/, "").charAt(0);
-      const marker = objectMarker(firstLetter || "ⲁ");
+      // object marker from the article: ⲡⲓ/ⲫ̀ → ⲙ̀, ϯ/ⲑ̀/ⲛⲓ → ⲛ̀; else stem-based (R1)
+      const t = cleanCoptic(np.text);
+      let marker;
+      if (t.startsWith("ⲡⲓ") || t.startsWith("ⲫ̀")) marker = "ⲙ̀";
+      else if (t.startsWith("ϯ") || t.startsWith("ⲑ̀") || t.startsWith("ⲛⲓ")) marker = "ⲛ̀";
+      else marker = objectMarker(t.replace(/^(ⲟⲩ|ϩⲁⲛ)/, "").charAt(0) || "ⲁ");
       if (verb.f2 && !verb.f1) parts.push(np.text);
+      else if (verb.f1 === "ⲛⲁⲩ") {
+        // ⲛⲁⲩ takes ⲉ̀; before an indefinite article it attaches as ⲉ (R29)
+        if (t.startsWith("ⲟⲩ") || t.startsWith("ϩⲁⲛ")) parts.push(`ⲉ${np.text}`);
+        else if (np.accusative) {
+          const bare = t.replace(/^(ⲡⲓ|ϯ|ⲛⲓ)/, "");
+          parts.push(`ⲉ${np.gender === "pl" ? "ϩⲁⲛ" : "ⲟⲩ"}${bare}`);
+        }
+        else parts.push(`ⲉ̀ ${np.text}`);
+      }
       else parts.push(`${marker} ${np.text}`);
       k += 1 + (np.consumed || 0);
       continue;
