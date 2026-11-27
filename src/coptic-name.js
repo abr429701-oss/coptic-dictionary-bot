@@ -310,6 +310,16 @@ function transliterateEnglishWord(word) {
 const HAS_ARABIC = /[\u0600-\u06FF]/u;
 const HAS_LATIN = /[A-Za-z]/u;
 
+// ألقاب كهنوتية في أول الاسم — بتتترجم على طول زي ما هي،
+// من غير ما تعدّي على التحويل التلقائي (قاعدة المستخدم).
+const TITLE_PREFIXES = {
+  "القمص": "Ⲡⲓϩⲏⲅⲟⲩⲙⲉⲛⲟⲥ",
+  "القس": "Ⲡⲓⲟⲩⲏⲃ",
+  "الكاهن": "Ⲡⲓⲟⲩⲏⲃ",
+  "الاخ": "Ⲡⲓⲥⲟⲛ",
+  "الاخت": "Ϯⲥⲱⲛⲓ",
+};
+
 // الاسم كاملًا (كلمة أو أكثر) → القبطي، أو null لو مفيش حروف صالحة.
 export function transliterateNameToCoptic(name) {
   const raw = String(name ?? "").replace(ARABIC_DIACRITICS_KEEP_SHADDA, "").trim();
@@ -320,7 +330,12 @@ export function transliterateNameToCoptic(name) {
   if (!words.every((w) => (w.match(/[\u0600-\u06FFA-Za-z]/gu) ?? []).length >= 1)) return null;
   const letters = words.join("").replace(/[^A-Za-z\u0600-\u06FF]/gu, "");
   if (letters.length < 2) return null;
-  const parts = words.map((w) => {
+  const parts = words.map((w, idx) => {
+    // اللقب الكهنوتي في أول الاسم بس.
+    if (idx === 0 && HAS_ARABIC.test(w)) {
+      const title = TITLE_PREFIXES[normalizeArabicWord(w)];
+      if (title) return title;
+    }
     const key = HAS_ARABIC.test(w) ? normalizeArabicWord(w) : w.toLowerCase();
     return KNOWN_BY_KEY.get(key) ?? (HAS_ARABIC.test(w) ? transliterateArabicWord(w) : transliterateEnglishWord(w));
   });

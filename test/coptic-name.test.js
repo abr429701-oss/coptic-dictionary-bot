@@ -206,6 +206,19 @@ test("coptic-name: فعيل pattern puts ⲏ for the 3rd-letter ي (جميل/ر�
   assert.equal(transliterateNameToCoptic("عادل"), "Ⲁⲇⲓⲗ");
 });
 
+test("coptic-name: priest titles at the start map to fixed Coptic words", () => {
+  assert.equal(transliterateNameToCoptic("القمص ابرام"), "Ⲡⲓϩⲏⲅⲟⲩⲙⲉⲛⲟⲥ Ⲁⲃⲣⲁⲙ");
+  assert.equal(transliterateNameToCoptic("القمص مينا"), "Ⲡⲓϩⲏⲅⲟⲩⲙⲉⲛⲟⲥ Ⲙⲏⲛⲁ");
+  assert.equal(transliterateNameToCoptic("القس مينا"), "Ⲡⲓⲟⲩⲏⲃ Ⲙⲏⲛⲁ");
+  assert.equal(transliterateNameToCoptic("الكاهن شنودة"), "Ⲡⲓⲟⲩⲏⲃ Ϣⲉⲛⲟⲩϯⲁ");
+  assert.equal(transliterateNameToCoptic("القمص"), "Ⲡⲓϩⲏⲅⲟⲩⲙⲉⲛⲟⲥ");
+  // The title only applies at the start of the name.
+  assert.equal(transliterateNameToCoptic("ابرام القمص"), "Ⲁⲃⲣⲁⲙ Ⲁⲗⲁⲕⲁⲙⲁⲥ");
+  assert.equal(transliterateNameToCoptic("الاخ مينا"), "Ⲡⲓⲥⲟⲛ Ⲙⲏⲛⲁ");
+  assert.equal(transliterateNameToCoptic("الاخت مريم"), "Ϯⲥⲱⲛⲓ Ⲙⲁⲣⲓⲁ");
+  assert.equal(transliterateNameToCoptic("الاخت"), "Ϯⲥⲱⲛⲓ");
+});
+
 test("coptic-name: invalid input returns null", () => {
   assert.equal(transliterateNameToCoptic("12345"), null);
   assert.equal(transliterateNameToCoptic(""), null);
