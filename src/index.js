@@ -4592,7 +4592,7 @@ async function renderVoiceWordSuggestions(query, env) {
 }
 
 async function beginVoiceChoice(env, chatId, userId, user) {
-  await saveUser(env, userId, { ...user, voicePick: true, voiceRec: undefined });
+  await saveUser(env, userId, { ...user, voicePick: true, voiceRec: undefined, oralAwaiting: undefined });
   await telegram(env, "sendMessage", { chat_id: chatId, text: "🔎 أرسل الكلمة التي تريد تسجيلها، وسأعرض لك اقتراحات القاموس." });
 }
 
@@ -4602,18 +4602,18 @@ async function selectVoiceWord(env, chatId, userId, user, id) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: "لم أجد هذه الكلمة، أعد البحث من فضلك." });
     return;
   }
-  await saveUser(env, userId, { ...user, voicePick: false, voiceRec: { id: record.id, mode: "chosen" } });
+  await saveUser(env, userId, { ...user, voicePick: false, voiceRec: { id: record.id, mode: "chosen" }, oralAwaiting: undefined });
   await telegram(env, "sendMessage", { chat_id: chatId, text: voicePrompt({ ...record, recorded: 0, total: 1 }), parse_mode: "HTML" });
 }
 
 async function nextVoicePrompt(env, chatId, userId, user) {
   const item = await storeCall(env, { op: "voiceNext" });
   if (!item) {
-    await saveUser(env, userId, { ...user, voiceRec: undefined });
+    await saveUser(env, userId, { ...user, voiceRec: undefined, oralAwaiting: undefined });
     await telegram(env, "sendMessage", { chat_id: chatId, text: voicePrompt(null), parse_mode: "HTML" });
     return;
   }
-  await saveUser(env, userId, { ...user, voicePick: false, voiceRec: { id: item.id, mode: "sequential" } });
+  await saveUser(env, userId, { ...user, voicePick: false, voiceRec: { id: item.id, mode: "sequential" }, oralAwaiting: undefined });
   await telegram(env, "sendMessage", { chat_id: chatId, text: voicePrompt(item), parse_mode: "HTML" });
 }
 
@@ -8164,7 +8164,10 @@ async function handleUpdate(update, env, ctx) {
       const existing = await getOralAttendance((payload) => storeCall(env, payload), userId);
       if (existing?.lessons?.[lesson.id]) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: ORAL_ALREADY_TEXT }); return; }
       const u = await getUser(env, userId);
-      await saveUser(env, userId, { ...(u ?? {}), oralAwaiting: lesson.id });
+      // Starting the oral wait cancels any pending dictionary-word
+      // recording (/record voiceRec/voicePick, /uploadaudio adminFlow):
+      // the two voice flows must never share one incoming voice message.
+      await saveUser(env, userId, { ...(u ?? {}), oralAwaiting: lesson.id, voiceRec: undefined, voicePick: undefined, adminFlow: undefined });
       patchRegisteredCache(userId, { oralAwaiting: lesson.id });
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: oralPromptText(lesson.title) });
       return;
@@ -8442,6 +8445,10 @@ async function handleUpdate(update, env, ctx) {
       const word = text.slice("/uploadaudio".length).trim();
       if (!word) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✏️ الاستخدام: /uploadaudio <كلمة> ثم أرسل ملف الصوت/Voice." }); return; }
       await setAdminFlow(env, userId, { kind: "uploadaudio", word });
+      // Starting an audio upload cancels a stale oral wait, so the file
+      // is not swallowed by the oral flow (and vice versa).
+      const uploadUser = await getUser(env, userId);
+      if (uploadUser?.oralAwaiting) await saveUser(env, userId, { ...uploadUser, oralAwaiting: undefined });
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `🎙 أرسل الآن ملف الصوت (Voice أو audio) للكلمة «${escapeHtml(word.slice(0, 40))}».` });
       return;
     }
@@ -8754,11 +8761,11 @@ async function handleUpdate(update, env, ctx) {
       await studio.handleCommand(env, message.chat.id, userId);
       return;
     }
-    if (admin?.adminFlow?.kind === "uploadaudio" && (message.voice || message.audio)) {
+    if (admin?.adminFlow?.kind === "uploadaudio" && !admin?.oralAwaiting && (message.voice || message.audio)) {
       await uploadAdminAudio(env, message, userId, admin);
       return;
     }
-    if (admin?.voiceRec && (message.voice || message.audio)) {
+    if (admin?.voiceRec && !admin?.oralAwaiting && (message.voice || message.audio)) {
       await captureVoiceRecording(env, message, userId, admin, ctx);
       return;
     }

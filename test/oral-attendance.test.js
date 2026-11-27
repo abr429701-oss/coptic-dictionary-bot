@@ -272,3 +272,52 @@ test("/attendance for a student with no recordings says so", async () => {
   const calls = await say(kvEnv, STUDENT, "/attendance");
   assert.match(sent(calls).map((p) => p.text).join("\n"), /لسه ما سجلتش/);
 });
+
+// --- oral vs dictionary-word recording: the two voice flows must never
+// share one incoming voice message (live bug 2026-11-28: an admin mid
+// /record session tapped "سجّل الشفوي" and the voice was swallowed by
+// /record, replying "تم حفظ تسجيل الكلمة") -------------------------------
+
+function seedAdmin(kv, extra = {}) {
+  kv.store.set(`user:${ADMIN}`, { name: "Admin Test", registeredAt: "2026-11-28T00:00:00.000Z", lastLessonId: "m_learn_l1_03", ...extra });
+}
+
+test("oral wait wins over a stale /record session: the voice marks attendance, not a word", async () => {
+  const kv = fakeKv();
+  const kvEnv = { ...env, USERS: kv };
+  seedAdmin(kv, { voiceRec: { id: 25318, mode: "sequential" } });
+
+  const tapCalls = await say(kvEnv, ADMIN, ORAL_RECORD_BUTTON);
+  assert.match(sent(tapCalls).map((p) => p.text).join("\n"), /3 كلمات/);
+  const waiting = kv.store.get(`user:${ADMIN}`);
+  assert.equal(waiting.oralAwaiting, "m_learn_l1_03");
+  // Tapping the oral button cancels the pending word-recording session.
+  assert.equal(waiting.voiceRec, undefined);
+  assert.equal(waiting.voicePick, undefined);
+
+  const voiceCalls = await sendVoice(kvEnv, ADMIN, { file_id: "voice-oral", duration: 5, file_size: 5000 });
+  const texts = sent(voiceCalls).map((p) => p.text).join("\n");
+  assert.match(texts, /تم تسجيل حضورك/);
+  assert.doesNotMatch(texts, /تم حفظ تسجيل/);
+  assert.equal(kv.store.get(`oral:att:${ADMIN}`).lessons["m_learn_l1_03"] !== undefined, true);
+  assert.equal(JSON.stringify(kv.store.get(`oral:att:${ADMIN}`)).includes("voice-oral"), false);
+});
+
+test("a stale oral wait does not steal a dictionary-word recording", async () => {
+  const kv = fakeKv();
+  const kvEnv = { ...env, USERS: kv };
+  // Admin left an oral wait open, then starts /record: the oral wait ends.
+  seedAdmin(kv, { oralAwaiting: "m_learn_l1_03" });
+  await say(kvEnv, ADMIN, "/record");
+  assert.equal(kv.store.get(`user:${ADMIN}`).oralAwaiting, undefined);
+});
+
+test("/uploadaudio cancels a stale oral wait", async () => {
+  const kv = fakeKv();
+  const kvEnv = { ...env, USERS: kv };
+  seedAdmin(kv, { oralAwaiting: "m_learn_l1_03" });
+  await say(kvEnv, ADMIN, "/uploadaudio testword");
+  const after = kv.store.get(`user:${ADMIN}`);
+  assert.equal(after.oralAwaiting, undefined);
+  assert.equal(after.adminFlow?.kind, "uploadaudio");
+});
