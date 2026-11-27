@@ -100,6 +100,8 @@ test("coptic-name: curated names are spelled correctly (Arabic + English)", () =
   assert.equal(transliterateNameToCoptic("عماد"), "Ⲉⲙⲁⲇ");
   assert.equal(transliterateNameToCoptic("باسم"), "ⲃⲁⲥⲓⲙ");
   assert.equal(transliterateNameToCoptic("ماجد"), "ⲙⲁϫⲓⲇ");
+  assert.equal(transliterateNameToCoptic("خالد"), "Ϧⲁⲗⲓⲇ");
+  assert.equal(transliterateNameToCoptic("Khaled"), "Ϧⲁⲗⲓⲇ");
   assert.equal(transliterateNameToCoptic("جورج"), "Ⲅⲉⲱⲣⲅⲓⲟⲥ");
   assert.equal(transliterateNameToCoptic("George"), "Ⲅⲉⲱⲣⲅⲓⲟⲥ");
   assert.equal(transliterateNameToCoptic("فاطمة"), "Ⲫⲁϯⲙⲁ");
@@ -107,8 +109,8 @@ test("coptic-name: curated names are spelled correctly (Arabic + English)", () =
 });
 
 test("coptic-name: fallback transliteration is readable for unknown names", () => {
-  assert.equal(transliterateNameToCoptic("سالم"), "Ⲥⲁⲗⲁⲙ");
-  assert.equal(transliterateNameToCoptic("كريم"), "Ⲕⲁⲣⲓⲙ");
+  assert.equal(transliterateNameToCoptic("سالم"), "Ⲥⲁⲗⲓⲙ");
+  assert.equal(transliterateNameToCoptic("كريم"), "Ⲕⲁⲣⲏⲙ");
   assert.equal(transliterateNameToCoptic("منى"), "Ⲙⲁⲛⲁ");
   assert.equal(transliterateNameToCoptic("شادي"), "Ϣⲁⲇⲓ");
   assert.equal(transliterateNameToCoptic("Shady"), "Ϣⲁⲇⲓ");
@@ -120,8 +122,66 @@ test("coptic-name: English fallback matches the Android app's map exactly", () =
   assert.equal(transliterateNameToCoptic("Waleed"), "Ⲱⲁⲗⲉⲉⲇ");
   assert.equal(transliterateNameToCoptic("Cecilia"), "Ⲥⲉⲥⲓⲗⲓⲁ");
   assert.equal(transliterateNameToCoptic("Christine"), "Ⲭⲣⲓⲥⲧⲓⲛⲏ");
-  assert.equal(transliterateNameToCoptic("Khaled"), "Ϧⲁⲗⲉⲇ");
   assert.equal(transliterateNameToCoptic("Philip"), "Ⲫⲓⲗⲓⲡⲡⲟⲥ");
+});
+
+test("coptic-name: فاعل pattern puts ⲓ after the 3rd letter (ماجد/باسم/ماهر)", () => {
+  assert.equal(transliterateNameToCoptic("ماهر"), "Ⲙⲁϩⲓⲣ");
+  assert.equal(transliterateNameToCoptic("طارق"), "Ⲧⲁⲣⲓⲕ");
+  assert.equal(transliterateNameToCoptic("تامر"), "Ⲧⲁⲙⲓⲣ");
+  assert.equal(transliterateNameToCoptic("سالم"), "Ⲥⲁⲗⲓⲙ");
+  assert.equal(transliterateNameToCoptic("كامل"), "Ⲕⲁⲙⲓⲗ");
+  assert.equal(transliterateNameToCoptic("فاضل"), "Ϥⲁⲇⲓⲗ");
+  assert.equal(transliterateNameToCoptic("عادل"), "Ⲁⲇⲓⲗ");
+  assert.equal(transliterateNameToCoptic("حامد"), "Ϩⲁⲙⲓⲇ");
+  assert.equal(transliterateNameToCoptic("ساجد"), "Ⲥⲁϫⲓⲇ");
+  assert.equal(transliterateNameToCoptic("فارس"), "Ϥⲁⲣⲓⲥ");
+  assert.equal(transliterateNameToCoptic("باهر"), "Ⲃⲁϩⲓⲣ");
+  assert.equal(transliterateNameToCoptic("ناصر"), "Ⲛⲁⲥⲓⲣ");
+  // الاستثناء: الحرف الرابع ي — هو نفسه ⲓ، ومفيش حاجة بعده.
+  assert.equal(transliterateNameToCoptic("نادي"), "Ⲛⲁⲇⲓ");
+  assert.equal(transliterateNameToCoptic("رامي"), "Ⲣⲁⲙⲓ");
+  assert.equal(transliterateNameToCoptic("هادي"), "Ϩⲁⲇⲓ");
+  assert.equal(transliterateNameToCoptic("سامي"), "Ⲥⲁⲙⲓ");
+  // مش فاعل: القاعدة مبتتطبقش.
+  assert.equal(transliterateNameToCoptic("سلام"), "Ⲥⲁⲗⲁⲙ");
+  assert.equal(transliterateNameToCoptic("كمال"), "Ⲕⲁⲙⲁⲗ");
+  assert.equal(transliterateNameToCoptic("جمال"), "Ϫⲁⲙⲁⲗ");
+  assert.equal(transliterateNameToCoptic("عبدالسلام"), "Ⲁⲃⲁⲇⲁⲗⲁⲥⲁⲗⲁⲙ");
+  assert.equal(transliterateNameToCoptic("حمّاد"), "Ϩⲁⲙⲙⲁⲇ");
+});
+
+test("coptic-name: فعيل pattern puts ⲏ for the 3rd-letter ي (جميل/رتيب/وهيب/نصير)", () => {
+  assert.equal(transliterateNameToCoptic("جميل"), "Ϫⲁⲙⲏⲗ");
+  assert.equal(transliterateNameToCoptic("رتيب"), "Ⲣⲁⲧⲏⲃ");
+  assert.equal(transliterateNameToCoptic("وهيب"), "Ⲟⲩϩⲏⲃ");
+  assert.equal(transliterateNameToCoptic("نصير"), "Ⲛⲁⲥⲏⲣ");
+  assert.equal(transliterateNameToCoptic("كريم"), "Ⲕⲁⲣⲏⲙ");
+  assert.equal(transliterateNameToCoptic("سعيد"), "Ⲥⲁⲏⲇ");
+  assert.equal(transliterateNameToCoptic("وليد"), "Ⲱⲁⲗⲏⲇ");
+  assert.equal(transliterateNameToCoptic("شريف"), "Ϣⲁⲣⲏϥ");
+  assert.equal(transliterateNameToCoptic("أمير"), "Ⲁⲙⲏⲣ");
+  assert.equal(transliterateNameToCoptic("سمير"), "Ⲥⲁⲙⲏⲣ");
+  assert.equal(transliterateNameToCoptic("خليل"), "Ϧⲁⲗⲏⲗ");
+  assert.equal(transliterateNameToCoptic("عزيز"), "Ⲁⲍⲏⲍ");
+  assert.equal(transliterateNameToCoptic("سليم"), "Ⲥⲁⲗⲏⲙ");
+  // فعيلة: نفس الحكم.
+  assert.equal(transliterateNameToCoptic("جميلة"), "Ϫⲁⲙⲏⲗⲁ");
+  assert.equal(transliterateNameToCoptic("كريمة"), "Ⲕⲁⲣⲏⲙⲁ");
+  assert.equal(transliterateNameToCoptic("سعيدة"), "Ⲥⲁⲏⲇⲁ");
+  assert.equal(transliterateNameToCoptic("أميرة"), "Ⲁⲙⲏⲣⲁ");
+  // التصغير استثناء: الياء "اي" مش ⲏ.
+  assert.equal(transliterateNameToCoptic("حسين"), "Ϩⲟⲩⲥⲉⲓⲛ");
+  assert.equal(transliterateNameToCoptic("زبير"), "Ⲍⲟⲩⲃⲉⲓⲣ");
+  assert.equal(transliterateNameToCoptic("صهيب"), "Ⲥⲟⲩϩⲉⲓⲃ");
+  assert.equal(transliterateNameToCoptic("حذيفة"), "Ϩⲟⲩⲑⲉⲓϥⲁ");
+  // يسري: الياء الأولى "يو".
+  assert.equal(transliterateNameToCoptic("يسري"), "Ⲓⲟⲥⲣⲓ");
+  // "ئي" → ⲓⲏ.
+  assert.equal(transliterateNameToCoptic("رئيس"), "Ⲣⲁⲓⲏⲥ");
+  assert.equal(transliterateNameToCoptic("رئيسة"), "Ⲣⲁⲓⲏⲥⲁ");
+  assert.equal(transliterateNameToCoptic("مهرائيل"), "Ⲙⲟϩⲣⲁⲓⲏⲗ");
+  assert.equal(transliterateNameToCoptic("عبدالرئيس"), "Ⲁⲃⲁⲇⲁⲗⲁⲣⲓⲏⲥ");
 });
 
 test("coptic-name: invalid input returns null", () => {

@@ -141,6 +141,7 @@ const KNOWN_NAMES = [
   ["محمود", "mahmoud", "Ⲙⲁϩⲙⲟⲩⲇ"],
   ["مصطفى", "mostafa", "Ⲙⲟⲥⲧⲁⲫⲁ"],
   ["عمر", "omar", "Ⲟⲙⲁⲣ"],
+  ["عادل", "adel", "Ⲁⲇⲓⲗ"],
   ["عماد", "emad", "Ⲉⲙⲁⲇ"],
   ["باسم", "basim", "ⲃⲁⲥⲓⲙ"],
   ["ماجد", "maged", "ⲙⲁϫⲓⲇ"],
@@ -148,12 +149,22 @@ const KNOWN_NAMES = [
   ["علي", "ali", "Ⲁⲗⲓ"],
   ["حسن", "hassan", "Ϩⲁⲥⲁⲛ"],
   ["حسين", "hussein", "Ϩⲟⲩⲥⲉⲓⲛ"],
-  ["خالد", "khaled", "Ϧⲁⲗⲉⲇ"],
-  ["وليد", "walid", "Ⲱⲁⲗⲓⲇ"],
-  ["سعيد", "said", "Ⲥⲁⲓⲇ"],
+  ["خالد", "khaled", "Ϧⲁⲗⲓⲇ"],
+  ["وليد", "walid", "Ⲱⲁⲗⲏⲇ"],
+  ["سعيد", "said", "Ⲥⲁⲏⲇ"],
   ["فاطمة", "fatima", "Ⲫⲁϯⲙⲁ"],
   ["عائشة", "aisha", "Ⲁⲓϣⲁ"],
-  ["خديجة", "khadija", "Ϧⲁⲇⲓϫⲁ"],
+  ["خديجة", "khadija", "Ϧⲁⲇⲏϫⲁ"],
+  ["يسري", "yousry", "Ⲓⲟⲥⲣⲓ"],
+  ["يسري", "yousri", "Ⲓⲟⲥⲣⲓ"],
+  ["زبير", "zubair", "Ⲍⲟⲩⲃⲉⲓⲣ"],
+  ["زبير", "zubeir", "Ⲍⲟⲩⲃⲉⲓⲣ"],
+  ["صهيب", "suhaib", "Ⲥⲟⲩϩⲉⲓⲃ"],
+  ["حذيفة", "hudhayfa", "Ϩⲟⲩⲑⲉⲓϥⲁ"],
+  ["رئيس", "rais", "Ⲣⲁⲓⲏⲥ"],
+  ["رئيسة", "raisa", "Ⲣⲁⲓⲏⲥⲁ"],
+  ["مهرائيل", "mihrail", "Ⲙⲟϩⲣⲁⲓⲏⲗ"],
+  ["مهرائيل", "mehrail", "Ⲙⲟϩⲣⲁⲓⲏⲗ"],
   ["زينب", "zainab", "Ⲍⲉⲓⲛⲁⲃ"],
   ["اسماعيل", "ismail", "Ⲓⲥⲙⲁⲏⲗ"],
   ["يونس", "jonah", "Ⲓⲱⲛⲁⲥ"],
@@ -182,21 +193,50 @@ export function normalizeArabicWord(word) {
 // (لأن الاسم مكتوب من غير تشكيل) ومضاعفة الحرف عند الشدة.
 function transliterateArabicWord(word) {
   const clean = String(word ?? "").replace(ARABIC_DIACRITICS_KEEP_SHADDA, "").replace(/[أإآٱ]/gu, "ا");
+  const plain = clean.replace(/ّ/gu, "");
+  // قاعدة وزن فاعل (ماجد/باسم/ماهر/خالد): كلمة من 4 حروف، تاني حرف ا،
+  // والحرفين التالت والرابع ساكنين — التالت مكسور، فالحرف اللي يتحط
+  // بين التالت والرابع هو ⲓ مش ⲁ. لو الحرف الرابع ي (نادي/رامي/هادي)
+  // فهو نفسه ⲓ، ومفيش حاجة تتحط بعده. القاعدة للكلمة الكاملة بس،
+  // فأسماء زي عبدالسلام (السلام = سلام مش سالم) متتأثرش.
+  const isFael = plain.length === 4 && plain[1] === "ا"
+    && AR_MAP[plain[2]] && !VOWEL_UNITS.has(AR_MAP[plain[2]])
+    && AR_MAP[plain[3]] && !VOWEL_UNITS.has(AR_MAP[plain[3]]);
+  // قاعدة وزن فعيل (جميل/رتيب/وهيب/نصير): الياء التالتة ⲏ مش ⲓ —
+  // ياء طويلة. ونفس الحكم لفعيلة (جميلة/أميرة). الاستثناء: أسماء
+  // التصغير (حسين/زبير/صهيب/حذيفة) الياء فيها "اي" مش ⲏ، ودي
+  // محفوظة في القايمة فوق فمبتعدّيش على القاعدة دي.
+  const isFaeel = (plain.length === 4 && plain[2] === "ي"
+    && AR_MAP[plain[3]] && !VOWEL_UNITS.has(AR_MAP[plain[3]]))
+    || (plain.length === 5 && plain[2] === "ي" && plain[4] === "ة"
+    && AR_MAP[plain[3]] && !VOWEL_UNITS.has(AR_MAP[plain[3]]));
   const units = [];
-  for (const ch of clean) {
+  const unitLetter = [];
+  for (let li = 0; li < clean.length; li++) {
+    const ch = clean[li];
     if (ch === "ّ") {
       const last = units[units.length - 1];
-      if (last && !VOWEL_UNITS.has(last)) units.push(last);
+      if (last && !VOWEL_UNITS.has(last)) {
+        units.push(last);
+        unitLetter.push(unitLetter[unitLetter.length - 1]);
+      }
       continue;
     }
-    const unit = AR_MAP[ch];
-    if (unit) units.push(unit);
+    let unit = AR_MAP[ch];
+    // ياء فعيل ⲏ، وأي ياء بعد ئ ("ئي" في رئيس) ⲏ برضه: "ئي" → ⲓⲏ.
+    if (ch === "ي" && ((li === 2 && isFaeel) || clean[li - 1] === "ئ")) unit = "ⲏ";
+    if (unit) {
+      units.push(unit);
+      unitLetter.push(li);
+    }
   }
   const out = [];
   for (let i = 0; i < units.length; i++) {
     out.push(units[i]);
     const next = units[i + 1];
-    if (next && !VOWEL_UNITS.has(units[i]) && !VOWEL_UNITS.has(next)) out.push("ⲁ");
+    if (!next || VOWEL_UNITS.has(units[i]) || VOWEL_UNITS.has(next)) continue;
+    if (unitLetter[i] === unitLetter[i + 1]) continue; // شدة: الحرف المضعّف مفيش بينه وبين نفسه حرف
+    out.push(isFael && unitLetter[i] === 2 && unitLetter[i + 1] >= 3 ? "ⲓ" : "ⲁ");
   }
   return capitalizeCoptic(out.join(""));
 }
