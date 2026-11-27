@@ -190,6 +190,10 @@ test("coptic-name: فعيل pattern puts ⲏ for the 3rd-letter ي (جميل/ر�
   assert.equal(transliterateNameToCoptic("hossam"), "Ϩⲟⲩⲥⲁⲙ");
   assert.equal(transliterateNameToCoptic("ايمان"), "Ⲓ̀ⲙⲁⲛ");
   assert.equal(transliterateNameToCoptic("إيمان"), "Ⲓ̀ⲙⲁⲛ");
+  // وفاء: الواو في الأول Ⲱⲁ، والهمزة الأخيرة ⲁ. عادل: مؤكد من المستخدم.
+  assert.equal(transliterateNameToCoptic("وفاء"), "Ⲱⲁϥⲁⲁ");
+  assert.equal(transliterateNameToCoptic("wafaa"), "Ⲱⲁϥⲁⲁ");
+  assert.equal(transliterateNameToCoptic("عادل"), "Ⲁⲇⲓⲗ");
 });
 
 test("coptic-name: invalid input returns null", () => {
