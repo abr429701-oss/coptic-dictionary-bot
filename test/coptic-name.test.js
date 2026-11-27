@@ -185,6 +185,11 @@ test("coptic-name: فعيل pattern puts ⲏ for the 3rd-letter ي (جميل/ر�
   // هشام: كسرة على أول حرف (تصحيح المستخدم).
   assert.equal(transliterateNameToCoptic("هشام"), "Ϩⲓϣⲁⲙ");
   assert.equal(transliterateNameToCoptic("hisham"), "Ϩⲓϣⲁⲙ");
+  // حسام: ضمة على أول حرف. ايمان: Ⲓ عليها جنكيم.
+  assert.equal(transliterateNameToCoptic("حسام"), "Ϩⲟⲩⲥⲁⲙ");
+  assert.equal(transliterateNameToCoptic("hossam"), "Ϩⲟⲩⲥⲁⲙ");
+  assert.equal(transliterateNameToCoptic("ايمان"), "Ⲓ̀ⲙⲁⲛ");
+  assert.equal(transliterateNameToCoptic("إيمان"), "Ⲓ̀ⲙⲁⲛ");
 });
 
 test("coptic-name: invalid input returns null", () => {
