@@ -430,7 +430,7 @@ async function sendRootMenus(env, chatId, userId = chatId) {
   // text must search the dictionary again instead of being read as a code,
   // a name or a phone number.
   const rootUser = await getUser(env, userId);
-  if (rootUser?.certAwaiting || rootUser?.getcodeStep || rootUser?.copticNameAwaiting || rootUser?.translateAwaiting) await saveUser(env, userId, { ...rootUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined });
+  if (rootUser?.certAwaiting || rootUser?.getcodeStep || rootUser?.copticNameAwaiting || rootUser?.translateAwaiting || rootUser?.oralAwaiting) await saveUser(env, userId, { ...rootUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined, oralAwaiting: undefined });
   const stored = await loadMenus(env);
   const roots = rootMenus(stored);
   if (!roots.length) {
@@ -448,7 +448,7 @@ async function sendRootMenus(env, chatId, userId = chatId) {
 // searches the dictionary instead of being read as a code or a menu tap.
 async function beginSearchMode(env, chatId, userId) {
   const searchUser = await getUser(env, userId);
-  if (searchUser?.certAwaiting || searchUser?.getcodeStep || searchUser?.copticNameAwaiting || searchUser?.translateAwaiting) await saveUser(env, userId, { ...searchUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined });
+  if (searchUser?.certAwaiting || searchUser?.getcodeStep || searchUser?.copticNameAwaiting || searchUser?.translateAwaiting || searchUser?.oralAwaiting) await saveUser(env, userId, { ...searchUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined, oralAwaiting: undefined });
   await setMenuNav(env, userId, null);
   await telegram(env, "sendMessage", { chat_id: chatId, text: "🔍 اكتب الكلمة للبحث في القاموس.", reply_markup: { remove_keyboard: true } });
 }
@@ -867,6 +867,12 @@ async function sendLearnLesson(env, chatId, userId, lessonId, reactMessageId = u
   const navRows = [];
   if (stepRow.length) navRows.push(stepRow);
   navRows.push([{ text: "🔙 رجوع" }, { text: "🏠 الرئيسية" }]);
+  // Oral attendance (إثبات حضور, 2026-11-28): lessons with a ورقة شفوي
+  // get a "🎙 سجّل الشفوي" row under the nav, so the student can record
+  // the 3 words from the oral paper. Lessons without an oral item get no
+  // button at all (L1 intro lessons + all of L2).
+  const hasOral = lessonHasOral(lesson);
+  if (hasOral) navRows.push([{ text: ORAL_RECORD_BUTTON }]);
   const smallNavKeyboard = { keyboard: navRows, resize_keyboard: true };
   // The level menu keyboard (lesson names, cert, search, back, home)
   // with Previous/Next on top when applicable. Null when the level menu
@@ -876,6 +882,7 @@ async function sendLearnLesson(env, chatId, userId, lessonId, reactMessageId = u
     const menuKb = buildReplyMenuKeyboard(storedMenus, levelMenu, { isAdmin: isAdmin(env, userId) });
     const rows = [...(menuKb?.keyboard ?? [])];
     if (stepRow.length) rows.unshift(stepRow);
+    if (hasOral) rows.push([{ text: ORAL_RECORD_BUTTON }]);
     if (rows.length) lessonListKeyboard = { keyboard: rows, resize_keyboard: true };
   }
   // Remember the lesson so the nav keyboard's Previous/Next taps (plain
@@ -1623,6 +1630,7 @@ import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootRe
 import { getHiddenUi, setHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
 import { LEARN_LEVELS } from "./learn-manifest.js";
 import { LEARN_IMPORT_KEY, LEARN_GET_CODE_TEXT, learnUploadItems, emptyImportState, normalizeImportState, importProgress, learnPendingItems, learnManifestHash, isImportStateTrusted, findLearnLesson, learnLessonSendPlan, buildLearnMenus, mergeMenus, uploadLearnFile, runImportUploads, parseImportLearnArg, learnImportStartText, learnProgressText } from "./learn-import.js";
+import { ORAL_RECORD_BUTTON, lessonHasOral, findOralLesson, validateOralVoice, getOralAttendance, markOralAttendance, listOralAttendance, oralPromptText, oralAcceptedText, oralRejectedText, ORAL_ALREADY_TEXT, ORAL_CANCEL_TEXT, ORAL_NO_LESSON_TEXT, ORAL_LESSON_HAS_NO_ORAL_TEXT, oralOwnListText, oralAdminListText } from "./oral-attendance.js";
 
 // ---- reply-keyboard menus (real buttons under the field, no inline) --------
 // The position of a user inside the menus is remembered so a plain-text tap can
@@ -1675,7 +1683,7 @@ async function followMenuHit(env, chatId, userId, hit, reactMessageId = undefine
   // flow (the button's own action runs right after, so a cert/get-code
   // button re-sets its own flag itself).
   const hitUser = await getUser(env, userId);
-  if (hitUser?.certAwaiting || hitUser?.getcodeStep || hitUser?.copticNameAwaiting || hitUser?.translateAwaiting) await saveUser(env, userId, { ...hitUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined });
+  if (hitUser?.certAwaiting || hitUser?.getcodeStep || hitUser?.copticNameAwaiting || hitUser?.translateAwaiting || hitUser?.oralAwaiting) await saveUser(env, userId, { ...hitUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined, oralAwaiting: undefined });
   if (hit.kind === "admin") {
     await studio.handleCommand(env, chatId, userId);
     return true;
@@ -8136,12 +8144,29 @@ async function handleUpdate(update, env, ctx) {
     // cert/get-code flow, like tapping any other menu button.
     if (text === "⏮ السابق" || text === "التالي ⏭") {
       const navUser = await getUser(env, userId);
-      if (navUser?.certAwaiting || navUser?.getcodeStep || navUser?.copticNameAwaiting || navUser?.translateAwaiting) await saveUser(env, userId, { ...navUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined });
+      if (navUser?.certAwaiting || navUser?.getcodeStep || navUser?.copticNameAwaiting || navUser?.translateAwaiting || navUser?.oralAwaiting) await saveUser(env, userId, { ...navUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined, oralAwaiting: undefined });
       const level = LEARN_LEVELS.find((l) => l.lessons.some((x) => x.id === navUser?.lastLessonId));
       const idx = level ? level.lessons.findIndex((x) => x.id === navUser?.lastLessonId) : -1;
       const sibling = idx >= 0 ? level.lessons[idx + (text === "التالي ⏭" ? 1 : -1)] : null;
       if (sibling) { await sendLearnLesson(env, message.chat.id, userId, sibling.id, message.message_id); return; }
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: text === "التالي ⏭" ? "⏭ ده آخر درس في المستوى." : "⏮ ده أول درس في المستوى." });
+      return;
+    }
+    // Oral attendance (إثبات حضور): "🎙 سجّل الشفوي" under a lesson with a
+    // ورقة شفوي starts the recording wait for that lesson (lastLessonId).
+    // Like the other flows it ends any cert/get-code/name/translate wait.
+    if (text === ORAL_RECORD_BUTTON) {
+      const oralUser = await getUser(env, userId);
+      const lesson = findOralLesson(oralUser?.lastLessonId);
+      if (!lesson) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: ORAL_NO_LESSON_TEXT }); return; }
+      if (!lessonHasOral(lesson)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: ORAL_LESSON_HAS_NO_ORAL_TEXT }); return; }
+      if (oralUser?.certAwaiting || oralUser?.getcodeStep || oralUser?.copticNameAwaiting || oralUser?.translateAwaiting) await saveUser(env, userId, { ...oralUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined });
+      const existing = await getOralAttendance((payload) => storeCall(env, payload), userId);
+      if (existing?.lessons?.[lesson.id]) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: ORAL_ALREADY_TEXT }); return; }
+      const u = await getUser(env, userId);
+      await saveUser(env, userId, { ...(u ?? {}), oralAwaiting: lesson.id });
+      patchRegisteredCache(userId, { oralAwaiting: lesson.id });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: oralPromptText(lesson.title) });
       return;
     }
     const chatMenus = await loadMenus(env);
@@ -8815,6 +8840,15 @@ async function handleUpdate(update, env, ctx) {
     if (text === "/livemon") { await toggleLiveMonitor(env, message.chat.id); return; }
     if (text === "/conversations" || text === "/liveusers") { await sendConversationsReport(env, message.chat.id); return; }
     if (text === "/khmi") { await handleKhmiStatus(env, message.chat.id); return; }
+    // Oral attendance (إثبات حضور) — admin only, hidden: the full list of
+    // which student recorded which lesson. Not in /start, /help or the
+    // side menu; a student typing /attendance gets only their own list
+    // (handled in the general section below).
+    if (text === "/attendance") {
+      const entries = await listOralAttendance((payload) => storeCall(env, payload));
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: oralAdminListText(entries) });
+      return;
+    }
     // /translate — sentence translator (admin-only, Telegram-only experiment):
     // multi-word input → sentence translation; a single word falls through to
     // the public /translate word view; bare /translate asks for a sentence.
@@ -8913,7 +8947,7 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     const user = known ?? await getUser(env, userId);
-    if (user?.certAwaiting || user?.getcodeStep || user?.copticNameAwaiting || user?.translateAwaiting) await saveUser(env, userId, { ...user, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined });
+    if (user?.certAwaiting || user?.getcodeStep || user?.copticNameAwaiting || user?.translateAwaiting || user?.oralAwaiting) await saveUser(env, userId, { ...user, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined, oralAwaiting: undefined });
     // Referral link tracking: /start <campaign> remembers the source for new users.
     const startParam = text.startsWith("/start ") ? text.slice(7).trim() : "";
     // v2: deep link /start word_<id> opens that word directly (shared from a result).
@@ -8999,6 +9033,7 @@ async function handleUpdate(update, env, ctx) {
     if (user?.getcodeStep) { await saveUser(env, userId, { ...user, getcodeStep: undefined, getcodeName: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء الحصول على الرقم الكودي." }); return; }
     if (user?.copticNameAwaiting) { await saveUser(env, userId, { ...user, copticNameAwaiting: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء كتابة الاسم بالقبطية." }); return; }
     if (user?.translateAwaiting) { await saveUser(env, userId, { ...user, translateAwaiting: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء الترجمة." }); return; }
+    if (user?.oralAwaiting) { await saveUser(env, userId, { ...user, oralAwaiting: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: ORAL_CANCEL_TEXT }); return; }
   }
   // ---- Batch 5 user features: quiz, favorites, my stats, recent, voice preference ----
   // v2 commands: /quiz keeps its old meaning-type behaviour; /quiz <type> adds the
@@ -9079,6 +9114,12 @@ async function handleUpdate(update, env, ctx) {
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: lines.join("\n").slice(0, 3800), parse_mode: "HTML" });
     return;
   }
+  // Oral attendance — a student sees only their own attended lessons.
+  if (text === "/attendance") {
+    const record = await getOralAttendance((payload) => storeCall(env, payload), userId);
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: oralOwnListText(record) });
+    return;
+  }
   if (text === "/mystats") { await sendMyStats(env, message.chat.id, userId, displayName(message.from)); return; }
   if (text === "/recent") {
     const history = await getUserHistory(env, userId);
@@ -9105,6 +9146,37 @@ async function handleUpdate(update, env, ctx) {
     top.forEach(([id, e], i) => { lines.push(`${i + 1}. ${escapeHtml(String(e?.name ?? id).slice(0, 30))} — ${Number(e?.points ?? 0).toLocaleString("en-US")} نقطة${e?.streak > 1 ? ` (سلسلة ${e.streak} أيام)` : ""}`); });
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: lines.join("\n").slice(0, 2000), parse_mode: "HTML" });
     return;
+  }
+  // Oral attendance: a voice message while the user is waiting to record
+  // the شفوي IS the attendance recording — validate it by metadata and
+  // mark the lesson, instead of forwarding it to the archive group (the
+  // recording is never kept or forwarded anywhere).
+  if (message.voice || message.audio) {
+    const oralUser = await getUser(env, userId);
+    if (oralUser?.oralAwaiting) {
+      const lesson = findOralLesson(oralUser.oralAwaiting);
+      if (!lesson || !lessonHasOral(lesson)) {
+        await saveUser(env, userId, { ...oralUser, oralAwaiting: undefined });
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: ORAL_LESSON_HAS_NO_ORAL_TEXT });
+        return;
+      }
+      const existing = await getOralAttendance((payload) => storeCall(env, payload), userId);
+      if (existing?.lessons?.[lesson.id]) {
+        await saveUser(env, userId, { ...oralUser, oralAwaiting: undefined });
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: ORAL_ALREADY_TEXT });
+        return;
+      }
+      const check = validateOralVoice(message.voice ?? message.audio);
+      if (!check.ok) {
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: oralRejectedText(check.reason) });
+        return;
+      }
+      const marked = await markOralAttendance((payload) => storeCall(env, payload), userId, lesson.id, oralUser.name ?? message.from?.first_name ?? "");
+      await saveUser(env, userId, { ...oralUser, oralAwaiting: undefined });
+      patchRegisteredCache(userId, { oralAwaiting: undefined });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: marked.already ? ORAL_ALREADY_TEXT : oralAcceptedText(lesson.title) });
+      return;
+    }
   }
   if (message.voice || message.audio) {
     const forwarded = await forwardIncomingVoice(env, message);
