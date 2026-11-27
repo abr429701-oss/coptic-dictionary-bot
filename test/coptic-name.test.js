@@ -217,6 +217,9 @@ test("coptic-name: priest titles at the start map to fixed Coptic words", () => 
   assert.equal(transliterateNameToCoptic("الاخ مينا"), "Ⲡⲓⲥⲟⲛ Ⲙⲏⲛⲁ");
   assert.equal(transliterateNameToCoptic("الاخت مريم"), "Ϯⲥⲱⲛⲓ Ⲙⲁⲣⲓⲁ");
   assert.equal(transliterateNameToCoptic("الاخت"), "Ϯⲥⲱⲛⲓ");
+  assert.equal(transliterateNameToCoptic("أخي مينا"), "Ⲡⲁⲥⲟⲛ Ⲙⲏⲛⲁ");
+  assert.equal(transliterateNameToCoptic("اختي مريم"), "Ⲧⲁⲥⲱⲛⲓ Ⲙⲁⲣⲓⲁ");
+  assert.equal(transliterateNameToCoptic("اخي"), "Ⲡⲁⲥⲟⲛ");
 });
 
 test("coptic-name: invalid input returns null", () => {
