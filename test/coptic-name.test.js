@@ -133,6 +133,16 @@ test("coptic-name: فاعل pattern puts ⲓ after the 3rd letter (ماجد/با
   assert.equal(transliterateNameToCoptic("كامل"), "Ⲕⲁⲙⲓⲗ");
   assert.equal(transliterateNameToCoptic("فاضل"), "Ϥⲁⲇⲓⲗ");
   assert.equal(transliterateNameToCoptic("عادل"), "Ⲁⲇⲓⲗ");
+  // دعاء/شفاء/آلاء: الهمزة الأخيرة ⲁ. آلاء: آ في الأول ⲁ̀.
+  assert.equal(transliterateNameToCoptic("دعاء"), "Ⲇⲟⲁⲁ");
+  assert.equal(transliterateNameToCoptic("شفاء"), "Ϣⲓϥⲁⲁ");
+  assert.equal(transliterateNameToCoptic("آلاء"), "Ⲁ̀ⲗⲁⲁ");
+  assert.equal(transliterateNameToCoptic("alaa"), "Ⲁ̀ⲗⲁⲁ");
+  // قاعدة آ في أول الكلمة (تلقائي): آمال. والهمزة ⲁ (تلقائي): هناء/سناء/أسماء.
+  assert.equal(transliterateNameToCoptic("آمال"), "\u2c80\u0300\u2c99\u2c81\u2c97");
+  assert.equal(transliterateNameToCoptic("هناء"), "Ϩⲁⲛⲁⲁ");
+  assert.equal(transliterateNameToCoptic("سناء"), "Ⲥⲁⲛⲁⲁ");
+  assert.equal(transliterateNameToCoptic("أسماء"), "Ⲁⲥⲁⲙⲁⲁ");
   assert.equal(transliterateNameToCoptic("حامد"), "Ϩⲁⲙⲓⲇ");
   assert.equal(transliterateNameToCoptic("ساجد"), "Ⲥⲁϫⲓⲇ");
   assert.equal(transliterateNameToCoptic("فارس"), "Ϥⲁⲣⲓⲥ");

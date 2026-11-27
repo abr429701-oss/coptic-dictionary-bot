@@ -21,11 +21,14 @@ const AR_MAP = {
   "ص": "ⲥ", "ض": "ⲇ", "ط": "ⲧ", "ظ": "ⲍ", "ع": "ⲁ", "غ": "ⲅ",
   "ف": "ϥ", "ق": "ⲕ", "ك": "ⲕ", "ل": "ⲗ", "م": "ⲙ", "ن": "ⲛ",
   "ه": "ϩ", "ة": "ⲁ", "و": "ⲟⲩ", "ؤ": "ⲟⲩ", "ي": "ⲓ", "ئ": "ⲓ",
-  "ى": "ⲁ",
+  "ى": "ⲁ", "ء": "ⲁ",
 };
 
+// ⲁ وعليها جنكيم — أول الكلمة لو بدأت بآ (قاعدة المستخدم: آ → ⲁ̀).
+const JINKIM_A = "ⲁ̀";
+
 // الوحدات الصوتية (حروف العلة) — بين ساكنين يُدرج ⲁ لتقريب النطق.
-const VOWEL_UNITS = new Set(["ⲁ", "ⲉ", "ⲏ", "ⲓ", "ⲟ", "ⲱ", "ⲩ", "ⲟⲩ"]);
+const VOWEL_UNITS = new Set(["ⲁ", "ⲉ", "ⲏ", "ⲓ", "ⲟ", "ⲱ", "ⲩ", "ⲟⲩ", JINKIM_A]);
 
 // كبّر أول حرف قبطي في الكلمة (ⲟⲩ في الأول تبقى Ⲟⲩ).
 function capitalizeCoptic(word) {
@@ -170,6 +173,11 @@ const KNOWN_NAMES = [
   ["حسام", "hussam", "Ϩⲟⲩⲥⲁⲙ"],
   ["وفاء", "wafaa", "Ⲱⲁϥⲁⲁ"],
   ["وفاء", "wafa", "Ⲱⲁϥⲁⲁ"],
+  ["دعاء", "doaa", "Ⲇⲟⲁⲁ"],
+  ["دعاء", "dua", "Ⲇⲟⲁⲁ"],
+  ["شفاء", "shifaa", "Ϣⲓϥⲁⲁ"],
+  ["شفاء", "shefaa", "Ϣⲓϥⲁⲁ"],
+  ["آلاء", "alaa", "Ⲁ̀ⲗⲁⲁ"],
   ["ايمان", "iman", "Ⲓ̀ⲙⲁⲛ"],
   ["ايمان", "eman", "Ⲓ̀ⲙⲁⲛ"],
   ["زينب", "zainab", "Ⲍⲉⲓⲛⲁⲃ"],
@@ -217,6 +225,9 @@ function transliterateArabicWord(word) {
     && AR_MAP[plain[3]] && !VOWEL_UNITS.has(AR_MAP[plain[3]]))
     || (plain.length === 5 && plain[2] === "ي" && plain[4] === "ة"
     && AR_MAP[plain[3]] && !VOWEL_UNITS.has(AR_MAP[plain[3]]));
+  // قاعدة المستخدم: أي اسم أوله آ (ألف مد) → ⲁ̀ (ألف عليها جنكيم).
+  const startsWithMadda = String(word ?? "")
+    .replace(ARABIC_DIACRITICS_KEEP_SHADDA, "").trim().startsWith("آ");
   const units = [];
   const unitLetter = [];
   for (let li = 0; li < clean.length; li++) {
@@ -230,6 +241,8 @@ function transliterateArabicWord(word) {
       continue;
     }
     let unit = AR_MAP[ch];
+    // آ في أول الكلمة → ⲁ̀ (جنكيم).
+    if (li === 0 && startsWithMadda) unit = JINKIM_A;
     // ياء فعيل ⲏ، وأي ياء بعد ئ ("ئي" في رئيس) ⲏ برضه: "ئي" → ⲓⲏ.
     if (ch === "ي" && ((li === 2 && isFaeel) || clean[li - 1] === "ئ")) unit = "ⲏ";
     if (unit) {
