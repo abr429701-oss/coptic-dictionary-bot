@@ -10,11 +10,19 @@ import { buildLearnMenus, emptyImportState, learnUploadItems, LEARN_GET_CODE_TEX
 import {
   GET_CODE_WHATSAPP_NUMBER,
   GET_CODE_EXAMPLE_PHOTO_URL,
+  GET_CODE_SCREENSHOT_UNSAVED_TEXT,
+  GET_CODE_SCREENSHOT_NO_CODE_TEXT,
+  OCR_SPACE_API_URL,
+  OCR_SPACE_MAX_BYTES,
   normalizeGetCodePhone,
   getCodePhoneValid,
   buildGetCodeWhatsAppUrl,
   buildGetCodeReply,
   getCodeFromMacro,
+  normalizeOcrDigits,
+  checkScreenshotOcrText,
+  ocrScreenshotText,
+  verifyScreenshotOcr,
 } from "../src/getcode.js";
 
 // ---------------------------------------------------------------------------
@@ -59,9 +67,35 @@ const USER = 57;
 let macroMode = "json";
 let macroBodies = [];
 let macroUrls = [];
+// OCR stub mode for the screenshot verification tests: "ok" (code
+// present, phone saved), "unsaved" (phone digits in the text),
+// "unsaved-spaced" (phone digits split with spaces), "nocode" (no
+// code in the text), "error" (HTTP 500), "empty" (blank OCR text).
+let ocrMode = "ok";
+let ocrCalls = [];
+const fakeImageBytes = new Uint8Array(64).fill(7);
+function ocrStubResponse() {
+  const okText = "Coptic\nتم التسجيل، الرقم الكودي الخاص بي: 13580245، اسمي: أحمد محمد علي\n3:12";
+  if (ocrMode === "error") return new Response("error", { status: 500 });
+  if (ocrMode === "empty") return Response.json({ ParsedResults: [{ ParsedText: "" }], OCRExitCode: 1, IsErroredOnProcessing: false });
+  const texts = {
+    ok: okText,
+    unsaved: "201207829388\nتم التسجيل، الرقم الكودي الخاص بي: 13580245، اسمي: أحمد محمد علي\n3:12",
+    "unsaved-spaced": "+20 120 782 9388\nتم التسجيل، الرقم الكودي الخاص بي: 13580245، اسمي: أحمد محمد علي\n3:12",
+    nocode: "Coptic\nأهلاً وسهلاً\n3:12",
+  };
+  return Response.json({ ParsedResults: [{ ParsedText: texts[ocrMode] ?? okText }], OCRExitCode: 1, IsErroredOnProcessing: false });
+}
 function makeGetCodeFetchStub(calls) {
   globalThis.fetch = async (url, options = {}) => {
     const u = String(url);
+    // Telegram file download (the screenshot bytes for OCR) — must be
+    // checked before the generic api.telegram.org branch below.
+    if (u.includes("/file/bot")) return new Response(fakeImageBytes);
+    if (u.includes("api.ocr.space")) {
+      ocrCalls.push(u);
+      return ocrStubResponse();
+    }
     if (u.includes("api.telegram.org")) {
       const method = u.split("/").pop();
       let payload = null;
@@ -70,6 +104,7 @@ function makeGetCodeFetchStub(calls) {
       }
       calls.push({ method, payload });
       if (method === "sendMessage") return Response.json({ ok: true, result: { message_id: 900 } });
+      if (method === "getFile") return Response.json({ ok: true, result: { file_path: "photos/P1.jpg" } });
       return Response.json({ ok: true, result: {} });
     }
     if (u.includes("script.google.com/macros")) {
@@ -163,8 +198,12 @@ test("getcode: the WhatsApp link opens a chat with the admin, pre-filled with th
 
 test("getcode: the reply mirrors the form's success screen", () => {
   const reply = buildGetCodeReply("أحمد محمد علي", "13580245");
-  assert.match(reply, /الاسم: أحمد محمد علي/);
-  assert.match(reply, /الرقم الكودي الخاص بك هو: 13580245/);
+  // 2026-11-28 correction: the caption carries NO name and NO code —
+  // it starts directly with the activation steps. The student first
+  // sees their name + code in the activation reply after the screenshot.
+  assert.ok(reply.startsWith("لتفعيل اشتراكك"), "the caption starts with the activation steps");
+  assert.ok(!reply.includes("الاسم:"), "no name line in the caption");
+  assert.ok(!reply.includes("الرقم الكودي الخاص بك هو:"), "no code line in the caption");
   assert.match(reply, /سجّل هذا الرقم \+201207829388 في جهات اتصالك أولاً/);
   assert.match(reply, /لفتح المحادثة مع الرقم على الواتساب/);
   assert.match(reply, /Screenshot/);
@@ -244,8 +283,9 @@ test("getcode: tapping the L1 button asks for the name, then the phone, then sho
   assert.equal(photos.length, 1, "exactly one photo message is sent");
   assert.equal(photos[0].payload.photo, GET_CODE_EXAMPLE_PHOTO_URL, "the photo is the R2 example screenshot");
   const caption = String(photos[0].payload.caption ?? "");
-  assert.match(caption, /الاسم: أحمد محمد علي/);
-  assert.match(caption, /الرقم الكودي الخاص بك هو: 13580245/, "the code is 1234567 + the last 8 digits, as the file computes it");
+  assert.ok(caption.startsWith("لتفعيل اشتراكك"), "the caption starts with the activation steps — no name/code lines");
+  assert.ok(!caption.includes("الاسم:"), "no name line in the caption");
+  assert.ok(!caption.includes("الرقم الكودي الخاص بك هو:"), "no code line in the caption");
   assert.match(caption, /wa\.me\/201207829388\?text=/, "the caption carries the ready WhatsApp link");
   assert.ok(caption.includes(buildGetCodeWhatsAppUrl("13580245", "أحمد محمد علي")), "the full wa.me link is in the caption");
   assert.match(caption, /سجّل هذا الرقم \+201207829388/, "the caption tells the student to save the number");
@@ -268,7 +308,7 @@ test("getcode: a too-short phone is rejected and the bot asks again", async () =
   // The session is still open: a valid phone now completes it.
   const done = await sayMsg(kvEnv, USER, "01012345678");
   const caption = String(done.find((c) => c.method === "sendPhoto")?.payload?.caption ?? "");
-  assert.match(caption, /الرقم الكودي الخاص بك هو: 13580245/, "the photo caption carries the code");
+  assert.match(caption, /wa\.me\/201207829388\?text=/, "the photo caption carries the ready WhatsApp link");
 });
 
 test("getcode: when the macro answers with its error page, the bot falls back to the instructions text", async () => {
@@ -442,11 +482,155 @@ test("getcode: a very long name falls back to text + bare photo (caption cap)", 
   await openLevelAndTapGetCode(kvEnv, USER);
   await sayMsg(kvEnv, USER, longName);
   const done = await sayMsg(kvEnv, USER, "01012345678");
-  assert.ok(anyMessage(done, /الرقم الكودي الخاص بك هو: 13580245/), "the text fallback still carries the code");
+  assert.ok(anyMessage(done, /لتفعيل اشتراكك/), "the text fallback still carries the activation steps");
   assert.ok(anyMessage(done, /wa\.me\/201207829388\?text=/), "the text fallback still carries the link");
   const photos = done.filter((c) => c.method === "sendPhoto");
   assert.equal(photos.length, 1, "the photo still goes out");
   assert.equal(photos[0].payload.photo, GET_CODE_EXAMPLE_PHOTO_URL);
   assert.equal(photos[0].payload.caption, undefined, "the fallback photo has no caption");
   assert.ok(done.findIndex((c) => c.method === "sendMessage") < done.findIndex((c) => c.method === "sendPhoto"), "the text goes out before the photo");
+});
+
+// ---------------------------------------------------------------------------
+// Screenshot OCR verification (2026-11-28): the bot OCRs the screenshot
+// the student sends back. The admin number showing as raw digits means
+// it is NOT saved → reject; a missing code means the registration
+// message was not sent → reject; anything else (no key, OCR error,
+// empty text) FAILS OPEN and activates as before.
+// ---------------------------------------------------------------------------
+
+test("getcode OCR: checkScreenshotOcrText accepts a saved number with the code present", () => {
+  assert.equal(checkScreenshotOcrText("Coptic\nتم التسجيل، الرقم الكودي الخاص بي: 13580245، اسمي: أحمد محمد علي\n3:12", "13580245").verdict, "ok");
+  // Any saved name counts — Arabic, English, anything, not just "Coptic".
+  assert.equal(checkScreenshotOcrText("My Friend\nتم التسجيل، الرقم الكودي الخاص بي: 13580245\n3:12", "13580245").verdict, "ok");
+  assert.equal(checkScreenshotOcrText("صديقي\nتم التسجيل، الرقم الكودي الخاص بي: 13580245\n3:12", "13580245").verdict, "ok");
+});
+
+test("getcode OCR: checkScreenshotOcrText rejects the admin number showing unsaved", () => {
+  const withCode = "تم التسجيل، الرقم الكودي الخاص بي: 13580245";
+  assert.equal(checkScreenshotOcrText(`+201207829388\n${withCode}`, "13580245").verdict, "unsaved-number");
+  assert.equal(checkScreenshotOcrText(`201207829388\n${withCode}`, "13580245").verdict, "unsaved-number");
+  assert.equal(checkScreenshotOcrText(`1207829388\n${withCode}`, "13580245").verdict, "unsaved-number");
+  assert.equal(checkScreenshotOcrText(`+20 120 782 9388\n${withCode}`, "13580245").verdict, "unsaved-number");
+  assert.equal(checkScreenshotOcrText(`01207829388\n${withCode}`, "13580245").verdict, "unsaved-number");
+  // The phone check wins over the code check: an unsaved number is
+  // rejected even when the code is present.
+});
+
+test("getcode OCR: checkScreenshotOcrText rejects a screenshot without the code", () => {
+  assert.equal(checkScreenshotOcrText("Coptic\nأهلاً وسهلاً\n3:12", "13580245").verdict, "no-code");
+  assert.equal(checkScreenshotOcrText("", "13580245").verdict, "no-code");
+});
+
+test("getcode OCR: Arabic-Indic digits fold to Western digits", () => {
+  assert.equal(normalizeOcrDigits("١٣٥٨٠٢٤٥"), "13580245");
+  assert.equal(normalizeOcrDigits("٢٠١٢٠٧٨٢٩٣٨٨"), "201207829388");
+  assert.equal(checkScreenshotOcrText("Coptic\nتم التسجيل، الرقم الكودي الخاص بي: ١٣٥٨٠٢٤٥", "13580245").verdict, "ok");
+  assert.equal(checkScreenshotOcrText("٢٠١٢٠٧٨٢٩٣٨٨\nتم التسجيل: ١٣٥٨٠٢٤٥", "13580245").verdict, "unsaved-number");
+});
+
+function ocrFetchStub(json, status = 200) {
+  return async (url, options = {}) => {
+    assert.equal(url, OCR_SPACE_API_URL, "the OCR call goes to OCR.space");
+    return status === 200 ? Response.json(json) : new Response("error", { status });
+  };
+}
+const ocrOkJson = { ParsedResults: [{ ParsedText: "Coptic\nتم التسجيل، الرقم الكودي الخاص بي: 13580245\n3:12" }], OCRExitCode: 1, IsErroredOnProcessing: false };
+
+test("getcode OCR: verifyScreenshotOcr fails open with no key, oversize image, or an OCR error", async () => {
+  assert.equal((await verifyScreenshotOcr(new Uint8Array(10), "13580245", "")).verdict, "skipped", "no key → skipped");
+  assert.equal((await verifyScreenshotOcr(new Uint8Array(10), "13580245", null)).verdict, "skipped");
+  assert.equal((await verifyScreenshotOcr(new Uint8Array(OCR_SPACE_MAX_BYTES + 1), "13580245", "k")).verdict, "skipped", "over the 1 MB free limit → skipped");
+  assert.equal((await verifyScreenshotOcr(new Uint8Array(10), "13580245", "k", ocrFetchStub(null, 500))).verdict, "skipped", "HTTP 500 → skipped");
+  assert.equal((await verifyScreenshotOcr(new Uint8Array(10), "13580245", "k", ocrFetchStub({ ParsedResults: [], OCRExitCode: 3, IsErroredOnProcessing: true }))).verdict, "skipped", "errored processing → skipped");
+  assert.equal((await verifyScreenshotOcr(new Uint8Array(10), "13580245", "k", ocrFetchStub({ ParsedResults: [{ ParsedText: "   " }], OCRExitCode: 1, IsErroredOnProcessing: false }))).verdict, "skipped", "empty OCR text → skipped");
+  const throwing = async () => { throw new Error("network down"); };
+  assert.equal((await verifyScreenshotOcr(new Uint8Array(10), "13580245", "k", throwing)).verdict, "skipped", "thrown fetch → skipped");
+});
+
+test("getcode OCR: verifyScreenshotOcr returns the check verdicts", async () => {
+  assert.equal((await verifyScreenshotOcr(new Uint8Array(10), "13580245", "k", ocrFetchStub(ocrOkJson))).verdict, "ok");
+  assert.equal((await verifyScreenshotOcr(new Uint8Array(10), "13580245", "k", ocrFetchStub({ ParsedResults: [{ ParsedText: "201207829388\nتم التسجيل: 13580245" }], OCRExitCode: 1, IsErroredOnProcessing: false }))).verdict, "unsaved-number");
+  assert.equal((await verifyScreenshotOcr(new Uint8Array(10), "13580245", "k", ocrFetchStub({ ParsedResults: [{ ParsedText: "Coptic\nأهلاً" }], OCRExitCode: 1, IsErroredOnProcessing: false }))).verdict, "no-code");
+});
+
+test("getcode OCR: ocrScreenshotText posts base64 to OCR.space and reads ParsedText", async () => {
+  let seenUrl = "";
+  let seenBody = "";
+  const spy = async (url, options = {}) => {
+    seenUrl = String(url);
+    seenBody = String(options.body ?? "");
+    return Response.json(ocrOkJson);
+  };
+  const { text, error } = await ocrScreenshotText(new Uint8Array([1, 2, 3]), "k", spy);
+  assert.equal(error, null);
+  assert.match(text, /13580245/);
+  assert.equal(seenUrl, OCR_SPACE_API_URL);
+  assert.ok(seenBody.includes("base64Image=data%3Aimage%2Fjpeg%3Bbase64%2C"), "the image goes as base64");
+  assert.ok(seenBody.includes("apikey=k"), "the key is sent");
+  assert.ok(seenBody.includes("OCREngine=2"), "Engine 2 is used");
+});
+
+function ocrKvEnv() {
+  return { ...env, USERS: fakeKv(), OCR_SPACE_API_KEY: "test-ocr-key" };
+}
+
+test("getcode OCR: an accepted screenshot activates (OCR configured)", async () => {
+  const kvEnv = ocrKvEnv();
+  await completeGetCode(kvEnv, USER);
+  ocrMode = "ok";
+  ocrCalls = [];
+  const calls = await sendPhotoMsg(kvEnv, USER);
+  assert.equal(ocrCalls.length, 1, "the screenshot is OCRed once");
+  assert.ok(anyMessage(calls, /تم تفعيل اشتراكك عزيزنا، أحمد محمد علي والرقم الكودي الخاص بك هو: 13580245/), "an accepted screenshot activates");
+  const stored = kvEnv.USERS.store.get(`user:${USER}`);
+  assert.equal(stored.getcodeScreenshotAwaiting, undefined, "the wait clears on accept");
+  assert.equal(stored.getcodeScreenshotCode, "13580245", "the record persists");
+});
+
+test("getcode OCR: an unsaved number is rejected, the wait stays open, and a good re-send activates", async () => {
+  const kvEnv = ocrKvEnv();
+  await completeGetCode(kvEnv, USER);
+  ocrMode = "unsaved";
+  const rejected = await sendPhotoMsg(kvEnv, USER);
+  assert.ok(anyMessage(rejected, /الرقم ظاهر في السكرين مش مسجل/), "an unsaved number is rejected");
+  assert.ok(!anyMessage(rejected, /تم تفعيل اشتراكك عزيزنا/), "no activation on rejection");
+  let stored = kvEnv.USERS.store.get(`user:${USER}`);
+  assert.equal(stored.getcodeScreenshotAwaiting, true, "the wait stays open after a rejection");
+  ocrMode = "ok";
+  const accepted = await sendPhotoMsg(kvEnv, USER);
+  assert.ok(anyMessage(accepted, /تم تفعيل اشتراكك عزيزنا، أحمد محمد علي/), "a good re-send activates");
+  stored = kvEnv.USERS.store.get(`user:${USER}`);
+  assert.equal(stored.getcodeScreenshotAwaiting, undefined);
+});
+
+test("getcode OCR: a screenshot without the code is rejected and the wait stays open", async () => {
+  const kvEnv = ocrKvEnv();
+  await completeGetCode(kvEnv, USER);
+  ocrMode = "nocode";
+  const rejected = await sendPhotoMsg(kvEnv, USER);
+  assert.ok(anyMessage(rejected, /رسالة التسجيل مش ظاهرة في السكرين/), "a missing code is rejected");
+  assert.ok(!anyMessage(rejected, /تم تفعيل اشتراكك عزيزنا/));
+  const stored = kvEnv.USERS.store.get(`user:${USER}`);
+  assert.equal(stored.getcodeScreenshotAwaiting, true, "the wait stays open after a rejection");
+});
+
+test("getcode OCR: an OCR error fails open and activates", async () => {
+  const kvEnv = ocrKvEnv();
+  await completeGetCode(kvEnv, USER);
+  ocrMode = "error";
+  const calls = await sendPhotoMsg(kvEnv, USER);
+  assert.ok(anyMessage(calls, /تم تفعيل اشتراكك عزيزنا، أحمد محمد علي والرقم الكودي الخاص بك هو: 13580245/), "an OCR error must not strand the student");
+  const stored = kvEnv.USERS.store.get(`user:${USER}`);
+  assert.equal(stored.getcodeScreenshotAwaiting, undefined);
+});
+
+test("getcode OCR: without a key the screenshot activates without any OCR call", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await completeGetCode(kvEnv, USER);
+  ocrMode = "unsaved";
+  ocrCalls = [];
+  const calls = await sendPhotoMsg(kvEnv, USER);
+  assert.equal(ocrCalls.length, 0, "no key → no OCR call at all");
+  assert.ok(anyMessage(calls, /تم تفعيل اشتراكك عزيزنا/), "no key → activation as before");
 });

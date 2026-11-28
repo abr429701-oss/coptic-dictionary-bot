@@ -850,6 +850,29 @@ async function handleGetCodeStep(env, chatId, userId, text, user) {
   // deployments → New version) and the direct flow works again.
   await telegram(env, "sendMessage", { chat_id: chatId, text: `⚠️ تعذّر إحضار الرقم الكودي مباشرة من البوت حاليًا.\n\n${LEARN_GET_CODE_TEXT}`, disable_web_page_preview: true });
 }
+
+// Screenshot OCR verification (2026-11-28): download the photo the
+// student sent back (getFile + file download, same pattern as the voice
+// handling) and OCR it (OCR.space, key from the OCR_SPACE_API_KEY
+// secret — see verifyScreenshotOcr in src/getcode.js). No key, no file,
+// a failed download, or any OCR problem → "skipped": the caller FAILS
+// OPEN and activates as before, so a legit student is never stranded
+// by the OCR service being down.
+async function verifyGetCodeScreenshot(env, fileId, code) {
+  const apiKey = String(env?.OCR_SPACE_API_KEY ?? "").trim();
+  if (!apiKey || !fileId) return "skipped";
+  try {
+    const info = await telegram(env, "getFile", { file_id: fileId });
+    const filePath = info?.ok ? info.result?.file_path : null;
+    if (!filePath) return "skipped";
+    const response = await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${filePath}`, { signal: AbortSignal.timeout(15000) });
+    if (!response.ok) return "skipped";
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    return (await verifyScreenshotOcr(bytes, code, apiKey)).verdict;
+  } catch {
+    return "skipped";
+  }
+}
 async function runMenuCommand(env, chatId, userId, command) {
   if (command === "/quiz") { await beginQuiz(env, chatId); return; }
   if (command === "/help") { await sendHelp(env, chatId); return; }
@@ -1682,7 +1705,7 @@ import { formatTranslation, setReverseTarget } from "./translate.js";
 import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, suggestSimilar, helpText, retentionText, opsText, recordById, levenshtein } from "./new-features.js";
 import { lookupCertificate, parseCertCsv } from "./certificates.js";
 import { extractCodePattern } from "./exam-pattern.js";
-import { getCodeFromMacro, buildGetCodeReply, buildGetCodeWhatsAppUrl, normalizeGetCodePhone, getCodePhoneValid, GET_CODE_SHEET_ID, GET_CODE_EXAMPLE_PHOTO_URL } from "./getcode.js";
+import { getCodeFromMacro, buildGetCodeReply, buildGetCodeWhatsAppUrl, normalizeGetCodePhone, getCodePhoneValid, GET_CODE_SHEET_ID, GET_CODE_EXAMPLE_PHOTO_URL, GET_CODE_SCREENSHOT_UNSAVED_TEXT, GET_CODE_SCREENSHOT_NO_CODE_TEXT, verifyScreenshotOcr } from "./getcode.js";
 import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VIDEO_MENU_ID, cleanMenuTitle, cleanMenuText, cleanButtonLabel, cleanUrl, cleanCommand, normalizeMenus, findMenu, findButton, rootMenus, descendantMenuIds, menuOpenText, menuAdminListText, menuAdminDetailText, parseMenuTarget, parseButtonTarget, addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton, ensureVideoMenu } from "./menu-builder.js";
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 import { getHiddenUi, setHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
@@ -9281,15 +9304,28 @@ async function handleUpdate(update, env, ctx) {
     return;
   }
   // Get-code screenshot (2026-11-28): after the code reply, the student
-  // sends the WhatsApp screenshot back — confirm the activation with
-  // their name + code from the just-completed session. One shot: only
-  // the wait flag clears on receipt (the stored name+code persist for
-  // returning users), so a later unrelated photo does not repeat it. A
-  // photo without a completed get-code session falls through to the
-  // normal handling below.
+  // sends the WhatsApp screenshot back. It is OCR-verified FIRST: the
+  // admin number showing as raw digits (unsaved) or a missing code are
+  // REJECTED with the wait left open so the student can re-send; any OCR
+  // problem fails open to the activation below. Only an accepted
+  // screenshot confirms the activation with their name + code from the
+  // just-completed session. One shot: only the wait flag clears on
+  // receipt (the stored name+code persist for returning users), so a
+  // later unrelated photo does not repeat it. A photo without a
+  // completed get-code session falls through to the normal handling
+  // below.
   if (message.photo) {
     const shotUser = await getUser(env, userId);
     if (shotUser?.getcodeScreenshotAwaiting && shotUser?.getcodeScreenshotName && shotUser?.getcodeScreenshotCode) {
+      const verdict = await verifyGetCodeScreenshot(env, message.photo[message.photo.length - 1]?.file_id, shotUser.getcodeScreenshotCode);
+      if (verdict === "unsaved-number") {
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: GET_CODE_SCREENSHOT_UNSAVED_TEXT });
+        return;
+      }
+      if (verdict === "no-code") {
+        await telegram(env, "sendMessage", { chat_id: message.chat.id, text: GET_CODE_SCREENSHOT_NO_CODE_TEXT });
+        return;
+      }
       await saveUser(env, userId, { ...shotUser, getcodeScreenshotAwaiting: undefined });
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `تم تفعيل اشتراكك عزيزنا، ${shotUser.getcodeScreenshotName} والرقم الكودي الخاص بك هو: ${shotUser.getcodeScreenshotCode}` });
       return;
