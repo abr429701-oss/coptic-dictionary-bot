@@ -15,11 +15,12 @@ import {
   OCR_SPACE_MAX_BYTES,
   normalizeGetCodePhone,
   getCodePhoneValid,
+  canonicalGetCodePhone,
+  getCodeRegistryKey,
   buildGetCodeWhatsAppUrl,
   buildGetCodeReply,
   getCodeFromMacro,
   normalizeOcrDigits,
-  normalizeNameForMatch,
   checkScreenshotOcrText,
   ocrScreenshotText,
   verifyScreenshotOcr,
@@ -70,8 +71,9 @@ let macroUrls = [];
 // OCR stub mode for the screenshot verification tests: "ok" (code
 // present, phone saved, own name), "unsaved" (phone digits in the
 // text), "unsaved-spaced" (phone digits split with spaces), "nocode" (no
-// code in the text), "wrongname" (own code, a DIFFERENT name — another
-// student's screenshot), "error" (HTTP 500), "empty" (blank OCR text).
+// code in the text), "wrongname" (own code, a DIFFERENT name —
+// another student's screenshot; activates since 28 Nov ~05:21, when
+// the name check was removed — only the code is checked), "error"
 let ocrMode = "ok";
 let ocrCalls = [];
 const fakeImageBytes = new Uint8Array(64).fill(7);
@@ -183,6 +185,15 @@ test("getcode: normalizeGetCodePhone strips everything but digits", () => {
   assert.equal(normalizeGetCodePhone(""), "");
 });
 
+test("getcode: normalizeGetCodePhone folds Arabic-Indic and Persian digits to Western", () => {
+  assert.equal(normalizeGetCodePhone("١٢٣٤"), "1234", "Arabic-Indic digits fold");
+  assert.equal(normalizeGetCodePhone("٠١٢٠٧٨٢٩٣٨٨"), "01207829388", "an Arabic-Indic phone folds to Western");
+  assert.equal(canonicalGetCodePhone("٠١٢٠٧٨٢٩٣٨٨"), "201207829388", "folded, then canonicalized");
+  assert.equal(normalizeGetCodePhone("01٢٣٤5٦٧٨"), "012345678", "mixed Western + Arabic-Indic digits");
+  assert.equal(normalizeGetCodePhone("۰۱۲۳۴۵۶۷۸۹"), "0123456789", "Persian digits fold too");
+  assert.equal(getCodePhoneValid("١٢٣٤"), true, "a folded 4-digit phone is valid");
+});
+
 test("getcode: getCodePhoneValid needs at least 4 digits (the code uses the last 4)", () => {
   assert.equal(getCodePhoneValid("01012345678"), true);
   assert.equal(getCodePhoneValid("1234"), true);
@@ -200,12 +211,12 @@ test("getcode: the WhatsApp link opens a chat with the admin, pre-filled with th
 
 test("getcode: the reply mirrors the form's success screen", () => {
   const reply = buildGetCodeReply("أحمد محمد علي", "13580245");
-  // 2026-11-28 correction: the caption carries NO name and NO code —
+  // 2026-11-28 correction: the text carries NO name and NO code —
   // it starts directly with the activation steps. The student first
   // sees their name + code in the activation reply after the screenshot.
-  assert.ok(reply.startsWith("لتفعيل اشتراكك"), "the caption starts with the activation steps");
-  assert.ok(!reply.includes("الاسم:"), "no name line in the caption");
-  assert.ok(!reply.includes("الرقم الكودي الخاص بك هو:"), "no code line in the caption");
+  assert.ok(reply.startsWith("لتفعيل اشتراكك"), "the text starts with the activation steps");
+  assert.ok(!reply.includes("الاسم:"), "no name line in the text");
+  assert.ok(!reply.includes("الرقم الكودي الخاص بك هو:"), "no code line in the text");
   assert.match(reply, /سجّل هذا الرقم \+201207829388 في جهات اتصالك أولاً/);
   assert.match(reply, /لفتح المحادثة مع الرقم على الواتساب/);
   assert.match(reply, /Screenshot/);
@@ -214,10 +225,9 @@ test("getcode: the reply mirrors the form's success screen", () => {
   assert.match(reply, /wa\.me\/201207829388\?text=/);
   assert.ok(reply.includes(buildGetCodeWhatsAppUrl("13580245", "أحمد محمد علي")), "the full wa.me link is in the reply");
   assert.ok(!reply.includes("is.gd"), "never a shortened link");
-  // Telegram photo captions cap at 1024 chars — the reply is sent as a
-  // caption, so it must fit with a realistic name.
-  assert.ok(reply.length <= 1024, "a normal name fits the caption cap");
-  assert.ok(buildGetCodeReply("أحمد محمد علي عبد الرحمن حسن إبراهيم", "13580245").length <= 1024, "even a long realistic name fits the caption cap");
+  // No caption anymore (2026-11-28): the reply goes out as a plain
+  // text message and the photo follows bare, so the 1024-char caption
+  // cap does not apply to the reply at any length.
 });
 
 test("getcode: the fallback instructions text is the exact dictated registration text", () => {
@@ -269,33 +279,55 @@ test("getcode: getCodeFromMacro reports an HTTP failure and a thrown fetch", asy
 // Worker flow: button -> name -> phone -> code (+ WhatsApp link)
 // ---------------------------------------------------------------------------
 
-test("getcode: tapping the L1 button asks for the name, then the phone, then shows the code", async () => {
+test("getcode: tapping the L1 button asks for the phone, then the name, then shows the code", async () => {
   macroMode = "json";
   const kvEnv = { ...env, USERS: fakeKv() };
   seedLevelMenus(kvEnv);
   const ask = await openLevelAndTapGetCode(kvEnv, USER);
-  assert.ok(anyMessage(ask, /اكتب اسمك الثلاثي/), "tapping the button must ask for the name");
-  const phoneAsk = await sayMsg(kvEnv, USER, "أحمد محمد علي");
-  assert.ok(anyMessage(phoneAsk, /اكتب رقم موبايلك/), "the name must lead to the phone prompt");
-  assert.ok(!anyMessage(phoneAsk, /الرقم الكودي الخاص بك/), "no code yet");
-  const done = await sayMsg(kvEnv, USER, "01012345678");
-  // One photo message only: the reply is the photo caption, no separate text.
-  assert.equal(done.filter((c) => c.method === "sendMessage").length, 0, "no separate text message — the reply is the photo caption");
+  assert.ok(anyMessage(ask, /اكتب رقم موبايلك/), "tapping the button must ask for the phone first (registry lookup)");
+  const nameAsk = await sayMsg(kvEnv, USER, "01012345678");
+  assert.ok(anyMessage(nameAsk, /اكتب اسمك الثلاثي/), "a registry miss must lead to the name prompt");
+  assert.ok(!anyMessage(nameAsk, /الرقم الكودي الخاص بك/), "no code yet");
+  const done = await sayMsg(kvEnv, USER, "أحمد محمد علي");
+  // Two messages (2026-11-28, no caption): the notice text first as a
+  // plain text message, then the example photo UNDER it, with no caption.
+  const texts = done.filter((c) => c.method === "sendMessage");
+  assert.equal(texts.length, 1, "exactly one text message — the notice, no separate caption");
+  const text = String(texts[0].payload.text ?? "");
+  assert.ok(text.startsWith("لتفعيل اشتراكك"), "the text starts with the activation steps — no name/code lines");
+  assert.ok(!text.includes("الاسم:"), "no name line in the text");
+  assert.ok(!text.includes("الرقم الكودي الخاص بك هو:"), "no code line in the text");
+  assert.match(text, /wa\.me\/201207829388\?text=/, "the text carries the ready WhatsApp link");
+  assert.ok(text.includes(buildGetCodeWhatsAppUrl("13580245", "أحمد محمد علي")), "the full wa.me link is in the text");
+  assert.match(text, /سجّل هذا الرقم \+201207829388/, "the text tells the student to save the number");
+  assert.match(text, /الصورة المرفقة/, "the text points at the photo itself");
   const photos = done.filter((c) => c.method === "sendPhoto");
   assert.equal(photos.length, 1, "exactly one photo message is sent");
   assert.equal(photos[0].payload.photo, GET_CODE_EXAMPLE_PHOTO_URL, "the photo is the R2 example screenshot");
-  const caption = String(photos[0].payload.caption ?? "");
-  assert.ok(caption.startsWith("لتفعيل اشتراكك"), "the caption starts with the activation steps — no name/code lines");
-  assert.ok(!caption.includes("الاسم:"), "no name line in the caption");
-  assert.ok(!caption.includes("الرقم الكودي الخاص بك هو:"), "no code line in the caption");
-  assert.match(caption, /wa\.me\/201207829388\?text=/, "the caption carries the ready WhatsApp link");
-  assert.ok(caption.includes(buildGetCodeWhatsAppUrl("13580245", "أحمد محمد علي")), "the full wa.me link is in the caption");
-  assert.match(caption, /سجّل هذا الرقم \+201207829388/, "the caption tells the student to save the number");
-  assert.match(caption, /الصورة المرفقة/, "the caption points at the photo itself");
-  assert.ok(caption.length <= 1024, "the caption fits Telegram's 1024-char cap");
+  assert.equal(photos[0].payload.caption, undefined, "the photo has NO caption");
+  assert.ok(done.findIndex((c) => c.method === "sendMessage") < done.findIndex((c) => c.method === "sendPhoto"), "the text goes out before the photo");
   // The session is over: a later text is not read as a phone number.
   const after = await sayMsg(kvEnv, USER, "01012345678");
   assert.ok(!anyMessage(after, /الرقم الكودي الخاص بك هو:/), "a later phone must not fetch another code");
+});
+
+test("getcode: typing the phone in Arabic-Indic digits completes the flow (folded before the macro)", async () => {
+  macroMode = "json";
+  macroBodies = [];
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedLevelMenus(kvEnv);
+  await openLevelAndTapGetCode(kvEnv, USER);
+  const nameAsk = await sayMsg(kvEnv, USER, "٠١٢٠٧٨٢٩٣٨٨");
+  assert.ok(anyMessage(nameAsk, /اكتب اسمك الثلاثي/), "an Arabic-Indic phone is accepted, not re-asked");
+  const done = await sayMsg(kvEnv, USER, "أحمد محمد علي");
+  assert.ok(done.some((c) => c.method === "sendPhoto"), "the flow completes with the photo reply");
+  // The background user-sheet sync also POSTs to the macro URL, so find
+  // the get-code call by its name.
+  const codeCall = macroBodies.map((b) => { try { return JSON.parse(b); } catch { return null; } }).find((b) => b?.name === "أحمد محمد علي");
+  assert.equal(codeCall?.phone, "01207829388", "the macro receives Western digits only");
+  const stored = kvEnv.USERS.store.get(`user:${USER}`);
+  assert.equal(stored.getcodePhone, "01207829388", "the stored phone is the raw folded form (the registry key is canonical)");
+  assert.equal(stored.getcodeScreenshotCode, "9063955", "the code derives from the folded phone's last 8 digits (07829388)");
 });
 
 test("getcode: a too-short phone is rejected and the bot asks again", async () => {
@@ -303,14 +335,15 @@ test("getcode: a too-short phone is rejected and the bot asks again", async () =
   const kvEnv = { ...env, USERS: fakeKv() };
   seedLevelMenus(kvEnv);
   await openLevelAndTapGetCode(kvEnv, USER);
-  await sayMsg(kvEnv, USER, "أحمد محمد علي");
   const retry = await sayMsg(kvEnv, USER, "123");
   assert.ok(anyMessage(retry, /٤ أرقام على الأقل/), "a 3-digit phone must be rejected");
   assert.ok(!anyMessage(retry, /الرقم الكودي الخاص بك هو:/));
-  // The session is still open: a valid phone now completes it.
-  const done = await sayMsg(kvEnv, USER, "01012345678");
-  const caption = String(done.find((c) => c.method === "sendPhoto")?.payload?.caption ?? "");
-  assert.match(caption, /wa\.me\/201207829388\?text=/, "the photo caption carries the ready WhatsApp link");
+  // The session is still open: a valid phone now moves on to the name.
+  const nameAsk = await sayMsg(kvEnv, USER, "01012345678");
+  assert.ok(anyMessage(nameAsk, /اكتب اسمك الثلاثي/), "a valid phone leads to the name prompt");
+  const done = await sayMsg(kvEnv, USER, "أحمد محمد علي");
+  const text = String(done.find((c) => c.method === "sendMessage")?.payload?.text ?? "");
+  assert.match(text, /wa\.me\/201207829388\?text=/, "the text message carries the ready WhatsApp link");
 });
 
 test("getcode: when the macro answers with its error page, the bot falls back to the instructions text", async () => {
@@ -318,8 +351,8 @@ test("getcode: when the macro answers with its error page, the bot falls back to
   const kvEnv = { ...env, USERS: fakeKv() };
   seedLevelMenus(kvEnv);
   await openLevelAndTapGetCode(kvEnv, USER);
-  await sayMsg(kvEnv, USER, "أحمد محمد علي");
-  const calls = await sayMsg(kvEnv, USER, "01012345678");
+  await sayMsg(kvEnv, USER, "01012345678");
+  const calls = await sayMsg(kvEnv, USER, "أحمد محمد علي");
   assert.ok(anyMessage(calls, /تعذّر إحضار الرقم الكودي مباشرة/), "the fallback must say the direct fetch failed");
   assert.ok(anyMessage(calls, /script\.google\.com\/macros\/s\/AKfycbz68tq_KXu_1ZV0pB1s0NidWhnTli3zG0k_8rjFQWhp\/exec/), "the fallback carries the web form link");
   assert.ok(!anyMessage(calls, /الرقم الكودي الخاص بك هو:/), "no invented code when the macro cannot be read");
@@ -331,8 +364,8 @@ test("getcode: when no Apps Script URL is linked, the bot falls back to the inst
   const kvEnv = { ...envWithoutUrl, USERS: fakeKv() };
   seedLevelMenus(kvEnv);
   await openLevelAndTapGetCode(kvEnv, USER);
-  await sayMsg(kvEnv, USER, "أحمد محمد علي");
-  const calls = await sayMsg(kvEnv, USER, "01012345678");
+  await sayMsg(kvEnv, USER, "01012345678");
+  const calls = await sayMsg(kvEnv, USER, "أحمد محمد علي");
   assert.ok(anyMessage(calls, /تعذّر إحضار الرقم الكودي مباشرة/), "without a linked Apps Script URL the direct fetch cannot run");
   assert.ok(anyMessage(calls, /script\.google\.com\/macros\/s\/AKfycbz68tq_KXu_1ZV0pB1s0NidWhnTli3zG0k_8rjFQWhp\/exec/), "the fallback carries the web form link");
   assert.ok(!anyMessage(calls, /الرقم الكودي الخاص بك هو:/), "no invented code when nothing is linked");
@@ -364,7 +397,7 @@ test("getcode: /getcode works when typed directly", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   seedLevelMenus(kvEnv);
   const ask = await sayMsg(kvEnv, USER, "/getcode");
-  assert.ok(anyMessage(ask, /اكتب اسمك الثلاثي/));
+  assert.ok(anyMessage(ask, /اكتب رقم موبايلك/), "typing /getcode asks for the phone first");
 });
 
 // ---------------------------------------------------------------------------
@@ -383,17 +416,20 @@ async function completeGetCode(kvEnv, userId) {
   macroMode = "json";
   seedLevelMenus(kvEnv);
   await openLevelAndTapGetCode(kvEnv, userId);
-  await sayMsg(kvEnv, userId, "أحمد محمد علي");
-  return sayMsg(kvEnv, userId, "01012345678");
+  // Phone FIRST (2026-11-28, cross-platform sync): a registry miss
+  // moves on to the name question, then the macro.
+  await sayMsg(kvEnv, userId, "01012345678");
+  return sayMsg(kvEnv, userId, "أحمد محمد علي");
 }
 
-test("getcode: completing the phone step stores the name+code and opens the screenshot wait", async () => {
+test("getcode: completing the flow stores the name+code+phone and opens the screenshot wait", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   await completeGetCode(kvEnv, USER);
   const stored = kvEnv.USERS.store.get(`user:${USER}`);
   assert.equal(stored.getcodeScreenshotAwaiting, true);
   assert.equal(stored.getcodeScreenshotName, "أحمد محمد علي");
   assert.equal(stored.getcodeScreenshotCode, "13580245");
+  assert.equal(stored.getcodePhone, "01012345678", "the phone is stored as typed, folded to Western digits");
 });
 
 test("getcode: sending the screenshot photo confirms activation with the stored name and code, then clears only the wait", async () => {
@@ -439,11 +475,11 @@ test("getcode: /cancel drops the screenshot wait but keeps the stored code", asy
 // directly, with no name/phone questions.
 // ---------------------------------------------------------------------------
 
-test("getcode: a first-time user still gets the name question", async () => {
+test("getcode: a first-time user still gets the phone question", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   seedLevelMenus(kvEnv);
   const ask = await openLevelAndTapGetCode(kvEnv, USER);
-  assert.ok(anyMessage(ask, /اكتب اسمك الثلاثي/), "a first-time user starts with the name question");
+  assert.ok(anyMessage(ask, /اكتب رقم موبايلك/), "a first-time user starts with the phone question (registry lookup)");
   assert.ok(!anyMessage(ask, /مرحباً /), "no greeting without a stored code");
 });
 
@@ -495,7 +531,7 @@ test("getcode: /resetcode (admin) clears the stored record and the next /getcode
   assert.equal(stored.getcodeScreenshotCode, undefined, "the stored code is gone");
   assert.equal(stored.getcodeScreenshotAwaiting, undefined, "any open wait is gone too");
   const again = await sayMsg(kvEnv, ADMIN, "/getcode");
-  assert.ok(anyMessage(again, /اكتب اسمك الثلاثي/), "the next /getcode asks for the name again");
+  assert.ok(anyMessage(again, /اكتب رقم موبايلك/), "the next /getcode asks for the phone again");
   assert.ok(!anyMessage(again, /مرحباً /), "no returning-user greeting after a reset");
 });
 
@@ -522,21 +558,20 @@ test("getcode: /resetcode from a non-admin gets no reply and the record survives
   assert.ok(anyMessage(again, /مرحباً أحمد محمد علي، الرقم الكودي الخاص بك هو 13580245/), "the returning-user greeting still works");
 });
 
-test("getcode: a very long name falls back to text + bare photo (caption cap)", async () => {
+test("getcode: a very long name still gets text + bare photo, no caption (no cap anymore)", async () => {
   const longName = "أ".repeat(120);
-  assert.ok(buildGetCodeReply(longName, "13580245").length > 1024, "the caption would exceed the cap");
   const kvEnv = { ...env, USERS: fakeKv() };
   macroMode = "json";
   seedLevelMenus(kvEnv);
   await openLevelAndTapGetCode(kvEnv, USER);
-  await sayMsg(kvEnv, USER, longName);
-  const done = await sayMsg(kvEnv, USER, "01012345678");
-  assert.ok(anyMessage(done, /لتفعيل اشتراكك/), "the text fallback still carries the activation steps");
-  assert.ok(anyMessage(done, /wa\.me\/201207829388\?text=/), "the text fallback still carries the link");
+  await sayMsg(kvEnv, USER, "01012345678");
+  const done = await sayMsg(kvEnv, USER, longName);
+  assert.ok(anyMessage(done, /لتفعيل اشتراكك/), "the text still carries the activation steps");
+  assert.ok(anyMessage(done, /wa\.me\/201207829388\?text=/), "the text still carries the link");
   const photos = done.filter((c) => c.method === "sendPhoto");
   assert.equal(photos.length, 1, "the photo still goes out");
   assert.equal(photos[0].payload.photo, GET_CODE_EXAMPLE_PHOTO_URL);
-  assert.equal(photos[0].payload.caption, undefined, "the fallback photo has no caption");
+  assert.equal(photos[0].payload.caption, undefined, "the photo has no caption, however long the name");
   assert.ok(done.findIndex((c) => c.method === "sendMessage") < done.findIndex((c) => c.method === "sendPhoto"), "the text goes out before the photo");
 });
 
@@ -582,43 +617,44 @@ test("getcode OCR: Arabic-Indic digits fold to Western digits", () => {
 });
 
 test("getcode OCR: the single rejection text is the user's exact wording", () => {
-  assert.equal(GET_CODE_SCREENSHOT_REJECT_TEXT, "قم برفع صورة مضبوطة تُوضح أن الرقم مسجل في جهات اتصالك، وواضح في الصورة اسمك ورقمك الكودي.");
+  assert.equal(GET_CODE_SCREENSHOT_REJECT_TEXT, "قم برفع صورة مضبوطة تُوضح أن الرقم مسجل في جهات اتصالك، وتُوضح اسمك ورقمك الكودي في شات الواتساب.");
 });
 
-test("getcode OCR: normalizeNameForMatch strips diacritics and unifies spelling", () => {
-  assert.equal(normalizeNameForMatch("أحمد محمد علي"), "احمدمحمدعلي");
-  assert.equal(normalizeNameForMatch("أحمَد مُحمَّد عَلي"), "احمدمحمدعلي", "tashkeel is stripped");
-  assert.equal(normalizeNameForMatch("احمد محمد على"), "احمدمحمدعلي", "ى → ي unifies the spelling");
-  assert.equal(normalizeNameForMatch("فاطمة الزهراء"), "فاطمهالزهراء", "ة → ه unifies the spelling");
-  assert.equal(normalizeNameForMatch("Lamiaa Wael Sharaf"), "lamiaawaelsharaf", "Latin is lowercased, spaces dropped");
-  assert.equal(normalizeNameForMatch("  أحمد - محمد، علي! "), "احمدمحمدعلي", "spaces and punctuation are dropped");
-  assert.equal(normalizeNameForMatch(""), "");
-  assert.equal(normalizeNameForMatch(null), "");
+test("getcode OCR: the name is no longer checked at all (28 Nov ~05:21 — only the code proves the registration)", () => {
+  const withCode = "Coptic\nتم التسجيل، الرقم الكودي الخاص بي: 13580245\n3:12";
+  // Any name in the OCR text — Coptic, Greek, Arabic, a different
+  // student's name, or no name at all — with the RIGHT code → ok.
+  // The code is unique per student, so another student's screenshot
+  // shows a different code → no-code; the example image has no code
+  // (blurred) → no-code. The name was redundant.
+  assert.equal(checkScreenshotOcrText(withCode, "13580245").verdict, "ok", "no name in the OCR text → ok");
+  assert.equal(checkScreenshotOcrText("Coptic\nتم التسجيل، الرقم الكودي الخاص بي: 13580245، اسمي: محمد أحمد خليل\n3:12", "13580245").verdict, "ok", "another student's name → ok");
+  assert.equal(checkScreenshotOcrText("Coptic\nتم التسجيل، الرقم الكودي الخاص بي: 13580245، اسمي: Ⲁⲃⲣⲁⲁⲙ\n3:12", "13580245").verdict, "ok", "Coptic name → ok");
+  assert.equal(checkScreenshotOcrText("Coptic\nتم التسجيل، الرقم الكودي الخاص بي: 13580245، اسمي: Αβραάμ\n3:12", "13580245").verdict, "ok", "Greek name → ok");
 });
 
-test("getcode OCR: checkScreenshotOcrText accepts the student's OWN name and code", () => {
+test("getcode OCR: checkScreenshotOcrText accepts the saved number with the student's code, whatever name shows", () => {
   const own = "Coptic\nتم التسجيل، الرقم الكودي الخاص بي: 13580245، اسمي: أحمد محمد علي\n3:12";
-  assert.equal(checkScreenshotOcrText(own, "13580245", "أحمد محمد علي").verdict, "ok");
-  // English name, same rule.
-  assert.equal(checkScreenshotOcrText("Coptic\nRegistration done, my code: 13580245, my name: Lamiaa Wael Sharaf\n3:12", "13580245", "Lamiaa Wael Sharaf").verdict, "ok");
-  // Diacritics / spelling variation in the OCR text still matches.
-  assert.equal(checkScreenshotOcrText("Coptic\nتم التسجيل، الرقم الكودي الخاص بي: 13580245، اسمي: أحمَد مُحمَّد عَلي\n3:12", "13580245", "أحمد محمد علي").verdict, "ok");
-  assert.equal(checkScreenshotOcrText("Coptic\nتم التسجيل، الرقم الكودي الخاص بي: 13580245، اسمي: احمد محمد على\n3:12", "13580245", "أحمد محمد علي").verdict, "ok");
-  // No name given → the name check is skipped (fail-open, back-compat).
   assert.equal(checkScreenshotOcrText(own, "13580245").verdict, "ok");
-  assert.equal(checkScreenshotOcrText(own, "13580245", "").verdict, "ok");
+  assert.equal(checkScreenshotOcrText("Coptic\nRegistration done, my code: 13580245, my name: Lamiaa Wael Sharaf\n3:12", "13580245").verdict, "ok");
+  assert.equal(checkScreenshotOcrText("Coptic\nتم التسجيل، الرقم الكودي الخاص بي: 13580245، اسمي: أحمَد مُحمَّد عَلي\n3:12", "13580245").verdict, "ok");
+  assert.equal(checkScreenshotOcrText("Coptic\nتم التسجيل، الرقم الكودي الخاص بي: 13580245، اسمي: احمد محمد على\n3:12", "13580245").verdict, "ok");
 });
 
-test("getcode OCR: checkScreenshotOcrText rejects another student's screenshot (right code, wrong name)", () => {
+test("getcode OCR: another student's screenshot is caught by the CODE, not the name (right code + wrong name → ok)", () => {
+  // Right code, wrong name → ok now: the name is not checked.
   const other = "Coptic\nتم التسجيل، الرقم الكودي الخاص بي: 13580245، اسمي: محمد أحمد خليل\n3:12";
-  assert.equal(checkScreenshotOcrText(other, "13580245", "أحمد محمد علي").verdict, "name-mismatch");
-  // The example image carries no name at all → also rejected.
-  assert.equal(checkScreenshotOcrText("Coptic\nتم التسجيل، الرقم الكودي الخاص بي: 13580245\n3:12", "13580245", "أحمد محمد علي").verdict, "name-mismatch");
+  assert.equal(checkScreenshotOcrText(other, "13580245").verdict, "ok");
+  // The anti-cheat still holds through the code: another student's
+  // screenshot carries a DIFFERENT code → no-code.
+  assert.equal(checkScreenshotOcrText("Coptic\nتم التسجيل، الرقم الكودي الخاص بي: 99999999، اسمي: محمد أحمد خليل\n3:12", "13580245").verdict, "no-code");
+  // The example image has no code at all (blurred) → no-code.
+  assert.equal(checkScreenshotOcrText("Coptic\nتم التسجيل، الرقم الكودي الخاص بي:\n3:12", "13580245").verdict, "no-code");
 });
 
 test("getcode OCR: checkScreenshotOcrText rejects a wrong code even when the name is right", () => {
   const own = "Coptic\nتم التسجيل، الرقم الكودي الخاص بي: 99999999، اسمي: أحمد محمد علي\n3:12";
-  assert.equal(checkScreenshotOcrText(own, "13580245", "أحمد محمد علي").verdict, "no-code");
+  assert.equal(checkScreenshotOcrText(own, "13580245").verdict, "no-code");
 });
 
 function ocrFetchStub(json, status = 200) {
@@ -646,11 +682,11 @@ test("getcode OCR: verifyScreenshotOcr returns the check verdicts", async () => 
   assert.equal((await verifyScreenshotOcr(new Uint8Array(10), "13580245", "k", ocrFetchStub({ ParsedResults: [{ ParsedText: "Coptic\nأهلاً" }], OCRExitCode: 1, IsErroredOnProcessing: false }))).verdict, "no-code");
 });
 
-test("getcode OCR: verifyScreenshotOcr returns the name-mismatch verdict", async () => {
+test("getcode OCR: verifyScreenshotOcr ignores the name — a wrong name with the right code is ok", async () => {
   const wrongNameJson = { ParsedResults: [{ ParsedText: "Coptic\nتم التسجيل، الرقم الكودي الخاص بي: 13580245، اسمي: محمد أحمد خليل" }], OCRExitCode: 1, IsErroredOnProcessing: false };
-  assert.equal((await verifyScreenshotOcr(new Uint8Array(10), "13580245", "k", ocrFetchStub(wrongNameJson), "أحمد محمد علي")).verdict, "name-mismatch");
+  assert.equal((await verifyScreenshotOcr(new Uint8Array(10), "13580245", "k", ocrFetchStub(wrongNameJson))).verdict, "ok", "wrong name, right code → ok");
   const ownNameJson = { ParsedResults: [{ ParsedText: "Coptic\nتم التسجيل، الرقم الكودي الخاص بي: 13580245، اسمي: أحمد محمد علي" }], OCRExitCode: 1, IsErroredOnProcessing: false };
-  assert.equal((await verifyScreenshotOcr(new Uint8Array(10), "13580245", "k", ocrFetchStub(ownNameJson), "أحمد محمد علي")).verdict, "ok");
+  assert.equal((await verifyScreenshotOcr(new Uint8Array(10), "13580245", "k", ocrFetchStub(ownNameJson))).verdict, "ok");
 });
 
 test("getcode OCR: ocrScreenshotText posts base64 to OCR.space and reads ParsedText", async () => {
@@ -692,7 +728,7 @@ test("getcode OCR: an unsaved number is rejected, the wait stays open, and a goo
   await completeGetCode(kvEnv, USER);
   ocrMode = "unsaved";
   const rejected = await sendPhotoMsg(kvEnv, USER);
-  assert.ok(anyMessage(rejected, /قم برفع صورة مضبوطة تُوضح أن الرقم مسجل في جهات اتصالك، وواضح في الصورة اسمك ورقمك الكودي\./), "an unsaved number is rejected with the user's exact wording");
+  assert.ok(anyMessage(rejected, /قم برفع صورة مضبوطة تُوضح أن الرقم مسجل في جهات اتصالك، وتُوضح اسمك ورقمك الكودي في شات الواتساب\./), "an unsaved number is rejected with the user's exact wording");
   assert.ok(!anyMessage(rejected, /تم تفعيل اشتراكك عزيزنا/), "no activation on rejection");
   let stored = kvEnv.USERS.store.get(`user:${USER}`);
   assert.equal(stored.getcodeScreenshotAwaiting, true, "the wait stays open after a rejection");
@@ -708,21 +744,25 @@ test("getcode OCR: a screenshot without the code is rejected with the single rej
   await completeGetCode(kvEnv, USER);
   ocrMode = "nocode";
   const rejected = await sendPhotoMsg(kvEnv, USER);
-  assert.ok(anyMessage(rejected, /قم برفع صورة مضبوطة تُوضح أن الرقم مسجل في جهات اتصالك، وواضح في الصورة اسمك ورقمك الكودي\./), "a missing code is rejected with the single rejection text");
+  assert.ok(anyMessage(rejected, /قم برفع صورة مضبوطة تُوضح أن الرقم مسجل في جهات اتصالك، وتُوضح اسمك ورقمك الكودي في شات الواتساب\./), "a missing code is rejected with the single rejection text");
   assert.ok(!anyMessage(rejected, /تم تفعيل اشتراكك عزيزنا/));
   const stored = kvEnv.USERS.store.get(`user:${USER}`);
   assert.equal(stored.getcodeScreenshotAwaiting, true, "the wait stays open after a rejection");
 });
 
-test("getcode OCR: a screenshot with the right code but another student's name is rejected with the single rejection text", async () => {
+test("getcode OCR: a screenshot with the right code but another student's name now ACTIVATES (the name is not checked)", async () => {
   const kvEnv = ocrKvEnv();
   await completeGetCode(kvEnv, USER);
   ocrMode = "wrongname";
-  const rejected = await sendPhotoMsg(kvEnv, USER);
-  assert.ok(anyMessage(rejected, /قم برفع صورة مضبوطة تُوضح أن الرقم مسجل في جهات اتصالك، وواضح في الصورة اسمك ورقمك الكودي\./), "another student's screenshot is rejected with the single rejection text");
-  assert.ok(!anyMessage(rejected, /تم تفعيل اشتراكك عزيزنا/), "no activation on a name mismatch");
+  const calls = await sendPhotoMsg(kvEnv, USER);
+  // 28 Nov ~05:21 — the name check is gone: only the code proves the
+  // registration message, so a different name in the OCR text with the
+  // right code activates. The anti-cheat still holds through the code
+  // (another student's screenshot carries a different code → no-code).
+  assert.ok(anyMessage(calls, /تم تفعيل اشتراكك عزيزنا أحمد محمد علي والرقم الكودي الخاص بك هو: 13580245/), "right code + wrong name activates now");
+  assert.ok(!anyMessage(calls, /قم برفع صورة مضبوطة/), "no rejection on a name difference");
   const stored = kvEnv.USERS.store.get(`user:${USER}`);
-  assert.equal(stored.getcodeScreenshotAwaiting, true, "the wait stays open after a rejection");
+  assert.equal(stored.getcodeScreenshotAwaiting, undefined, "the wait clears on accept");
 });
 
 test("getcode OCR: an OCR error fails open and activates", async () => {
@@ -743,4 +783,168 @@ test("getcode OCR: without a key the screenshot activates without any OCR call",
   const calls = await sendPhotoMsg(kvEnv, USER);
   assert.equal(ocrCalls.length, 0, "no key → no OCR call at all");
   assert.ok(anyMessage(calls, /تم تفعيل اشتراكك عزيزنا/), "no key → activation as before");
+});
+
+// ---------------------------------------------------------------------------
+// Shared get-code registry (2026-11-28, cross-platform sync): one
+// phone-keyed record in the Telegram Worker's UserStore DO —
+// `getcode:registry:<canonicalPhone>` → {name, code, updatedAt} — so a
+// student who got their code on one platform is recognized instantly on
+// the others without re-entering name/phone. Telegram reads/writes the
+// DO in-process; WhatsApp + Messenger reach the same entries through
+// the /getcode-registry endpoints behind a bearer secret.
+// ---------------------------------------------------------------------------
+
+test("getcode registry: canonicalGetCodePhone folds to the 12-digit 20... form", () => {
+  assert.equal(canonicalGetCodePhone("01207829388"), "201207829388", "11 digits starting with 0");
+  assert.equal(canonicalGetCodePhone("+201207829388"), "201207829388", "12 digits starting with 20");
+  assert.equal(canonicalGetCodePhone("201207829388"), "201207829388", "already canonical");
+  assert.equal(canonicalGetCodePhone("1207829388"), "201207829388", "10 digits starting with 1");
+  assert.equal(canonicalGetCodePhone("0101 234-5678"), "201012345678", "spaces and dashes are stripped");
+  assert.equal(canonicalGetCodePhone("٠١٢٠٧٨٢٩٣٨٨"), "201207829388", "Arabic-Indic digits fold to Western");
+  assert.equal(canonicalGetCodePhone("۰۱۲۰۷۸۲۹۳۸۸"), "201207829388", "Persian digits fold to Western");
+  assert.equal(canonicalGetCodePhone("123"), null, "too short to canonicalize");
+  assert.equal(canonicalGetCodePhone(""), null);
+  assert.equal(canonicalGetCodePhone(null), null);
+  assert.equal(canonicalGetCodePhone("442071234567"), null, "a foreign number has no canonical form");
+});
+
+test("getcode registry: the key is getcode:registry:<canonicalPhone>", () => {
+  assert.equal(getCodeRegistryKey("201207829388"), "getcode:registry:201207829388");
+});
+
+const REGISTRY_SECRET = "test-registry-secret-should-be-long";
+function registryKvEnv(withSecret = true) {
+  return withSecret
+    ? { ...env, USERS: fakeKv(), GETCODE_REGISTRY_SECRET: REGISTRY_SECRET }
+    : { ...env, USERS: fakeKv() };
+}
+async function registryFetch(kvEnv, method, path, { secret, body, rawBody } = {}) {
+  const headers = {};
+  if (secret) headers.authorization = `Bearer ${secret}`;
+  if (body !== undefined || rawBody !== undefined) headers["content-type"] = "application/json";
+  const res = await worker.fetch(
+    new Request(`https://bot.test${path}`, {
+      method,
+      headers,
+      body: rawBody !== undefined ? rawBody : body === undefined ? undefined : JSON.stringify(body),
+    }),
+    kvEnv,
+  );
+  return { status: res.status, json: await res.json().catch(() => null) };
+}
+
+test("getcode registry: endpoints reject without a secret configured, and with a wrong secret", async () => {
+  const noSecretEnv = registryKvEnv(false);
+  const noSecret = await registryFetch(noSecretEnv, "GET", "/getcode-registry?phone=201207829388", { secret: REGISTRY_SECRET });
+  assert.equal(noSecret.status, 401, "no secret configured → reject even with a token");
+  assert.equal(noSecret.json.error, "unauthorized");
+  const kvEnv = registryKvEnv(true);
+  const missing = await registryFetch(kvEnv, "GET", "/getcode-registry?phone=201207829388");
+  assert.equal(missing.status, 401, "missing Authorization header → 401");
+  const wrong = await registryFetch(kvEnv, "GET", "/getcode-registry?phone=201207829388", { secret: "wrong-secret" });
+  assert.equal(wrong.status, 401, "wrong secret → 401");
+  const correct = await registryFetch(kvEnv, "GET", "/getcode-registry?phone=201207829388", { secret: REGISTRY_SECRET });
+  assert.equal(correct.status, 200, "the exact Bearer token works");
+});
+
+test("getcode registry: GET/POST/DELETE round-trip through the endpoints", async () => {
+  const kvEnv = registryKvEnv(true);
+  const miss = await registryFetch(kvEnv, "GET", "/getcode-registry?phone=201207829388", { secret: REGISTRY_SECRET });
+  assert.equal(miss.status, 200);
+  assert.deepEqual(miss.json, { found: false }, "an unknown phone is not found");
+  const stored = await registryFetch(kvEnv, "POST", "/getcode-registry", {
+    secret: REGISTRY_SECRET,
+    body: { phone: "01012345678", name: "أحمد محمد علي", code: "13580245" },
+  });
+  assert.equal(stored.status, 200);
+  assert.deepEqual(stored.json, { ok: true }, "a non-canonical phone is stored under its canonical key");
+  const hit = await registryFetch(kvEnv, "GET", "/getcode-registry?phone=%2B201012345678", { secret: REGISTRY_SECRET });
+  assert.equal(hit.status, 200);
+  assert.deepEqual(hit.json, { found: true, name: "أحمد محمد علي", code: "13580245" }, "the entry is found under the canonical phone");
+  const deleted = await registryFetch(kvEnv, "DELETE", "/getcode-registry?phone=1012345678", { secret: REGISTRY_SECRET });
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(deleted.json, { ok: true }, "deleting by a non-canonical form works too");
+  const gone = await registryFetch(kvEnv, "GET", "/getcode-registry?phone=201012345678", { secret: REGISTRY_SECRET });
+  assert.deepEqual(gone.json, { found: false }, "the entry is gone after DELETE");
+  const deleteAgain = await registryFetch(kvEnv, "DELETE", "/getcode-registry?phone=201012345678", { secret: REGISTRY_SECRET });
+  assert.equal(deleteAgain.status, 200, "deleting an absent entry is still ok (idempotent)");
+});
+
+test("getcode registry: endpoints validate their input", async () => {
+  const kvEnv = registryKvEnv(true);
+  assert.equal((await registryFetch(kvEnv, "GET", "/getcode-registry?phone=123", { secret: REGISTRY_SECRET })).status, 400, "a non-canonical phone → 400");
+  assert.equal((await registryFetch(kvEnv, "GET", "/getcode-registry", { secret: REGISTRY_SECRET })).status, 400, "a missing phone → 400");
+  assert.equal((await registryFetch(kvEnv, "POST", "/getcode-registry", { secret: REGISTRY_SECRET, body: { phone: "123", name: "أحمد محمد علي", code: "13580245" } })).status, 400, "POST with a bad phone → 400");
+  assert.equal((await registryFetch(kvEnv, "POST", "/getcode-registry", { secret: REGISTRY_SECRET, body: { phone: "01012345678", name: "  ", code: "13580245" } })).status, 400, "POST with an empty name → 400");
+  assert.equal((await registryFetch(kvEnv, "POST", "/getcode-registry", { secret: REGISTRY_SECRET, body: { phone: "01012345678", name: "أحمد محمد علي", code: "abc" } })).status, 400, "POST with a non-digit code → 400");
+  assert.equal((await registryFetch(kvEnv, "POST", "/getcode-registry", { secret: REGISTRY_SECRET, rawBody: "{not json" })).status, 400, "POST with malformed JSON → 400");
+  assert.equal((await registryFetch(kvEnv, "DELETE", "/getcode-registry?phone=123", { secret: REGISTRY_SECRET })).status, 400, "DELETE with a bad phone → 400");
+  assert.equal((await registryFetch(kvEnv, "PUT", "/getcode-registry?phone=201207829388", { secret: REGISTRY_SECRET })).status, 405, "an unsupported method → 405");
+});
+
+test("getcode registry: a registry hit greets immediately — no name question, no macro call", async () => {
+  macroMode = "json";
+  macroBodies = [];
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedLevelMenus(kvEnv);
+  // The student got their code on another platform: the registry
+  // already has their phone.
+  kvEnv.USERS.store.set(getCodeRegistryKey("201012345678"), { name: "أحمد محمد علي", code: "13580245", updatedAt: "2026-11-28T00:00:00.000Z" });
+  const ask = await sayMsg(kvEnv, USER, "/getcode");
+  assert.ok(anyMessage(ask, /اكتب رقم موبايلك/), "a first-time Telegram user still starts with the phone question");
+  // The background user-sheet sync also POSTs to the macro URL, so the
+  // hit is proven by the DELTA across the phone step, not the total.
+  const macroCallsBeforeHit = macroBodies.length;
+  const greet = await sayMsg(kvEnv, USER, "01012345678");
+  assert.ok(anyMessage(greet, /مرحباً أحمد محمد علي، الرقم الكودي الخاص بك هو 13580245/), "a registry hit greets with the stored name+code");
+  assert.ok(!anyMessage(greet, /اكتب اسمك الثلاثي/), "the name question is never asked on a hit");
+  assert.equal(macroBodies.length, macroCallsBeforeHit, "no macro call on a hit — the code comes from the registry");
+  const stored = kvEnv.USERS.store.get(`user:${USER}`);
+  assert.equal(stored.getcodeScreenshotName, "أحمد محمد علي", "the local record is written");
+  assert.equal(stored.getcodeScreenshotCode, "13580245");
+  assert.equal(stored.getcodePhone, "01012345678", "the phone is stored as typed, folded to Western digits");
+  assert.equal(stored.getcodeScreenshotAwaiting, undefined, "no screenshot wait on a registry hit");
+  const again = await sayMsg(kvEnv, USER, "/getcode");
+  assert.ok(anyMessage(again, /مرحباً أحمد محمد علي، الرقم الكودي الخاص بك هو 13580245/), "the next /getcode greets from the local record");
+});
+
+test("getcode registry: a miss runs the normal flow and writes the registry entry", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await completeGetCode(kvEnv, USER);
+  const entry = kvEnv.USERS.store.get(getCodeRegistryKey("201012345678"));
+  assert.equal(entry?.name, "أحمد محمد علي", "the registry entry is written on completion");
+  assert.equal(entry?.code, "13580245");
+  assert.ok(typeof entry?.updatedAt === "string" && entry.updatedAt.length > 0, "the entry carries an updatedAt timestamp");
+  const stored = kvEnv.USERS.store.get(`user:${USER}`);
+  assert.equal(stored.getcodePhone, "01012345678", "the local record carries the phone as typed, folded to Western digits");
+});
+
+test("getcode registry: /resetcode clears the local record AND the registry entry", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await completeGetCode(kvEnv, ADMIN);
+  assert.ok(kvEnv.USERS.store.get(getCodeRegistryKey("201012345678")), "the registry entry exists before the reset");
+  await sayMsg(kvEnv, ADMIN, "/resetcode");
+  const stored = kvEnv.USERS.store.get(`user:${ADMIN}`);
+  assert.equal(stored.getcodeScreenshotName, undefined, "the local name is gone");
+  assert.equal(stored.getcodeScreenshotCode, undefined, "the local code is gone");
+  assert.equal(stored.getcodePhone, undefined, "the local phone is gone");
+  assert.equal(kvEnv.USERS.store.get(getCodeRegistryKey("201012345678")), undefined, "the registry entry is gone too");
+  // Without the registry entry, the next /getcode re-runs the flow
+  // instead of greeting immediately.
+  const again = await sayMsg(kvEnv, ADMIN, "/getcode");
+  assert.ok(anyMessage(again, /اكتب رقم موبايلك/), "the next /getcode asks for the phone again");
+  assert.ok(!anyMessage(again, /مرحباً /), "no greeting after a reset");
+});
+
+test("getcode registry: /resetcode on an old record without a phone clears locally only", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedLevelMenus(kvEnv);
+  // A record from before the registry existed: name+code, no phone.
+  kvEnv.USERS.store.set(`user:${ADMIN}`, { getcodeScreenshotName: "أحمد محمد علي", getcodeScreenshotCode: "13580245" });
+  const reset = await sayMsg(kvEnv, ADMIN, "/resetcode");
+  assert.ok(anyMessage(reset, /تم مسح الرقم الكودي المسجّل/), "the reset still confirms");
+  const stored = kvEnv.USERS.store.get(`user:${ADMIN}`);
+  assert.equal(stored.getcodeScreenshotName, undefined, "the local record is cleared");
+  assert.equal(stored.getcodeScreenshotCode, undefined);
 });

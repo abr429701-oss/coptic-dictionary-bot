@@ -765,13 +765,64 @@ async function handleCertCode(env, chatId, code, level) {
   }
   await telegram(env, "sendMessage", { chat_id: chatId, text: "الرقم الكودي غير صحيح." });
 }
+// Shared get-code registry (2026-11-28, cross-platform sync): the
+// Telegram Worker's UserStore DO is the single source of truth for
+// name+code by canonical phone. Telegram itself reads/writes the DO
+// in-process (helpers below, no HTTP, no secret). WhatsApp + Messenger
+// reach the same entries through the /getcode-registry endpoints
+// (bearer secret GETCODE_REGISTRY_SECRET — set with the SAME value on
+// all three deployments; without it the endpoints reject). Phones and
+// codes are never logged.
+async function getCodeRegistryEntry(env, canonicalPhone) {
+  if (!env.USERS || !canonicalPhone) return null;
+  try {
+    const value = (await storeCall(env, { op: "get", key: getCodeRegistryKey(canonicalPhone) })).value ?? null;
+    if (!value || typeof value !== "object") return null;
+    const name = String(value.name ?? "").trim();
+    const code = String(value.code ?? "").trim();
+    if (!name || !code) return null;
+    return { name, code };
+  } catch {
+    return null;
+  }
+}
+
+async function setCodeRegistryEntry(env, canonicalPhone, name, code) {
+  if (!env.USERS || !canonicalPhone) return false;
+  try {
+    await storeCall(env, { op: "put", key: getCodeRegistryKey(canonicalPhone), value: { name: String(name), code: String(code), updatedAt: new Date().toISOString() } });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function deleteCodeRegistryEntry(env, canonicalPhone) {
+  if (!env.USERS || !canonicalPhone) return false;
+  try {
+    await storeCall(env, { op: "delete", key: getCodeRegistryKey(canonicalPhone) });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getCodeRegistryAuthOk(request, env) {
+  const secret = String(env?.GETCODE_REGISTRY_SECRET ?? "").trim();
+  if (!secret) return false;
+  return (request.headers.get("authorization") ?? "") === `Bearer ${secret}`;
+}
+
 // "الحصول على الرقم الكودي": the in-bot version of the Apps Script web
-// form (see src/getcode.js). Two steps — name, then phone — kept in the
-// user record (getcodeStep/getcodeName) and read by the hook below. The
-// storage happens in apps-script/Code.gs (generateAndStoreCode, copied
-// verbatim from the registration project); the bot only shows the
+// form (see src/getcode.js). Two steps — phone first, then name — kept
+// in the user record (getcodeStep/getcodePhone) and read by the hook
+// below. The storage happens in apps-script/Code.gs (generateAndStoreCode,
+// copied verbatim from the registration project); the bot only shows the
 // returned code (plus a ready WhatsApp link, which is how the admin
-// verifies the student completed the step).
+// verifies the student completed the step). Since 2026-11-28 the phone
+// is asked FIRST so the shared registry can be checked: a student who
+// already got their code on another platform is greeted immediately
+// and never asked for their name.
 async function beginGetCodeFlow(env, chatId, userId) {
   const user = await getUser(env, userId);
   // Returning user (2026-11-28): they already have a code stored — show
@@ -782,64 +833,78 @@ async function beginGetCodeFlow(env, chatId, userId) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: `مرحباً ${user.getcodeScreenshotName}، الرقم الكودي الخاص بك هو ${user.getcodeScreenshotCode}` });
     return;
   }
-  await saveUser(env, userId, { ...(user ?? {}), certAwaiting: undefined, getcodeStep: "name", getcodeName: undefined, getcodeScreenshotAwaiting: undefined });
-  await telegram(env, "sendMessage", { chat_id: chatId, text: "✏️ اكتب اسمك الثلاثي:" });
+  // No local record: ask PHONE FIRST (2026-11-28, cross-platform sync).
+  // A registry hit greets immediately — the name question is never asked.
+  await saveUser(env, userId, { ...(user ?? {}), certAwaiting: undefined, getcodeStep: "phone", getcodeName: undefined, getcodeScreenshotAwaiting: undefined });
+  await telegram(env, "sendMessage", { chat_id: chatId, text: "📱 اكتب رقم موبايلك:" });
 }
 async function handleGetCodeStep(env, chatId, userId, text, user) {
-  if (user?.getcodeStep === "name") {
-    const name = String(text ?? "").trim();
-    if (!name) {
-      await telegram(env, "sendMessage", { chat_id: chatId, text: "✏️ اكتب اسمك الثلاثي:" });
+  // Step "phone" (FIRST, since 2026-11-28): the registry is keyed by
+  // canonical phone. A hit greets immediately with the stored name+code
+  // (the student got their code on another platform); a miss moves on
+  // to the name question, and the canonical phone is kept in the local
+  // record (getcodePhone) for the macro call that follows.
+  if (user?.getcodeStep === "phone") {
+    const canonical = canonicalGetCodePhone(text);
+    if (!canonical) {
+      await telegram(env, "sendMessage", { chat_id: chatId, text: "📱 رقم الموبايل لازم يكون ٤ أرقام على الأقل — اكتبه تاني:" });
       return;
     }
-    await saveUser(env, userId, { ...(user ?? {}), getcodeStep: "phone", getcodeName: name });
+    const entry = await getCodeRegistryEntry(env, canonical);
+    if (entry && entry.code) {
+      await saveUser(env, userId, { ...(user ?? {}), getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined, getcodeScreenshotName: entry.name, getcodeScreenshotCode: entry.code, getcodePhone: normalizeGetCodePhone(text) });
+      await telegram(env, "sendMessage", { chat_id: chatId, text: `مرحباً ${entry.name}، الرقم الكودي الخاص بك هو ${entry.code}` });
+      return;
+    }
+    await saveUser(env, userId, { ...(user ?? {}), getcodeStep: "name", getcodePhone: normalizeGetCodePhone(text) });
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "✏️ اكتب اسمك الثلاثي:" });
+    return;
+  }
+  // Step "name": the phone is already known (canonical, from the phone
+  // step). If it is missing — e.g. a stale record — go back to the
+  // phone question instead of guessing.
+  const name = String(text ?? "").trim();
+  if (!name) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "✏️ اكتب اسمك الثلاثي:" });
+    return;
+  }
+  const canonical = canonicalGetCodePhone(user?.getcodePhone ?? "");
+  if (!canonical) {
+    await saveUser(env, userId, { ...(user ?? {}), getcodeStep: "phone", getcodeName: undefined });
     await telegram(env, "sendMessage", { chat_id: chatId, text: "📱 اكتب رقم موبايلك:" });
     return;
   }
-  // Step "phone": the macro needs at least 4 digits (the code is
-  // 123456 + the last 4). Non-digits are stripped, like the form does.
-  const phone = normalizeGetCodePhone(text);
-  if (!getCodePhoneValid(phone)) {
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "📱 رقم الموبايل لازم يكون ٤ أرقام على الأقل — اكتبه تاني:" });
-    return;
-  }
-  const name = String(user?.getcodeName ?? "").trim();
   await saveUser(env, userId, { ...(user ?? {}), getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined });
   // The code feature lives in apps-script/Code.gs (generateAndStoreCode);
   // the bot calls the bot's own Apps Script web app URL (driveConfig —
   // the /setdrive URL or the APPS_SCRIPT_URL secret). Without a linked
-  // URL there is nothing to call.
+  // URL there is nothing to call. The macro gets the phone as the
+  // student typed it (folded to Western digits) — the Sheet keeps the
+  // same form it always had, so the macro's per-phone dedup still
+  // works; only the registry key is canonicalized.
   const drive = await driveConfig(env);
-  const result = await getCodeFromMacro(name, phone, drive?.url);
+  const result = await getCodeFromMacro(name, user?.getcodePhone ?? "", drive?.url);
   if (result.code) {
-    // Remember the session: the name+code persist (returning users get
-    // their code back without re-asking), and the one-shot screenshot
+    // Remember the session: the name+code+phone persist (returning users
+    // get their code back without re-asking), and the one-shot screenshot
     // wait opens — it ends when the photo arrives, or on /cancel,
     // /menu, /start or another menu tap (same clearing as the other
-    // waits; only the wait flag clears, never the record).
-    await saveUser(env, userId, { ...(user ?? {}), getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: true, getcodeScreenshotName: name, getcodeScreenshotCode: result.code });
+    // waits; only the wait flag clears, never the record). The registry
+    // entry is written too, so the other platforms recognize the student
+    // instantly by phone.
+    await saveUser(env, userId, { ...(user ?? {}), getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: true, getcodeScreenshotName: name, getcodeScreenshotCode: result.code, getcodePhone: normalizeGetCodePhone(user?.getcodePhone ?? "") });
+    await setCodeRegistryEntry(env, canonical, name, result.code);
     const reply = buildGetCodeReply(name, result.code);
-    // One photo message: the example screenshot carries the whole reply
-    // as its caption (the "الصورة المرفقة" the text refers to is the
-    // photo itself). Telegram captions cap at 1024 chars — a very long
-    // name falls back to text + bare photo so the student never loses
-    // the code or the link; a failed photo send falls back the same way.
-    let photoOk = false;
-    if (reply.length <= 1024) {
-      try {
-        const res = await telegram(env, "sendPhoto", { chat_id: chatId, photo: GET_CODE_EXAMPLE_PHOTO_URL, caption: reply });
-        photoOk = !!res?.ok;
-      } catch {
-        photoOk = false;
-      }
-    }
-    if (!photoOk) {
-      await telegram(env, "sendMessage", { chat_id: chatId, text: reply, disable_web_page_preview: true });
-      try {
-        await telegram(env, "sendPhoto", { chat_id: chatId, photo: GET_CODE_EXAMPLE_PHOTO_URL });
-      } catch {
-        /* the code reply above already went out */
-      }
+    // Two messages (2026-11-28, user correction — the captioned-photo
+    // design is retired): the notice text as a plain text message
+    // first, then the example screenshot as its own message UNDER the
+    // text, with NO caption. There is no caption cap to respect and no
+    // fallback shape — if the photo fails, the text already went out.
+    await telegram(env, "sendMessage", { chat_id: chatId, text: reply, disable_web_page_preview: true });
+    try {
+      await telegram(env, "sendPhoto", { chat_id: chatId, photo: GET_CODE_EXAMPLE_PHOTO_URL });
+    } catch {
+      /* the text reply above already went out */
     }
     return;
   }
@@ -860,7 +925,14 @@ async function handleGetCodeStep(env, chatId, userId, text, user) {
 // 1234567); the reset re-opens the FLOW, it never mints a new code.
 async function resetGetCodeRecord(env, chatId, userId) {
   const user = await getUser(env, userId);
-  await saveUser(env, userId, { ...(user ?? {}), getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined, getcodeScreenshotName: undefined, getcodeScreenshotCode: undefined });
+  // Also delete the shared registry entry for the stored phone (when
+  // the record has one): without it the reset would look broken, because
+  // the next /getcode would find the registry entry and greet immediately
+  // instead of re-running the flow. Old records have no phone — those
+  // clear locally only, as before.
+  const phone = canonicalGetCodePhone(user?.getcodePhone ?? "");
+  await saveUser(env, userId, { ...(user ?? {}), getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined, getcodeScreenshotName: undefined, getcodeScreenshotCode: undefined, getcodePhone: undefined });
+  if (phone) await deleteCodeRegistryEntry(env, phone);
   await telegram(env, "sendMessage", { chat_id: chatId, text: "تم مسح الرقم الكودي المسجّل — ابعت /getcode من الأول." });
 }
 
@@ -871,7 +943,7 @@ async function resetGetCodeRecord(env, chatId, userId) {
 // a failed download, or any OCR problem → "skipped": the caller FAILS
 // OPEN and activates as before, so a legit student is never stranded
 // by the OCR service being down.
-async function verifyGetCodeScreenshot(env, fileId, code, name) {
+async function verifyGetCodeScreenshot(env, fileId, code) {
   const apiKey = String(env?.OCR_SPACE_API_KEY ?? "").trim();
   if (!apiKey || !fileId) return "skipped";
   try {
@@ -881,7 +953,7 @@ async function verifyGetCodeScreenshot(env, fileId, code, name) {
     const response = await fetch(`https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${filePath}`, { signal: AbortSignal.timeout(15000) });
     if (!response.ok) return "skipped";
     const bytes = new Uint8Array(await response.arrayBuffer());
-    return (await verifyScreenshotOcr(bytes, code, apiKey, undefined, name)).verdict;
+    return (await verifyScreenshotOcr(bytes, code, apiKey, undefined)).verdict;
   } catch {
     return "skipped";
   }
@@ -1718,7 +1790,7 @@ import { formatTranslation, setReverseTarget } from "./translate.js";
 import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, suggestSimilar, helpText, retentionText, opsText, recordById, levenshtein } from "./new-features.js";
 import { lookupCertificate, parseCertCsv } from "./certificates.js";
 import { extractCodePattern } from "./exam-pattern.js";
-import { getCodeFromMacro, buildGetCodeReply, buildGetCodeWhatsAppUrl, normalizeGetCodePhone, getCodePhoneValid, GET_CODE_SHEET_ID, GET_CODE_EXAMPLE_PHOTO_URL, GET_CODE_SCREENSHOT_REJECT_TEXT, verifyScreenshotOcr } from "./getcode.js";
+import { getCodeFromMacro, buildGetCodeReply, buildGetCodeWhatsAppUrl, normalizeGetCodePhone, getCodePhoneValid, canonicalGetCodePhone, getCodeRegistryKey, GET_CODE_SHEET_ID, GET_CODE_EXAMPLE_PHOTO_URL, GET_CODE_SCREENSHOT_REJECT_TEXT, verifyScreenshotOcr } from "./getcode.js";
 import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VIDEO_MENU_ID, cleanMenuTitle, cleanMenuText, cleanButtonLabel, cleanUrl, cleanCommand, normalizeMenus, findMenu, findButton, rootMenus, descendantMenuIds, menuOpenText, menuAdminListText, menuAdminDetailText, parseMenuTarget, parseButtonTarget, addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton, ensureVideoMenu } from "./menu-builder.js";
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 import { getHiddenUi, setHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
@@ -5512,6 +5584,7 @@ function usageKindForPath(pathname) {
   if (path === "/exam-pattern") return "exam";
   if (path === "/checkcode") return "checkcode";
   if (path === "/getcode") return "getcode";
+  if (path === "/getcode-registry") return "getcode";
   if (path === "/health") return "health";
   if (path.startsWith("/media/") || path.startsWith("/video/")) return "media";
   if (path === "/webhook") return "webhook";
@@ -9342,8 +9415,8 @@ async function handleUpdate(update, env, ctx) {
   if (message.photo) {
     const shotUser = await getUser(env, userId);
     if (shotUser?.getcodeScreenshotAwaiting && shotUser?.getcodeScreenshotName && shotUser?.getcodeScreenshotCode) {
-      const verdict = await verifyGetCodeScreenshot(env, message.photo[message.photo.length - 1]?.file_id, shotUser.getcodeScreenshotCode, shotUser.getcodeScreenshotName);
-      if (verdict === "unsaved-number" || verdict === "no-code" || verdict === "name-mismatch") {
+      const verdict = await verifyGetCodeScreenshot(env, message.photo[message.photo.length - 1]?.file_id, shotUser.getcodeScreenshotCode);
+      if (verdict === "unsaved-number" || verdict === "no-code") {
         await telegram(env, "sendMessage", { chat_id: message.chat.id, text: GET_CODE_SCREENSHOT_REJECT_TEXT });
         return;
       }
@@ -9908,6 +9981,42 @@ export default {
       const result = await getCodeFromMacro(name, phone, cfg?.url ?? null);
       if (!result.code) return Response.json({ ok: false, error: result.error || "macro-unreadable" }, { status: 502 });
       return Response.json({ ok: true, code: result.code, whatsapp: buildGetCodeWhatsAppUrl(result.code, name) });
+    }
+    // Shared get-code registry (2026-11-28, cross-platform sync): the
+    // other bots (WhatsApp, Messenger) read/write the same DO entries
+    // through these endpoints — GET looks a phone up, POST stores a
+    // name+code, DELETE removes one (for /resetcode). All three require
+    // `Authorization: Bearer <GETCODE_REGISTRY_SECRET>`; without the
+    // secret configured the endpoints reject — the registry is never
+    // served unauthenticated. Phones and codes are never logged. One
+    // Worker request per call. Telegram itself uses the in-process
+    // helpers (no HTTP, no secret).
+    if (url.pathname === "/getcode-registry") {
+      if (!getCodeRegistryAuthOk(request, env)) return Response.json({ ok: false, error: "unauthorized" }, { status: 401 });
+      if (request.method === "GET") {
+        const phone = canonicalGetCodePhone(url.searchParams.get("phone") ?? "");
+        if (!phone) return Response.json({ ok: false, error: "bad-input" }, { status: 400 });
+        const entry = await getCodeRegistryEntry(env, phone);
+        if (!entry || !entry.code) return Response.json({ found: false });
+        return Response.json({ found: true, name: entry.name, code: entry.code });
+      }
+      if (request.method === "POST") {
+        let body = {};
+        try { body = await request.json(); } catch { return Response.json({ ok: false, error: "bad-request" }, { status: 400 }); }
+        const phone = canonicalGetCodePhone(body.phone ?? "");
+        const name = String(body.name ?? "").trim();
+        const code = String(body.code ?? "").trim();
+        if (!phone || !name || name.length > 60 || !/^\d{6,10}$/u.test(code)) return Response.json({ ok: false, error: "bad-input" }, { status: 400 });
+        await setCodeRegistryEntry(env, phone, name, code);
+        return Response.json({ ok: true });
+      }
+      if (request.method === "DELETE") {
+        const phone = canonicalGetCodePhone(url.searchParams.get("phone") ?? "");
+        if (!phone) return Response.json({ ok: false, error: "bad-input" }, { status: 400 });
+        await deleteCodeRegistryEntry(env, phone);
+        return Response.json({ ok: true });
+      }
+      return Response.json({ ok: false, error: "bad-method" }, { status: 405 });
     }
     // Live code check for the greeting's name (see lookupCodeName): the
     // sheet only supplies the name — eligibility is the form's own list.
