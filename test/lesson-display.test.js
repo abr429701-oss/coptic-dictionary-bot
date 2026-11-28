@@ -1,8 +1,9 @@
 // Lesson display restructure (user 2026-11-28): tapping a lesson sends
-// ONLY the video; the oral paper and the exam link arrive on demand from
-// the "🗣 الشفوي" / "📝 الامتحان الإلكتروني" reply-keyboard buttons.
-// The lesson-list keyboard stays visible, and the admin-only
-// "🎙 سجّل الشفوي" record button is untouched.
+// ONLY the video; the oral paper, the exam link, the L2 summary photo
+// and the L2 exercise text arrive on demand from the "🗣 الشفوي" /
+// "📝 الامتحان الإلكتروني" / "🖼 ملخص الدرس" / "📝 التدريب"
+// reply-keyboard buttons. The lesson-list keyboard stays visible, and
+// the admin-only "🎙 سجّل الشفوي" record button is untouched.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -95,6 +96,15 @@ const L1_03_EXAM = "1Gts_xgdk3-g7elOTmSXtpouZMvFVLwdQ4fleO3usLYg";
 const L1_02_LABEL = "مقدمة عن حروف اللغة القبطية"; // m_learn_l1_02: video only
 const L2_03_LABEL = "الدرس الثالث"; // m_learn_l2_03: video + summary + exam, no oral
 const L2_03_EXAM = "1hU9u45-62silHgZiehAneS0W7Ud6v-kpdEn9KkYYG78";
+const L2_02_LABEL = "الدرس الثاني"; // m_learn_l2_02: video + summary + exercise, no exam
+const L2_06_LABEL = "الدرس السادس"; // m_learn_l2_06: video + summary + exercise + exam
+const L2_06_EXAM = "1ZABUJwB07YtSWAWwpbMFWKfAc8krqlomf3bP-MNFDyY";
+
+function seedL2(kvEnv, userId, lessonId, label, doneKeys) {
+  seedUser(kvEnv, userId, "Tester", { menuNav: "m_learn_l2" });
+  seedMenu(kvEnv, "m_learn_l2", [{ id: `b-${lessonId}`, label, kind: "lesson", lessonId }]);
+  seedImportState(kvEnv, doneKeys);
+}
 
 const videos = (calls) => calls.filter((c) => c.url.endsWith("/sendVideo"));
 const photos = (calls) => calls.filter((c) => c.url.endsWith("/sendPhoto"));
@@ -206,4 +216,73 @@ test("admin still sees the record button and the record flow still works", async
   const recordCalls = await say(kvEnv, ADMIN, ORAL_RECORD_BUTTON, 102);
   assert.match(messages(recordCalls).map((m) => m.text).join("\n"), /3 كلمات/, "the record flow still opens");
   assert.equal(kvEnv.USERS.store.get(`user:${ADMIN}`).oralAwaiting, "m_learn_l1_03");
+});
+
+test("L2 lesson tap: video only; keyboard has summary + exercise, no oral, no exam", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedL2(kvEnv, STUDENT, "m_learn_l2_02", L2_02_LABEL, { "m_learn_l2_02:video": "vid-l2-02", "m_learn_l2_02:summary": "photo-l2-02-summary" });
+  const calls = await say(kvEnv, STUDENT, L2_02_LABEL, 101);
+  assert.equal(videos(calls).length, 1, "only the video is sent");
+  assert.equal(photos(calls).length, 0, "the summary photo is NOT auto-sent");
+  assert.ok(!messages(calls).some((m) => String(m.text ?? "").includes("التدريب الأول")), "the exercise text is NOT auto-sent");
+  const videoCall = videos(calls)[0];
+  assert.ok(keyboardHasRow(videoCall, "🖼 ملخص الدرس", "📝 التدريب"), "both new buttons are on the keyboard");
+  assert.ok(!keyboardHas(videoCall, "🗣 الشفوي"), "no oral button in L2");
+  assert.ok(!keyboardHas(videoCall, "📝 الامتحان الإلكتروني"), "no exam button without an exam item");
+});
+
+test("summary button sends the lesson's summary photo with the lesson keyboard", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedL2(kvEnv, STUDENT, "m_learn_l2_02", L2_02_LABEL, { "m_learn_l2_02:video": "vid-l2-02", "m_learn_l2_02:summary": "photo-l2-02-summary" });
+  await say(kvEnv, STUDENT, L2_02_LABEL, 101);
+  const calls = await say(kvEnv, STUDENT, "🖼 ملخص الدرس", 102);
+  assert.equal(photos(calls).length, 1, "the summary photo is sent on demand");
+  assert.equal(photos(calls)[0].payload?.photo, "photo-l2-02-summary");
+  assert.equal(photos(calls)[0].payload?.caption, L2_02_LABEL);
+  assert.ok(keyboardHas(photos(calls)[0], L2_02_LABEL), "the lesson keyboard is re-attached");
+  assert.ok(keyboardHas(photos(calls)[0], "📝 التدريب"), "the exercise button stays on the keyboard");
+});
+
+test("exercise button sends the lesson's exercise text", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedL2(kvEnv, STUDENT, "m_learn_l2_02", L2_02_LABEL, { "m_learn_l2_02:video": "vid-l2-02", "m_learn_l2_02:summary": "photo-l2-02-summary" });
+  await say(kvEnv, STUDENT, L2_02_LABEL, 101);
+  const calls = await say(kvEnv, STUDENT, "📝 التدريب", 102);
+  const exercise = messages(calls).find((m) => String(m.text ?? "").includes("التدريب الأول على الدرس الأول والثاني"));
+  assert.ok(exercise, "the exercise text is sent on demand");
+  assert.ok(!String(exercise.text).includes("docs.google.com/forms"), "the exercise is not the exam link");
+  const exerciseCall = calls.find((c) => c.url.endsWith("/sendMessage") && String(c.payload?.text ?? "").includes("التدريب الأول"));
+  assert.ok(keyboardHas(exerciseCall, "🖼 ملخص الدرس"), "the lesson keyboard is re-attached");
+});
+
+test("summary/exercise buttons on a lesson without them answer plainly", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedL1(kvEnv, STUDENT, { lastLessonId: "m_learn_l1_02" });
+  const summaryCalls = await say(kvEnv, STUDENT, "🖼 ملخص الدرس", 101);
+  assert.ok(messages(summaryCalls).some((m) => String(m.text ?? "").includes("مفيهوش ملخص")), "no summary item → plain reply");
+  assert.equal(photos(summaryCalls).length, 0, "no photo is sent");
+  const exerciseCalls = await say(kvEnv, STUDENT, "📝 التدريب", 102);
+  assert.ok(messages(exerciseCalls).some((m) => String(m.text ?? "").includes("مفيهوش تدريب")), "no exercise item → plain reply");
+});
+
+test("summary button when the photo is not imported answers plainly", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedUser(kvEnv, STUDENT, "Tester", { menuNav: "m_learn_l2", lastLessonId: "m_learn_l2_02" });
+  seedMenu(kvEnv, "m_learn_l2", [{ id: "b-l2-02", label: L2_02_LABEL, kind: "lesson", lessonId: "m_learn_l2_02" }]);
+  seedImportState(kvEnv, { "m_learn_l2_02:video": "vid-l2-02" }); // summary not imported
+  const calls = await say(kvEnv, STUDENT, "🖼 ملخص الدرس", 101);
+  assert.ok(messages(calls).some((m) => String(m.text ?? "").includes("لسه مش جاهز")), "unready summary photo → plain reply");
+  assert.equal(photos(calls).length, 0, "no photo is sent");
+});
+
+test("exercise and exam labels never confuse each other (lesson with both)", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedL2(kvEnv, STUDENT, "m_learn_l2_06", L2_06_LABEL, { "m_learn_l2_06:video": "vid-l2-06", "m_learn_l2_06:summary": "photo-l2-06-summary" });
+  await say(kvEnv, STUDENT, L2_06_LABEL, 101);
+  const exerciseCalls = await say(kvEnv, STUDENT, "📝 التدريب", 102);
+  assert.ok(messages(exerciseCalls).some((m) => String(m.text ?? "").includes("التدريب الثالث على الدرس الخامس والسادس")), "exercise button sends the exercise text");
+  assert.ok(!messages(exerciseCalls).some((m) => String(m.text ?? "").includes(L2_06_EXAM)), "exercise button does NOT send the exam link");
+  const examCalls = await say(kvEnv, STUDENT, "📝 الامتحان الإلكتروني", 103);
+  assert.ok(messages(examCalls).some((m) => String(m.text ?? "").includes(L2_06_EXAM)), "exam button sends the exam link");
+  assert.ok(!messages(examCalls).some((m) => String(m.text ?? "").includes("التدريب الثالث")), "exam button does NOT send the exercise text");
 });

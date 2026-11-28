@@ -831,10 +831,13 @@ async function runMenuCommand(env, chatId, userId, command) {
   await telegram(env, "sendMessage", { chat_id: chatId, text: "⚠️ هذا الأمر غير متوفر حاليًا." });
 }
 // Lesson items on demand (user 2026-11-28): the lesson tap sends only
-// the video; the oral paper and the exam link arrive from their own
-// reply-keyboard buttons, using the exact manifest labels.
+// the video; the oral paper, the exam link, the L2 summary photo and
+// the L2 exercise text arrive from their own reply-keyboard buttons,
+// using the exact manifest labels.
 const LESSON_ORAL_BUTTON = "🗣 الشفوي";
 const LESSON_EXAM_BUTTON = "📝 الامتحان الإلكتروني";
+const LESSON_SUMMARY_BUTTON = "🖼 ملخص الدرس";
+const LESSON_EXERCISE_BUTTON = "📝 التدريب";
 
 // One send step of a lesson plan (video/photo/text/url), with the same
 // failure handling the lesson loop always had: the user gets the generic
@@ -895,6 +898,8 @@ async function lessonKeyboards(env, userId, lesson) {
   const itemButtons = [];
   if (lessonHasOral(lesson)) itemButtons.push({ text: LESSON_ORAL_BUTTON });
   if (lesson.items.some((item) => item?.key === "exam")) itemButtons.push({ text: LESSON_EXAM_BUTTON });
+  if (lesson.items.some((item) => item?.key === "summary")) itemButtons.push({ text: LESSON_SUMMARY_BUTTON });
+  if (lesson.items.some((item) => item?.key === "exercise")) itemButtons.push({ text: LESSON_EXERCISE_BUTTON });
   if (itemButtons.length) navRows.push(itemButtons);
   // Oral attendance (إثبات حضور, 2026-11-28): lessons with a ورقة شفوي
   // get a "🎙 سجّل الشفوي" row under the nav — ADMIN ONLY while the user
@@ -920,10 +925,12 @@ async function lessonKeyboards(env, userId, lesson) {
 }
 
 // One tap on a lesson button sends the lesson's VIDEO only (user
-// 2026-11-28): the oral paper and the exam link are no longer auto-sent
-// — they arrive on demand from the "🗣 الشفوي" / "📝 الامتحان الإلكتروني"
-// buttons under the lesson. If a lesson somehow has no video step, the
-// whole plan is sent instead (its items), rather than nothing.
+// 2026-11-28): the oral paper, the exam link, the summary photo and
+// the exercise text are no longer auto-sent — they arrive on demand
+// from the "🗣 الشفوي" / "📝 الامتحان الإلكتروني" / "🖼 ملخص الدرس" /
+// "📝 التدريب" buttons under the lesson. If a lesson somehow has no
+// video step, the whole plan is sent instead (its items), rather than
+// nothing.
 async function sendLearnLesson(env, chatId, userId, lessonId, reactMessageId = undefined) {
   const lesson = findLearnLesson(lessonId);
   if (!lesson) {
@@ -8207,14 +8214,17 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     // Lesson items on demand (user 2026-11-28): the lesson tap sends
-    // only the video; "🗣 الشفوي" sends the lesson's oral-paper photo
-    // and "📝 الامتحان الإلكتروني" sends its exam link, each with the
-    // lesson keyboard re-attached. Both resolve the lesson from
-    // lastLessonId, like the record button above. Like other lesson
-    // taps they leave cert/get-code/name/translate waits — but NOT the
-    // oral wait, so the admin can view the paper while a recording wait
-    // is open.
-    if (text === LESSON_ORAL_BUTTON || text === LESSON_EXAM_BUTTON) {
+    // only the video; "🗣 الشفوي" sends the lesson's oral-paper photo,
+    // "📝 الامتحان الإلكتروني" sends its exam link, "🖼 ملخص الدرس"
+    // sends its summary photo and "📝 التدريب" sends its exercise
+    // text — each with the lesson keyboard re-attached. All resolve
+    // the lesson from lastLessonId, like the record button above.
+    // Like other lesson taps they leave cert/get-code/name/translate
+    // waits — but NOT the oral wait, so the admin can view the paper
+    // while a recording wait is open. The four labels are matched by
+    // exact full string, so "📝 التدريب" never collides with
+    // "📝 الامتحان الإلكتروني".
+    if (text === LESSON_ORAL_BUTTON || text === LESSON_EXAM_BUTTON || text === LESSON_SUMMARY_BUTTON || text === LESSON_EXERCISE_BUTTON) {
       const itemUser = await getUser(env, userId);
       const lesson = findLearnLesson(itemUser?.lastLessonId);
       if (!lesson) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "افتح درس الأول من القائمة، وبعدين اضغط الزر." }); return; }
@@ -8227,6 +8237,20 @@ async function handleUpdate(update, env, ctx) {
         const entry = state.items[learnItemKey(lesson.id, "oral")];
         if (entry?.status !== "done" || !entry.fileId) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⚠️ ورقة الشفوي لسه مش جاهزة — جرّب لاحقًا.", reply_markup: attachKeyboard }); return; }
         await sendLessonPlanStep(env, message.chat.id, userId, { kind: "photo", fileId: entry.fileId, caption: lesson.title }, attachKeyboard);
+        return;
+      }
+      if (text === LESSON_SUMMARY_BUTTON) {
+        if (!lesson.items.some((item) => item?.key === "summary")) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "الدرس ده مفيهوش ملخص.", reply_markup: attachKeyboard }); return; }
+        const state = await loadImportState(env);
+        const entry = state.items[learnItemKey(lesson.id, "summary")];
+        if (entry?.status !== "done" || !entry.fileId) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⚠️ ملخص الدرس لسه مش جاهز — جرّب لاحقًا.", reply_markup: attachKeyboard }); return; }
+        await sendLessonPlanStep(env, message.chat.id, userId, { kind: "photo", fileId: entry.fileId, caption: lesson.title }, attachKeyboard);
+        return;
+      }
+      if (text === LESSON_EXERCISE_BUTTON) {
+        const exerciseItem = lesson.items.find((item) => item?.key === "exercise");
+        if (!exerciseItem || !String(exerciseItem.text ?? "").trim()) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "الدرس ده مفيهوش تدريب.", reply_markup: attachKeyboard }); return; }
+        await sendLessonPlanStep(env, message.chat.id, userId, { kind: "text", text: String(exerciseItem.text) }, attachKeyboard);
         return;
       }
       const examItem = lesson.items.find((item) => item?.key === "exam");
