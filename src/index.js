@@ -859,37 +859,43 @@ async function handleGetCodeStep(env, chatId, userId, text, user) {
   // Step "phone" (FIRST, since 2026-11-28): the registry is keyed by
   // canonical phone. A hit greets immediately with the stored name+code
   // (the student got their code on another platform); a miss moves on
-  // to the name question, and the canonical phone is kept in the local
-  // record (getcodePhone) for the macro call that follows.
+  // to the name question, and the folded phone is kept in the local
+  // record (getcodePhone) for the macro call that follows. Only a
+  // too-short phone (<4 digits) is re-asked — a phone that does not
+  // canonicalize (e.g. a short test number) still proceeds, the
+  // registry lookup is simply skipped for it (user report, 28 Nov 2026).
   if (user?.getcodeStep === "phone") {
-    const canonical = canonicalGetCodePhone(text);
-    if (!canonical) {
+    const phone = normalizeGetCodePhone(text);
+    if (!getCodePhoneValid(phone)) {
       await telegram(env, "sendMessage", { chat_id: chatId, text: "📱 رقم الموبايل لازم يكون ٤ أرقام على الأقل — اكتبه تاني:" });
       return;
     }
-    const entry = await getCodeRegistryEntry(env, canonical);
-    if (entry && entry.code) {
-      // A registry hit means an ACTIVATED student (entries are written
-      // only at activation, 2026-11-28) — greet immediately and mark
-      // the local record activated too, so the next /getcode greets.
-      await saveUser(env, userId, { ...(user ?? {}), getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined, getcodeScreenshotName: entry.name, getcodeScreenshotCode: entry.code, getcodePhone: normalizeGetCodePhone(text), getcodeActivated: true });
-      await telegram(env, "sendMessage", { chat_id: chatId, text: `مرحباً ${entry.name}، الرقم الكودي الخاص بك هو ${entry.code}` });
-      return;
+    const canonical = canonicalGetCodePhone(phone);
+    if (canonical) {
+      const entry = await getCodeRegistryEntry(env, canonical);
+      if (entry && entry.code) {
+        // A registry hit means an ACTIVATED student (entries are written
+        // only at activation, 2026-11-28) — greet immediately and mark
+        // the local record activated too, so the next /getcode greets.
+        await saveUser(env, userId, { ...(user ?? {}), getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined, getcodeScreenshotName: entry.name, getcodeScreenshotCode: entry.code, getcodePhone: phone, getcodeActivated: true });
+        await telegram(env, "sendMessage", { chat_id: chatId, text: `مرحباً ${entry.name}، الرقم الكودي الخاص بك هو ${entry.code}` });
+        return;
+      }
     }
-    await saveUser(env, userId, { ...(user ?? {}), getcodeStep: "name", getcodePhone: normalizeGetCodePhone(text) });
+    await saveUser(env, userId, { ...(user ?? {}), getcodeStep: "name", getcodePhone: phone });
     await telegram(env, "sendMessage", { chat_id: chatId, text: "✏️ اكتب اسمك الثلاثي:" });
     return;
   }
-  // Step "name": the phone is already known (canonical, from the phone
-  // step). If it is missing — e.g. a stale record — go back to the
-  // phone question instead of guessing.
+  // Step "name": the phone is already known (from the phone step).
+  // If it is missing or too short — e.g. a stale record — go back to
+  // the phone question instead of guessing. A phone that does not
+  // canonicalize still proceeds: the macro takes it as typed.
   const name = String(text ?? "").trim();
   if (!name) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: "✏️ اكتب اسمك الثلاثي:" });
     return;
   }
-  const canonical = canonicalGetCodePhone(user?.getcodePhone ?? "");
-  if (!canonical) {
+  if (!getCodePhoneValid(user?.getcodePhone ?? "")) {
     await saveUser(env, userId, { ...(user ?? {}), getcodeStep: "phone", getcodeName: undefined });
     await telegram(env, "sendMessage", { chat_id: chatId, text: "📱 اكتب رقم موبايلك:" });
     return;

@@ -346,6 +346,21 @@ test("getcode: a too-short phone is rejected and the bot asks again", async () =
   assert.match(text, /wa\.me\/201207829388\?text=/, "the text message carries the ready WhatsApp link");
 });
 
+test("getcode: a short but valid phone (8 digits) proceeds to the name step — only a <4-digit phone is re-asked", async () => {
+  macroMode = "json";
+  macroBodies = [];
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedLevelMenus(kvEnv);
+  await openLevelAndTapGetCode(kvEnv, USER);
+  const nameAsk = await sayMsg(kvEnv, USER, "12078293");
+  assert.ok(anyMessage(nameAsk, /اكتب اسمك الثلاثي/), "an 8-digit phone is accepted, not re-asked");
+  assert.ok(!anyMessage(nameAsk, /٤ أرقام على الأقل/), "no rejection for a phone with 8 digits");
+  const done = await sayMsg(kvEnv, USER, "أحمد محمد علي");
+  assert.ok(done.some((c) => c.method === "sendPhoto"), "the flow completes with the photo reply");
+  const codeCall = macroBodies.map((b) => { try { return JSON.parse(b); } catch { return null; } }).find((b) => b?.name === "أحمد محمد علي");
+  assert.equal(codeCall?.phone, "12078293", "the macro receives the short phone as typed");
+});
+
 test("getcode: when the macro answers with its error page, the bot falls back to the instructions text", async () => {
   macroMode = "html";
   const kvEnv = { ...env, USERS: fakeKv() };
