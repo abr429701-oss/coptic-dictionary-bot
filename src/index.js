@@ -430,7 +430,7 @@ async function sendRootMenus(env, chatId, userId = chatId) {
   // text must search the dictionary again instead of being read as a code,
   // a name or a phone number.
   const rootUser = await getUser(env, userId);
-  if (rootUser?.certAwaiting || rootUser?.getcodeStep || rootUser?.copticNameAwaiting || rootUser?.translateAwaiting || rootUser?.oralAwaiting) await saveUser(env, userId, { ...rootUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined, oralAwaiting: undefined });
+  if (rootUser?.certAwaiting || rootUser?.getcodeStep || rootUser?.getcodeScreenshotAwaiting || rootUser?.copticNameAwaiting || rootUser?.translateAwaiting || rootUser?.oralAwaiting) await saveUser(env, userId, { ...rootUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined, oralAwaiting: undefined });
   const stored = await loadMenus(env);
   const roots = rootMenus(stored);
   if (!roots.length) {
@@ -448,7 +448,7 @@ async function sendRootMenus(env, chatId, userId = chatId) {
 // searches the dictionary instead of being read as a code or a menu tap.
 async function beginSearchMode(env, chatId, userId) {
   const searchUser = await getUser(env, userId);
-  if (searchUser?.certAwaiting || searchUser?.getcodeStep || searchUser?.copticNameAwaiting || searchUser?.translateAwaiting || searchUser?.oralAwaiting) await saveUser(env, userId, { ...searchUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined, oralAwaiting: undefined });
+  if (searchUser?.certAwaiting || searchUser?.getcodeStep || searchUser?.getcodeScreenshotAwaiting || searchUser?.copticNameAwaiting || searchUser?.translateAwaiting || searchUser?.oralAwaiting) await saveUser(env, userId, { ...searchUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined, oralAwaiting: undefined });
   await setMenuNav(env, userId, null);
   await telegram(env, "sendMessage", { chat_id: chatId, text: "🔍 اكتب الكلمة للبحث في القاموس.", reply_markup: { remove_keyboard: true } });
 }
@@ -774,7 +774,15 @@ async function handleCertCode(env, chatId, code, level) {
 // verifies the student completed the step).
 async function beginGetCodeFlow(env, chatId, userId) {
   const user = await getUser(env, userId);
-  await saveUser(env, userId, { ...(user ?? {}), certAwaiting: undefined, getcodeStep: "name", getcodeName: undefined });
+  // Returning user (2026-11-28): they already have a code stored — show
+  // it directly, never re-ask for name/phone. The stored name+code
+  // persist after the screenshot wait clears (only the wait flag is
+  // ever cleared, never the record).
+  if (user?.getcodeScreenshotName && user?.getcodeScreenshotCode) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `مرحباً، ${user.getcodeScreenshotName}، الرقم الكودي الخاص بك هو ${user.getcodeScreenshotCode}` });
+    return;
+  }
+  await saveUser(env, userId, { ...(user ?? {}), certAwaiting: undefined, getcodeStep: "name", getcodeName: undefined, getcodeScreenshotAwaiting: undefined });
   await telegram(env, "sendMessage", { chat_id: chatId, text: "✏️ اكتب اسمك الثلاثي:" });
 }
 async function handleGetCodeStep(env, chatId, userId, text, user) {
@@ -796,7 +804,7 @@ async function handleGetCodeStep(env, chatId, userId, text, user) {
     return;
   }
   const name = String(user?.getcodeName ?? "").trim();
-  await saveUser(env, userId, { ...(user ?? {}), getcodeStep: undefined, getcodeName: undefined });
+  await saveUser(env, userId, { ...(user ?? {}), getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined });
   // The code feature lives in apps-script/Code.gs (generateAndStoreCode);
   // the bot calls the bot's own Apps Script web app URL (driveConfig —
   // the /setdrive URL or the APPS_SCRIPT_URL secret). Without a linked
@@ -804,7 +812,35 @@ async function handleGetCodeStep(env, chatId, userId, text, user) {
   const drive = await driveConfig(env);
   const result = await getCodeFromMacro(name, phone, drive?.url);
   if (result.code) {
-    await telegram(env, "sendMessage", { chat_id: chatId, text: buildGetCodeReply(name, result.code), disable_web_page_preview: true });
+    // Remember the session: the name+code persist (returning users get
+    // their code back without re-asking), and the one-shot screenshot
+    // wait opens — it ends when the photo arrives, or on /cancel,
+    // /menu, /start or another menu tap (same clearing as the other
+    // waits; only the wait flag clears, never the record).
+    await saveUser(env, userId, { ...(user ?? {}), getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: true, getcodeScreenshotName: name, getcodeScreenshotCode: result.code });
+    const reply = buildGetCodeReply(name, result.code);
+    // One photo message: the example screenshot carries the whole reply
+    // as its caption (the "الصورة المرفقة" the text refers to is the
+    // photo itself). Telegram captions cap at 1024 chars — a very long
+    // name falls back to text + bare photo so the student never loses
+    // the code or the link; a failed photo send falls back the same way.
+    let photoOk = false;
+    if (reply.length <= 1024) {
+      try {
+        const res = await telegram(env, "sendPhoto", { chat_id: chatId, photo: GET_CODE_EXAMPLE_PHOTO_URL, caption: reply });
+        photoOk = !!res?.ok;
+      } catch {
+        photoOk = false;
+      }
+    }
+    if (!photoOk) {
+      await telegram(env, "sendMessage", { chat_id: chatId, text: reply, disable_web_page_preview: true });
+      try {
+        await telegram(env, "sendPhoto", { chat_id: chatId, photo: GET_CODE_EXAMPLE_PHOTO_URL });
+      } catch {
+        /* the code reply above already went out */
+      }
+    }
     return;
   }
   // Apps Script did not return a usable code (no URL linked, or the
@@ -1662,7 +1698,7 @@ import { formatTranslation, setReverseTarget } from "./translate.js";
 import { deepLink, shareTextForRecord, shareButtonText, sharePlainTextForRecord, shareLanguage, translationInLanguage, pickQuizV2Question, dailyQuizType, suggestSimilar, helpText, retentionText, opsText, recordById, levenshtein } from "./new-features.js";
 import { lookupCertificate, parseCertCsv } from "./certificates.js";
 import { extractCodePattern } from "./exam-pattern.js";
-import { getCodeFromMacro, buildGetCodeReply, buildGetCodeWhatsAppUrl, normalizeGetCodePhone, getCodePhoneValid, GET_CODE_SHEET_ID } from "./getcode.js";
+import { getCodeFromMacro, buildGetCodeReply, buildGetCodeWhatsAppUrl, normalizeGetCodePhone, getCodePhoneValid, GET_CODE_SHEET_ID, GET_CODE_EXAMPLE_PHOTO_URL } from "./getcode.js";
 import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VIDEO_MENU_ID, cleanMenuTitle, cleanMenuText, cleanButtonLabel, cleanUrl, cleanCommand, normalizeMenus, findMenu, findButton, rootMenus, descendantMenuIds, menuOpenText, menuAdminListText, menuAdminDetailText, parseMenuTarget, parseButtonTarget, addMenu, deleteMenu, addButton, deleteButton, moveButton, updateButton, ensureVideoMenu } from "./menu-builder.js";
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 import { getHiddenUi, setHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
@@ -1721,7 +1757,7 @@ async function followMenuHit(env, chatId, userId, hit, reactMessageId = undefine
   // flow (the button's own action runs right after, so a cert/get-code
   // button re-sets its own flag itself).
   const hitUser = await getUser(env, userId);
-  if (hitUser?.certAwaiting || hitUser?.getcodeStep || hitUser?.copticNameAwaiting || hitUser?.translateAwaiting || hitUser?.oralAwaiting) await saveUser(env, userId, { ...hitUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined, oralAwaiting: undefined });
+  if (hitUser?.certAwaiting || hitUser?.getcodeStep || hitUser?.getcodeScreenshotAwaiting || hitUser?.copticNameAwaiting || hitUser?.translateAwaiting || hitUser?.oralAwaiting) await saveUser(env, userId, { ...hitUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined, oralAwaiting: undefined });
   if (hit.kind === "admin") {
     await studio.handleCommand(env, chatId, userId);
     return true;
@@ -8182,7 +8218,7 @@ async function handleUpdate(update, env, ctx) {
     // cert/get-code flow, like tapping any other menu button.
     if (text === "⏮ السابق" || text === "التالي ⏭") {
       const navUser = await getUser(env, userId);
-      if (navUser?.certAwaiting || navUser?.getcodeStep || navUser?.copticNameAwaiting || navUser?.translateAwaiting || navUser?.oralAwaiting) await saveUser(env, userId, { ...navUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined, oralAwaiting: undefined });
+      if (navUser?.certAwaiting || navUser?.getcodeStep || navUser?.getcodeScreenshotAwaiting || navUser?.copticNameAwaiting || navUser?.translateAwaiting || navUser?.oralAwaiting) await saveUser(env, userId, { ...navUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined, oralAwaiting: undefined });
       const level = LEARN_LEVELS.find((l) => l.lessons.some((x) => x.id === navUser?.lastLessonId));
       const idx = level ? level.lessons.findIndex((x) => x.id === navUser?.lastLessonId) : -1;
       const sibling = idx >= 0 ? level.lessons[idx + (text === "التالي ⏭" ? 1 : -1)] : null;
@@ -8201,7 +8237,7 @@ async function handleUpdate(update, env, ctx) {
       const lesson = findOralLesson(oralUser?.lastLessonId);
       if (!lesson) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: ORAL_NO_LESSON_TEXT }); return; }
       if (!lessonHasOral(lesson)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: ORAL_LESSON_HAS_NO_ORAL_TEXT }); return; }
-      if (oralUser?.certAwaiting || oralUser?.getcodeStep || oralUser?.copticNameAwaiting || oralUser?.translateAwaiting) await saveUser(env, userId, { ...oralUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined });
+      if (oralUser?.certAwaiting || oralUser?.getcodeStep || oralUser?.getcodeScreenshotAwaiting || oralUser?.copticNameAwaiting || oralUser?.translateAwaiting) await saveUser(env, userId, { ...oralUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined });
       const existing = await getOralAttendance((payload) => storeCall(env, payload), userId);
       if (existing?.lessons?.[lesson.id]) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: ORAL_ALREADY_TEXT }); return; }
       const u = await getUser(env, userId);
@@ -8228,7 +8264,7 @@ async function handleUpdate(update, env, ctx) {
       const itemUser = await getUser(env, userId);
       const lesson = findLearnLesson(itemUser?.lastLessonId);
       if (!lesson) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "افتح درس الأول من القائمة، وبعدين اضغط الزر." }); return; }
-      if (itemUser?.certAwaiting || itemUser?.getcodeStep || itemUser?.copticNameAwaiting || itemUser?.translateAwaiting) await saveUser(env, userId, { ...itemUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined });
+      if (itemUser?.certAwaiting || itemUser?.getcodeStep || itemUser?.getcodeScreenshotAwaiting || itemUser?.copticNameAwaiting || itemUser?.translateAwaiting) await saveUser(env, userId, { ...itemUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined });
       const keyboards = await lessonKeyboards(env, userId, lesson);
       const attachKeyboard = keyboards.lessonListKeyboard ?? keyboards.smallNavKeyboard;
       if (text === LESSON_ORAL_BUTTON) {
@@ -9040,7 +9076,7 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
     const user = known ?? await getUser(env, userId);
-    if (user?.certAwaiting || user?.getcodeStep || user?.copticNameAwaiting || user?.translateAwaiting || user?.oralAwaiting) await saveUser(env, userId, { ...user, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined, oralAwaiting: undefined });
+    if (user?.certAwaiting || user?.getcodeStep || user?.getcodeScreenshotAwaiting || user?.copticNameAwaiting || user?.translateAwaiting || user?.oralAwaiting) await saveUser(env, userId, { ...user, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined, oralAwaiting: undefined });
     // Referral link tracking: /start <campaign> remembers the source for new users.
     const startParam = text.startsWith("/start ") ? text.slice(7).trim() : "";
     // v2: deep link /start word_<id> opens that word directly (shared from a result).
@@ -9123,7 +9159,8 @@ async function handleUpdate(update, env, ctx) {
     const user = known ?? await getUser(env, userId);
     if (user?.awaitingContact) { await saveUser(env, userId, { ...user, awaitingContact: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء رسالة التواصل مع الإدارة." }); return; }
     if (user?.certAwaiting) { await saveUser(env, userId, { ...user, certAwaiting: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء إدخال الرقم الكودي." }); return; }
-    if (user?.getcodeStep) { await saveUser(env, userId, { ...user, getcodeStep: undefined, getcodeName: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء الحصول على الرقم الكودي." }); return; }
+    if (user?.getcodeStep) { await saveUser(env, userId, { ...user, getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء الحصول على الرقم الكودي." }); return; }
+    if (user?.getcodeScreenshotAwaiting) { await saveUser(env, userId, { ...user, getcodeScreenshotAwaiting: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء الحصول على الرقم الكودي." }); return; }
     if (user?.copticNameAwaiting) { await saveUser(env, userId, { ...user, copticNameAwaiting: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء كتابة الاسم بالقبطية." }); return; }
     if (user?.translateAwaiting) { await saveUser(env, userId, { ...user, translateAwaiting: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "✅ تم إلغاء الترجمة." }); return; }
     if (user?.oralAwaiting) { await saveUser(env, userId, { ...user, oralAwaiting: undefined }); await telegram(env, "sendMessage", { chat_id: message.chat.id, text: ORAL_CANCEL_TEXT }); return; }
@@ -9239,6 +9276,21 @@ async function handleUpdate(update, env, ctx) {
     top.forEach(([id, e], i) => { lines.push(`${i + 1}. ${escapeHtml(String(e?.name ?? id).slice(0, 30))} — ${Number(e?.points ?? 0).toLocaleString("en-US")} نقطة${e?.streak > 1 ? ` (سلسلة ${e.streak} أيام)` : ""}`); });
     await telegram(env, "sendMessage", { chat_id: message.chat.id, text: lines.join("\n").slice(0, 2000), parse_mode: "HTML" });
     return;
+  }
+  // Get-code screenshot (2026-11-28): after the code reply, the student
+  // sends the WhatsApp screenshot back — confirm the activation with
+  // their name + code from the just-completed session. One shot: only
+  // the wait flag clears on receipt (the stored name+code persist for
+  // returning users), so a later unrelated photo does not repeat it. A
+  // photo without a completed get-code session falls through to the
+  // normal handling below.
+  if (message.photo) {
+    const shotUser = await getUser(env, userId);
+    if (shotUser?.getcodeScreenshotAwaiting && shotUser?.getcodeScreenshotName && shotUser?.getcodeScreenshotCode) {
+      await saveUser(env, userId, { ...shotUser, getcodeScreenshotAwaiting: undefined });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `تم تفعيل اشتراكك عزيزنا، ${shotUser.getcodeScreenshotName} والرقم الكودي الخاص بك هو: ${shotUser.getcodeScreenshotCode}` });
+      return;
+    }
   }
   // Oral attendance: a voice message while the user is waiting to record
   // the شفوي IS the attendance recording — validate it by metadata and

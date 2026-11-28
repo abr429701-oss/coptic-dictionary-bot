@@ -17,6 +17,10 @@
 // (the standalone project's doPost returned a plain object, which a web
 // app cannot return — verified live 2026-11-09, and nothing was stored).
 export const GET_CODE_WHATSAPP_NUMBER = "201207829388";
+// The example screenshot the success reply refers to ("الصورة المرفقة"):
+// a WhatsApp chat with the admin showing the code message, so the student
+// sees exactly what screenshot to send back. Hosted on R2 (public).
+export const GET_CODE_EXAMPLE_PHOTO_URL = "https://pub-e39b5be260724e0ea1bbf6a7db089987.r2.dev/getcode-example.jpg";
 // Where Code.gs stores the codes (documentation — the Worker never
 // writes here; generateAndStoreCode in apps-script/Code.gs does).
 export const GET_CODE_SHEET_ID = "1Cts5whXGJTaXTvjlbR7Mt31rQE5hPzkQavslHhYTxgI";
@@ -43,11 +47,15 @@ export function buildGetCodeWhatsAppUrl(code, name) {
   return `https://wa.me/${GET_CODE_WHATSAPP_NUMBER}?text=${encodeURIComponent(text)}`;
 }
 
-// The reply, mirroring the form's success screen: name, code, and the
-// note to save the number and message the admin on WhatsApp to activate
-// the subscription.
+// The reply, mirroring the form's success screen: name, code, then the
+// activation steps — save the admin number, open the WhatsApp chat from
+// the link, screenshot it, and send the screenshot back here in the chat
+// to complete the activation. It is sent as the caption of the example
+// screenshot photo (GET_CODE_EXAMPLE_PHOTO_URL) — one photo message,
+// not text + photo. Telegram captions cap at 1024 chars; the caller
+// falls back to text + bare photo when the caption would be too long.
 export function buildGetCodeReply(name, code) {
-  return `الاسم: ${name}\nالرقم الكودي الخاص بك هو: ${code}\n\nسجّل الرقم ${GET_CODE_WHATSAPP_NUMBER} في جهات اتصالك، وبعدين ابعت رسالة على الواتساب بالرابط ده عشان تفعّل اشتراكك:\n${buildGetCodeWhatsAppUrl(code, name)}`;
+  return `الاسم: ${name}\nالرقم الكودي الخاص بك هو: ${code}\n\nلتفعيل اشتراكك، سجّل هذا الرقم +${GET_CODE_WHATSAPP_NUMBER} في جهات اتصالك أولاً، ثم اضغط على رابط الواتساب التالي:\n${buildGetCodeWhatsAppUrl(code, name)}\nلفتح المحادثة مع الرقم على الواتساب، ثم التقط Screenshot للشاشة على سبيل المثال مثل الشكل الموضح في الصورة المرفقة، ثم أرسلها هنا في الشات لإتمام التفعيل.`;
 }
 
 // POST {name, phone} to the bot's Apps Script web app (apps-script/Code.gs).

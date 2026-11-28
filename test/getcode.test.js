@@ -9,6 +9,7 @@ import { LEARN_LEVELS } from "../src/learn-manifest.js";
 import { buildLearnMenus, emptyImportState, learnUploadItems, LEARN_GET_CODE_TEXT } from "../src/learn-import.js";
 import {
   GET_CODE_WHATSAPP_NUMBER,
+  GET_CODE_EXAMPLE_PHOTO_URL,
   normalizeGetCodePhone,
   getCodePhoneValid,
   buildGetCodeWhatsAppUrl,
@@ -164,8 +165,18 @@ test("getcode: the reply mirrors the form's success screen", () => {
   const reply = buildGetCodeReply("أحمد محمد علي", "13580245");
   assert.match(reply, /الاسم: أحمد محمد علي/);
   assert.match(reply, /الرقم الكودي الخاص بك هو: 13580245/);
-  assert.match(reply, /201207829388/);
+  assert.match(reply, /سجّل هذا الرقم \+201207829388 في جهات اتصالك أولاً/);
+  assert.match(reply, /لفتح المحادثة مع الرقم على الواتساب/);
+  assert.match(reply, /Screenshot/);
+  assert.match(reply, /الصورة المرفقة/);
+  assert.match(reply, /أرسلها هنا في الشات لإتمام التفعيل/);
   assert.match(reply, /wa\.me\/201207829388\?text=/);
+  assert.ok(reply.includes(buildGetCodeWhatsAppUrl("13580245", "أحمد محمد علي")), "the full wa.me link is in the reply");
+  assert.ok(!reply.includes("is.gd"), "never a shortened link");
+  // Telegram photo captions cap at 1024 chars — the reply is sent as a
+  // caption, so it must fit with a realistic name.
+  assert.ok(reply.length <= 1024, "a normal name fits the caption cap");
+  assert.ok(buildGetCodeReply("أحمد محمد علي عبد الرحمن حسن إبراهيم", "13580245").length <= 1024, "even a long realistic name fits the caption cap");
 });
 
 test("getcode: the fallback instructions text is the exact dictated registration text", () => {
@@ -227,9 +238,19 @@ test("getcode: tapping the L1 button asks for the name, then the phone, then sho
   assert.ok(anyMessage(phoneAsk, /اكتب رقم موبايلك/), "the name must lead to the phone prompt");
   assert.ok(!anyMessage(phoneAsk, /الرقم الكودي الخاص بك/), "no code yet");
   const done = await sayMsg(kvEnv, USER, "01012345678");
-  assert.ok(anyMessage(done, /الرقم الكودي الخاص بك هو: 13580245/), "the code is 1234567 + the last 8 digits, as the file computes it");
-  assert.ok(anyMessage(done, /wa\.me\/201207829388\?text=/), "the reply carries the ready WhatsApp link");
-  assert.ok(anyMessage(done, /سجّل الرقم 201207829388/), "the reply tells the student to save the number");
+  // One photo message only: the reply is the photo caption, no separate text.
+  assert.equal(done.filter((c) => c.method === "sendMessage").length, 0, "no separate text message — the reply is the photo caption");
+  const photos = done.filter((c) => c.method === "sendPhoto");
+  assert.equal(photos.length, 1, "exactly one photo message is sent");
+  assert.equal(photos[0].payload.photo, GET_CODE_EXAMPLE_PHOTO_URL, "the photo is the R2 example screenshot");
+  const caption = String(photos[0].payload.caption ?? "");
+  assert.match(caption, /الاسم: أحمد محمد علي/);
+  assert.match(caption, /الرقم الكودي الخاص بك هو: 13580245/, "the code is 1234567 + the last 8 digits, as the file computes it");
+  assert.match(caption, /wa\.me\/201207829388\?text=/, "the caption carries the ready WhatsApp link");
+  assert.ok(caption.includes(buildGetCodeWhatsAppUrl("13580245", "أحمد محمد علي")), "the full wa.me link is in the caption");
+  assert.match(caption, /سجّل هذا الرقم \+201207829388/, "the caption tells the student to save the number");
+  assert.match(caption, /الصورة المرفقة/, "the caption points at the photo itself");
+  assert.ok(caption.length <= 1024, "the caption fits Telegram's 1024-char cap");
   // The session is over: a later text is not read as a phone number.
   const after = await sayMsg(kvEnv, USER, "01012345678");
   assert.ok(!anyMessage(after, /الرقم الكودي الخاص بك هو:/), "a later phone must not fetch another code");
@@ -246,7 +267,8 @@ test("getcode: a too-short phone is rejected and the bot asks again", async () =
   assert.ok(!anyMessage(retry, /الرقم الكودي الخاص بك هو:/));
   // The session is still open: a valid phone now completes it.
   const done = await sayMsg(kvEnv, USER, "01012345678");
-  assert.ok(anyMessage(done, /الرقم الكودي الخاص بك هو: 13580245/));
+  const caption = String(done.find((c) => c.method === "sendPhoto")?.payload?.caption ?? "");
+  assert.match(caption, /الرقم الكودي الخاص بك هو: 13580245/, "the photo caption carries the code");
 });
 
 test("getcode: when the macro answers with its error page, the bot falls back to the instructions text", async () => {
@@ -301,4 +323,130 @@ test("getcode: /getcode works when typed directly", async () => {
   seedLevelMenus(kvEnv);
   const ask = await sayMsg(kvEnv, USER, "/getcode");
   assert.ok(anyMessage(ask, /اكتب اسمك الثلاثي/));
+});
+
+// ---------------------------------------------------------------------------
+// Screenshot step (2026-11-28): after the code reply the student sends the
+// WhatsApp screenshot back; the bot echoes their name + code (one shot).
+// ---------------------------------------------------------------------------
+
+async function sendPhotoMsg(kvEnv, userId) {
+  const calls = [];
+  makeGetCodeFetchStub(calls);
+  await worker.fetch(updateRequest({ message: { photo: [{ file_id: "P1", file_unique_id: "U1", width: 800, height: 600 }], chat: { id: userId, type: "private" }, from: { id: userId } } }), kvEnv);
+  return calls;
+}
+
+async function completeGetCode(kvEnv, userId) {
+  macroMode = "json";
+  seedLevelMenus(kvEnv);
+  await openLevelAndTapGetCode(kvEnv, userId);
+  await sayMsg(kvEnv, userId, "أحمد محمد علي");
+  return sayMsg(kvEnv, userId, "01012345678");
+}
+
+test("getcode: completing the phone step stores the name+code and opens the screenshot wait", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await completeGetCode(kvEnv, USER);
+  const stored = kvEnv.USERS.store.get(`user:${USER}`);
+  assert.equal(stored.getcodeScreenshotAwaiting, true);
+  assert.equal(stored.getcodeScreenshotName, "أحمد محمد علي");
+  assert.equal(stored.getcodeScreenshotCode, "13580245");
+});
+
+test("getcode: sending the screenshot photo confirms activation with the stored name and code, then clears only the wait", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await completeGetCode(kvEnv, USER);
+  const calls = await sendPhotoMsg(kvEnv, USER);
+  assert.ok(anyMessage(calls, /تم تفعيل اشتراكك عزيزنا، أحمد محمد علي والرقم الكودي الخاص بك هو: 13580245/), "the photo reply confirms activation with the stored name and code");
+  const stored = kvEnv.USERS.store.get(`user:${USER}`);
+  assert.equal(stored.getcodeScreenshotAwaiting, undefined, "the wait clears on receipt");
+  assert.equal(stored.getcodeScreenshotName, "أحمد محمد علي", "the record persists for returning users");
+  assert.equal(stored.getcodeScreenshotCode, "13580245", "the record persists for returning users");
+});
+
+test("getcode: a second screenshot photo does not repeat the activation", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await completeGetCode(kvEnv, USER);
+  await sendPhotoMsg(kvEnv, USER);
+  const second = await sendPhotoMsg(kvEnv, USER);
+  assert.ok(!anyMessage(second, /تم تفعيل اشتراكك عزيزنا/), "the one-shot wait must not repeat");
+});
+
+test("getcode: a photo with no completed get-code session gets no activation reply", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedLevelMenus(kvEnv);
+  const calls = await sendPhotoMsg(kvEnv, USER);
+  assert.ok(!anyMessage(calls, /تم تفعيل اشتراكك عزيزنا/), "no session, no activation reply");
+});
+
+test("getcode: /cancel drops the screenshot wait but keeps the stored code", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await completeGetCode(kvEnv, USER);
+  const cancel = await sayMsg(kvEnv, USER, "/cancel");
+  assert.ok(anyMessage(cancel, /تم إلغاء الحصول على الرقم الكودي/));
+  const stored = kvEnv.USERS.store.get(`user:${USER}`);
+  assert.equal(stored.getcodeScreenshotAwaiting, undefined);
+  assert.equal(stored.getcodeScreenshotCode, "13580245", "cancelling the wait keeps the stored code");
+  const calls = await sendPhotoMsg(kvEnv, USER);
+  assert.ok(!anyMessage(calls, /تم تفعيل اشتراكك عزيزنا/), "a cancelled wait must not confirm on a later photo");
+});
+
+// ---------------------------------------------------------------------------
+// Returning user (2026-11-28): a user who already has a code gets it back
+// directly, with no name/phone questions.
+// ---------------------------------------------------------------------------
+
+test("getcode: a first-time user still gets the name question", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedLevelMenus(kvEnv);
+  const ask = await openLevelAndTapGetCode(kvEnv, USER);
+  assert.ok(anyMessage(ask, /اكتب اسمك الثلاثي/), "a first-time user starts with the name question");
+  assert.ok(!anyMessage(ask, /مرحباً،/), "no greeting without a stored code");
+});
+
+test("getcode: a returning user tapping the button gets their stored code, no name question", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await completeGetCode(kvEnv, USER);
+  const again = await openLevelAndTapGetCode(kvEnv, USER);
+  assert.ok(anyMessage(again, /مرحباً، أحمد محمد علي، الرقم الكودي الخاص بك هو 13580245/), "the stored code comes back directly");
+  assert.ok(!anyMessage(again, /اكتب اسمك الثلاثي/), "no name question for a returning user");
+});
+
+test("getcode: a returning user typing /getcode gets their stored code directly", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await completeGetCode(kvEnv, USER);
+  const again = await sayMsg(kvEnv, USER, "/getcode");
+  assert.ok(anyMessage(again, /مرحباً، أحمد محمد علي، الرقم الكودي الخاص بك هو 13580245/));
+  assert.ok(!anyMessage(again, /اكتب اسمك الثلاثي/));
+});
+
+test("getcode: the stored record survives the screenshot reply, so /getcode still greets afterwards", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await completeGetCode(kvEnv, USER);
+  await sendPhotoMsg(kvEnv, USER);
+  const stored = kvEnv.USERS.store.get(`user:${USER}`);
+  assert.equal(stored.getcodeScreenshotAwaiting, undefined);
+  assert.equal(stored.getcodeScreenshotName, "أحمد محمد علي");
+  assert.equal(stored.getcodeScreenshotCode, "13580245");
+  const again = await sayMsg(kvEnv, USER, "/getcode");
+  assert.ok(anyMessage(again, /مرحباً، أحمد محمد علي، الرقم الكودي الخاص بك هو 13580245/));
+});
+
+test("getcode: a very long name falls back to text + bare photo (caption cap)", async () => {
+  const longName = "أ".repeat(120);
+  assert.ok(buildGetCodeReply(longName, "13580245").length > 1024, "the caption would exceed the cap");
+  const kvEnv = { ...env, USERS: fakeKv() };
+  macroMode = "json";
+  seedLevelMenus(kvEnv);
+  await openLevelAndTapGetCode(kvEnv, USER);
+  await sayMsg(kvEnv, USER, longName);
+  const done = await sayMsg(kvEnv, USER, "01012345678");
+  assert.ok(anyMessage(done, /الرقم الكودي الخاص بك هو: 13580245/), "the text fallback still carries the code");
+  assert.ok(anyMessage(done, /wa\.me\/201207829388\?text=/), "the text fallback still carries the link");
+  const photos = done.filter((c) => c.method === "sendPhoto");
+  assert.equal(photos.length, 1, "the photo still goes out");
+  assert.equal(photos[0].payload.photo, GET_CODE_EXAMPLE_PHOTO_URL);
+  assert.equal(photos[0].payload.caption, undefined, "the fallback photo has no caption");
+  assert.ok(done.findIndex((c) => c.method === "sendMessage") < done.findIndex((c) => c.method === "sendPhoto"), "the text goes out before the photo");
 });
