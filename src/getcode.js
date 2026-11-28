@@ -50,7 +50,8 @@ export function getCodePhoneValid(phone) {
 // digits first, strips everything else, then: 12 digits starting with
 // "20" → as-is; 11 digits starting with "0" → "2" + digits; 10 digits
 // starting with "1" → "20" + digits. Anything else (too short,
-// foreign, garbage) → null: the caller re-asks for the phone.
+// foreign, garbage) → null: the phone has no canonical form, but it
+// may still sync under its folded digits (resolveGetCodeRegistryKey).
 export function canonicalGetCodePhone(phone) {
   const digits = normalizeOcrDigits(phone);
   if (digits.length === 12 && digits.startsWith("20")) return digits;
@@ -59,17 +60,30 @@ export function canonicalGetCodePhone(phone) {
   return null;
 }
 
+// Registry key (28 Nov 2026, user order — ANY number syncs, not just
+// Egyptian ones): the canonical 12-digit "20..." form when the phone
+// has one, otherwise the folded digits as typed. Egyptian dedup is
+// kept (01207829388, +201207829388, 1207829388 all → 201207829388);
+// any other number (e.g. 6565666666) syncs under its folded digits.
+// A canonical key is always 12-digit "20...", a folded fallback key
+// never is, so the two kinds cannot collide. Only an empty folded
+// form means "no key".
+export function resolveGetCodeRegistryKey(phone) {
+  return canonicalGetCodePhone(phone) ?? normalizeGetCodePhone(phone);
+}
+
 // Shared get-code registry (2026-11-28, cross-platform sync): one
 // phone-keyed record — {name, code, updatedAt} — in the Telegram
 // Worker's UserStore DO, so a student who got their code on Telegram
 // is recognized instantly on WhatsApp/Messenger (and vice versa)
 // without re-entering name/phone. The registry key is
-// `getcode:registry:<canonicalPhone>`. The endpoints in src/index.js
+// `getcode:registry:<resolvedKey>` (canonical when the phone has one,
+// folded digits otherwise). The endpoints in src/index.js
 // serve it to the other bots behind a bearer secret; Telegram itself
 // reads/writes the DO in-process.
 export const GETCODE_REGISTRY_KEY_PREFIX = "getcode:registry:";
-export function getCodeRegistryKey(canonicalPhone) {
-  return `${GETCODE_REGISTRY_KEY_PREFIX}${canonicalPhone}`;
+export function getCodeRegistryKey(registryKey) {
+  return `${GETCODE_REGISTRY_KEY_PREFIX}${registryKey}`;
 }
 
 // A ready WhatsApp chat with the admin, pre-filled with the student's

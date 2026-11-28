@@ -16,6 +16,7 @@ import {
   normalizeGetCodePhone,
   getCodePhoneValid,
   canonicalGetCodePhone,
+  resolveGetCodeRegistryKey,
   getCodeRegistryKey,
   buildGetCodeWhatsAppUrl,
   buildGetCodeReply,
@@ -829,8 +830,21 @@ test("getcode registry: canonicalGetCodePhone folds to the 12-digit 20... form",
   assert.equal(canonicalGetCodePhone("442071234567"), null, "a foreign number has no canonical form");
 });
 
-test("getcode registry: the key is getcode:registry:<canonicalPhone>", () => {
+test("getcode registry: the key is getcode:registry:<resolvedKey>", () => {
   assert.equal(getCodeRegistryKey("201207829388"), "getcode:registry:201207829388");
+  assert.equal(getCodeRegistryKey("6565666666"), "getcode:registry:6565666666");
+});
+
+test("getcode registry: resolveGetCodeRegistryKey is canonical when the phone has one, folded digits otherwise", () => {
+  assert.equal(resolveGetCodeRegistryKey("01207829388"), "201207829388", "Egyptian 11-digit → canonical");
+  assert.equal(resolveGetCodeRegistryKey("+201207829388"), "201207829388", "Egyptian 12-digit → canonical");
+  assert.equal(resolveGetCodeRegistryKey("1207829388"), "201207829388", "Egyptian 10-digit → canonical");
+  assert.equal(resolveGetCodeRegistryKey("٠١٢٠٧٨٢٩٣٨٨"), "201207829388", "Arabic-Indic folds, then canonicalizes");
+  assert.equal(resolveGetCodeRegistryKey("6565666666"), "6565666666", "a non-Egyptian number syncs under its folded digits");
+  assert.equal(resolveGetCodeRegistryKey("12078293"), "12078293", "a short phone syncs under its folded digits");
+  assert.equal(resolveGetCodeRegistryKey("442071234567"), "442071234567", "a foreign number syncs under its folded digits");
+  assert.equal(resolveGetCodeRegistryKey(""), "", "an empty phone has no key");
+  assert.equal(resolveGetCodeRegistryKey(null), "", "a missing phone has no key");
 });
 
 const REGISTRY_SECRET = "test-registry-secret-should-be-long";
@@ -891,15 +905,38 @@ test("getcode registry: GET/POST/DELETE round-trip through the endpoints", async
   assert.equal(deleteAgain.status, 200, "deleting an absent entry is still ok (idempotent)");
 });
 
+test("getcode registry: a non-canonical phone round-trips through the endpoints under its folded key", async () => {
+  const kvEnv = registryKvEnv(true);
+  const miss = await registryFetch(kvEnv, "GET", "/getcode-registry?phone=6565666666", { secret: REGISTRY_SECRET });
+  assert.equal(miss.status, 200);
+  assert.deepEqual(miss.json, { found: false }, "an unknown non-canonical phone is not found");
+  const stored = await registryFetch(kvEnv, "POST", "/getcode-registry", {
+    secret: REGISTRY_SECRET,
+    body: { phone: "6565666666", name: "أحمد محمد علي", code: "66901233" },
+  });
+  assert.equal(stored.status, 200);
+  assert.deepEqual(stored.json, { ok: true }, "a non-canonical phone is stored under its folded key");
+  const hit = await registryFetch(kvEnv, "GET", "/getcode-registry?phone=6565666666", { secret: REGISTRY_SECRET });
+  assert.equal(hit.status, 200);
+  assert.deepEqual(hit.json, { found: true, name: "أحمد محمد علي", code: "66901233" }, "the entry is found under the folded phone");
+  const deleted = await registryFetch(kvEnv, "DELETE", "/getcode-registry?phone=6565666666", { secret: REGISTRY_SECRET });
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(deleted.json, { ok: true });
+  const gone = await registryFetch(kvEnv, "GET", "/getcode-registry?phone=6565666666", { secret: REGISTRY_SECRET });
+  assert.deepEqual(gone.json, { found: false }, "the entry is gone after DELETE");
+});
+
 test("getcode registry: endpoints validate their input", async () => {
   const kvEnv = registryKvEnv(true);
-  assert.equal((await registryFetch(kvEnv, "GET", "/getcode-registry?phone=123", { secret: REGISTRY_SECRET })).status, 400, "a non-canonical phone → 400");
+  assert.deepEqual((await registryFetch(kvEnv, "GET", "/getcode-registry?phone=123", { secret: REGISTRY_SECRET })).json, { found: false }, "a short phone is a valid folded key — looked up, not rejected");
+  assert.equal((await registryFetch(kvEnv, "GET", "/getcode-registry?phone=123", { secret: REGISTRY_SECRET })).status, 200);
   assert.equal((await registryFetch(kvEnv, "GET", "/getcode-registry", { secret: REGISTRY_SECRET })).status, 400, "a missing phone → 400");
-  assert.equal((await registryFetch(kvEnv, "POST", "/getcode-registry", { secret: REGISTRY_SECRET, body: { phone: "123", name: "أحمد محمد علي", code: "13580245" } })).status, 400, "POST with a bad phone → 400");
+  assert.equal((await registryFetch(kvEnv, "GET", "/getcode-registry?phone=", { secret: REGISTRY_SECRET })).status, 400, "an empty phone → 400");
+  assert.equal((await registryFetch(kvEnv, "POST", "/getcode-registry", { secret: REGISTRY_SECRET, body: { phone: "123", name: "أحمد محمد علي", code: "13580245" } })).status, 200, "POST with a short phone stores it under its folded key");
   assert.equal((await registryFetch(kvEnv, "POST", "/getcode-registry", { secret: REGISTRY_SECRET, body: { phone: "01012345678", name: "  ", code: "13580245" } })).status, 400, "POST with an empty name → 400");
   assert.equal((await registryFetch(kvEnv, "POST", "/getcode-registry", { secret: REGISTRY_SECRET, body: { phone: "01012345678", name: "أحمد محمد علي", code: "abc" } })).status, 400, "POST with a non-digit code → 400");
   assert.equal((await registryFetch(kvEnv, "POST", "/getcode-registry", { secret: REGISTRY_SECRET, rawBody: "{not json" })).status, 400, "POST with malformed JSON → 400");
-  assert.equal((await registryFetch(kvEnv, "DELETE", "/getcode-registry?phone=123", { secret: REGISTRY_SECRET })).status, 400, "DELETE with a bad phone → 400");
+  assert.equal((await registryFetch(kvEnv, "DELETE", "/getcode-registry?phone=123", { secret: REGISTRY_SECRET })).status, 200, "DELETE with a short phone → 200 (idempotent)");
   assert.equal((await registryFetch(kvEnv, "PUT", "/getcode-registry?phone=201207829388", { secret: REGISTRY_SECRET })).status, 405, "an unsupported method → 405");
 });
 
@@ -928,6 +965,40 @@ test("getcode registry: a registry hit greets immediately — no name question, 
   assert.equal(stored.getcodeScreenshotAwaiting, undefined, "no screenshot wait on a registry hit");
   const again = await sayMsg(kvEnv, USER, "/getcode");
   assert.ok(anyMessage(again, /مرحباً أحمد محمد علي، الرقم الكودي الخاص بك هو 13580245/), "the next /getcode greets from the local record");
+});
+
+test("getcode registry: a non-canonical phone in the registry greets immediately — ANY number syncs (user 28 Nov 06:47)", async () => {
+  macroMode = "json";
+  macroBodies = [];
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedLevelMenus(kvEnv);
+  // The student activated on another platform with a non-Egyptian
+  // number: the entry lives under the folded digits.
+  kvEnv.USERS.store.set(getCodeRegistryKey("6565666666"), { name: "أحمد محمد علي", code: "66901233", updatedAt: "2026-11-28T00:00:00.000Z" });
+  const ask = await sayMsg(kvEnv, USER, "/getcode");
+  assert.ok(anyMessage(ask, /اكتب رقم موبايلك/), "a first-time Telegram user still starts with the phone question");
+  const macroCallsBeforeHit = macroBodies.length;
+  const greet = await sayMsg(kvEnv, USER, "6565666666");
+  assert.ok(anyMessage(greet, /مرحباً أحمد محمد علي، الرقم الكودي الخاص بك هو 66901233/), "a non-canonical registry hit greets with the stored name+code");
+  assert.ok(!anyMessage(greet, /اكتب اسمك الثلاثي/), "the name question is never asked on a hit");
+  assert.equal(macroBodies.length, macroCallsBeforeHit, "no macro call on a hit — the code comes from the registry");
+  const stored = kvEnv.USERS.store.get(`user:${USER}`);
+  assert.equal(stored.getcodePhone, "6565666666", "the phone is stored as typed, folded to Western digits");
+  assert.equal(stored.getcodeActivated, true, "a registry hit means an activated student");
+});
+
+test("getcode registry: a short phone is looked up too — a hit greets (a miss runs the flow, covered by the 8-digit test above)", async () => {
+  macroMode = "json";
+  macroBodies = [];
+  const kvEnv = { ...env, USERS: fakeKv() };
+  seedLevelMenus(kvEnv);
+  kvEnv.USERS.store.set(getCodeRegistryKey("12078293"), { name: "أحمد محمد علي", code: "13312860", updatedAt: "2026-11-28T00:00:00.000Z" });
+  await sayMsg(kvEnv, USER, "/getcode");
+  const macroCallsBeforeHit = macroBodies.length;
+  const greet = await sayMsg(kvEnv, USER, "12078293");
+  assert.ok(anyMessage(greet, /مرحباً أحمد محمد علي، الرقم الكودي الخاص بك هو 13312860/), "a short-phone registry hit greets");
+  assert.ok(!anyMessage(greet, /اكتب اسمك الثلاثي/), "the name question is never asked on a hit");
+  assert.equal(macroBodies.length, macroCallsBeforeHit, "no macro call on a hit");
 });
 
 test("getcode registry: a miss runs the normal flow — the registry entry is written ONLY on activation, not at macro success", async () => {
