@@ -430,6 +430,7 @@ test("getcode: completing the flow stores the name+code+phone and opens the scre
   assert.equal(stored.getcodeScreenshotName, "أحمد محمد علي");
   assert.equal(stored.getcodeScreenshotCode, "13580245");
   assert.equal(stored.getcodePhone, "01012345678", "the phone is stored as typed, folded to Western digits");
+  assert.equal(stored.getcodeActivated, false, "macro success alone does NOT activate — only the accepted screenshot does");
 });
 
 test("getcode: sending the screenshot photo confirms activation with the stored name and code, then clears only the wait", async () => {
@@ -441,6 +442,7 @@ test("getcode: sending the screenshot photo confirms activation with the stored 
   assert.equal(stored.getcodeScreenshotAwaiting, undefined, "the wait clears on receipt");
   assert.equal(stored.getcodeScreenshotName, "أحمد محمد علي", "the record persists for returning users");
   assert.equal(stored.getcodeScreenshotCode, "13580245", "the record persists for returning users");
+  assert.equal(stored.getcodeActivated, true, "the accepted screenshot marks the student activated");
 });
 
 test("getcode: a second screenshot photo does not repeat the activation", async () => {
@@ -486,6 +488,7 @@ test("getcode: a first-time user still gets the phone question", async () => {
 test("getcode: a returning user tapping the button gets their stored code, no name question", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   await completeGetCode(kvEnv, USER);
+  await sendPhotoMsg(kvEnv, USER); // activate first — a never-activated record does NOT greet
   const again = await openLevelAndTapGetCode(kvEnv, USER);
   assert.ok(anyMessage(again, /مرحباً أحمد محمد علي، الرقم الكودي الخاص بك هو 13580245/), "the stored code comes back directly");
   assert.ok(!anyMessage(again, /اكتب اسمك الثلاثي/), "no name question for a returning user");
@@ -494,6 +497,7 @@ test("getcode: a returning user tapping the button gets their stored code, no na
 test("getcode: a returning user typing /getcode gets their stored code directly", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   await completeGetCode(kvEnv, USER);
+  await sendPhotoMsg(kvEnv, USER); // activate first — a never-activated record does NOT greet
   const again = await sayMsg(kvEnv, USER, "/getcode");
   assert.ok(anyMessage(again, /مرحباً أحمد محمد علي، الرقم الكودي الخاص بك هو 13580245/));
   assert.ok(!anyMessage(again, /اكتب اسمك الثلاثي/));
@@ -550,6 +554,7 @@ test("getcode: /resetcode (admin) clears an open screenshot wait, so a later pho
 test("getcode: /resetcode from a non-admin gets no reply and the record survives", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   await completeGetCode(kvEnv, USER);
+  await sendPhotoMsg(kvEnv, USER); // activate first, so the final /getcode greets
   const reset = await sayMsg(kvEnv, USER, "/resetcode");
   assert.equal(messageTexts(reset).length, 0, "a student typing /resetcode gets no reply at all");
   const stored = kvEnv.USERS.store.get(`user:${USER}`);
@@ -904,16 +909,21 @@ test("getcode registry: a registry hit greets immediately — no name question, 
   assert.equal(stored.getcodeScreenshotName, "أحمد محمد علي", "the local record is written");
   assert.equal(stored.getcodeScreenshotCode, "13580245");
   assert.equal(stored.getcodePhone, "01012345678", "the phone is stored as typed, folded to Western digits");
+  assert.equal(stored.getcodeActivated, true, "a registry hit means an activated student — the local record is activated too");
   assert.equal(stored.getcodeScreenshotAwaiting, undefined, "no screenshot wait on a registry hit");
   const again = await sayMsg(kvEnv, USER, "/getcode");
   assert.ok(anyMessage(again, /مرحباً أحمد محمد علي، الرقم الكودي الخاص بك هو 13580245/), "the next /getcode greets from the local record");
 });
 
-test("getcode registry: a miss runs the normal flow and writes the registry entry", async () => {
+test("getcode registry: a miss runs the normal flow — the registry entry is written ONLY on activation, not at macro success", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   await completeGetCode(kvEnv, USER);
+  assert.equal(kvEnv.USERS.store.get(getCodeRegistryKey("201012345678")), undefined, "no registry entry after macro success alone — the student has not activated yet");
+  const stored0 = kvEnv.USERS.store.get(`user:${USER}`);
+  assert.equal(stored0.getcodeActivated, false, "macro success alone does not activate");
+  await sendPhotoMsg(kvEnv, USER);
   const entry = kvEnv.USERS.store.get(getCodeRegistryKey("201012345678"));
-  assert.equal(entry?.name, "أحمد محمد علي", "the registry entry is written on completion");
+  assert.equal(entry?.name, "أحمد محمد علي", "the registry entry is written on activation");
   assert.equal(entry?.code, "13580245");
   assert.ok(typeof entry?.updatedAt === "string" && entry.updatedAt.length > 0, "the entry carries an updatedAt timestamp");
   const stored = kvEnv.USERS.store.get(`user:${USER}`);
@@ -923,6 +933,7 @@ test("getcode registry: a miss runs the normal flow and writes the registry entr
 test("getcode registry: /resetcode clears the local record AND the registry entry", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   await completeGetCode(kvEnv, ADMIN);
+  await sendPhotoMsg(kvEnv, ADMIN); // activate — the entry is written only on activation
   assert.ok(kvEnv.USERS.store.get(getCodeRegistryKey("201012345678")), "the registry entry exists before the reset");
   await sayMsg(kvEnv, ADMIN, "/resetcode");
   const stored = kvEnv.USERS.store.get(`user:${ADMIN}`);
@@ -935,6 +946,46 @@ test("getcode registry: /resetcode clears the local record AND the registry entr
   const again = await sayMsg(kvEnv, ADMIN, "/getcode");
   assert.ok(anyMessage(again, /اكتب رقم موبايلك/), "the next /getcode asks for the phone again");
   assert.ok(!anyMessage(again, /مرحباً /), "no greeting after a reset");
+});
+
+// ---------------------------------------------------------------------------
+// Activation gate (2026-11-28, the hole the user reported): a student who
+// stops at the screenshot step and leaves, then taps /getcode again,
+// must NOT get the code — the wait re-opens and the notice is re-sent,
+// so he resumes where he stopped. Only an accepted screenshot activates
+// and reveals the code from then on.
+// ---------------------------------------------------------------------------
+
+test("getcode: a never-activated record + /getcode re-opens the screenshot wait and re-sends the notice — the code is NOT revealed", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await completeGetCode(kvEnv, USER); // macro success, no photo yet
+  const stored0 = kvEnv.USERS.store.get(`user:${USER}`);
+  assert.equal(stored0.getcodeActivated, false, "macro success alone does not activate");
+  const again = await sayMsg(kvEnv, USER, "/getcode");
+  assert.ok(!anyMessage(again, /مرحباً /), "no greeting for a never-activated student");
+  assert.ok(!anyMessage(again, /الرقم الكودي الخاص بك هو/), "the code is not revealed in plain text");
+  assert.ok(anyMessage(again, /لتفعيل اشتراكك/), "the notice is re-sent");
+  const photos = again.filter((c) => c.method === "sendPhoto");
+  assert.equal(photos.length, 1, "the example photo is re-sent under the notice");
+  assert.equal(photos[0].payload.photo, GET_CODE_EXAMPLE_PHOTO_URL);
+  assert.equal(photos[0].payload.caption, undefined, "no caption on the re-sent photo");
+  assert.ok(again.findIndex((c) => c.method === "sendMessage") < again.findIndex((c) => c.method === "sendPhoto"), "the text goes out before the photo");
+  const stored = kvEnv.USERS.store.get(`user:${USER}`);
+  assert.equal(stored.getcodeScreenshotAwaiting, true, "the wait is re-opened");
+  // The resumed wait accepts the screenshot — that is the activation.
+  const calls = await sendPhotoMsg(kvEnv, USER);
+  assert.ok(anyMessage(calls, /تم تفعيل اشتراكك عزيزنا/), "the re-opened wait activates on the screenshot");
+  assert.equal(kvEnv.USERS.store.get(`user:${USER}`).getcodeActivated, true);
+});
+
+test("getcode: an activated record + /getcode greets with the code (no re-asking, no notice)", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await completeGetCode(kvEnv, USER);
+  await sendPhotoMsg(kvEnv, USER);
+  assert.equal(kvEnv.USERS.store.get(`user:${USER}`).getcodeActivated, true, "the accepted screenshot marks the student activated");
+  const again = await sayMsg(kvEnv, USER, "/getcode");
+  assert.ok(anyMessage(again, /مرحباً أحمد محمد علي، الرقم الكودي الخاص بك هو 13580245/), "an activated student gets the code back directly");
+  assert.ok(!anyMessage(again, /لتفعيل اشتراكك/), "no notice re-send for an activated student");
 });
 
 test("getcode registry: /resetcode on an old record without a phone clears locally only", async () => {

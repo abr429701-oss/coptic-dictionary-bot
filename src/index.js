@@ -825,12 +825,29 @@ function getCodeRegistryAuthOk(request, env) {
 // and never asked for their name.
 async function beginGetCodeFlow(env, chatId, userId) {
   const user = await getUser(env, userId);
-  // Returning user (2026-11-28): they already have a code stored — show
-  // it directly, never re-ask for name/phone. The stored name+code
-  // persist after the screenshot wait clears (only the wait flag is
-  // ever cleared, never the record).
-  if (user?.getcodeScreenshotName && user?.getcodeScreenshotCode) {
+  // Returning ACTIVATED user (2026-11-28): they already completed the
+  // screenshot step — show the code directly, never re-ask for
+  // name/phone. The stored name+code persist after the screenshot wait
+  // clears (only the wait flag is ever cleared, never the record).
+  if (user?.getcodeScreenshotName && user?.getcodeScreenshotCode && user?.getcodeActivated) {
     await telegram(env, "sendMessage", { chat_id: chatId, text: `مرحباً ${user.getcodeScreenshotName}، الرقم الكودي الخاص بك هو ${user.getcodeScreenshotCode}` });
+    return;
+  }
+  // A record exists but the student never activated (2026-11-28 — the
+  // hole the user reported): they stopped at the screenshot step and
+  // left, then came back. The code is NOT revealed. Re-open the
+  // screenshot wait and re-send the notice (plain text first, then the
+  // example screenshot photo, NO caption — the same two-message shape
+  // as the success reply), so he resumes exactly where he stopped.
+  if (user?.getcodeScreenshotName && user?.getcodeScreenshotCode) {
+    await saveUser(env, userId, { ...(user ?? {}), certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: true });
+    const reply = buildGetCodeReply(user.getcodeScreenshotName, user.getcodeScreenshotCode);
+    await telegram(env, "sendMessage", { chat_id: chatId, text: reply, disable_web_page_preview: true });
+    try {
+      await telegram(env, "sendPhoto", { chat_id: chatId, photo: GET_CODE_EXAMPLE_PHOTO_URL });
+    } catch {
+      /* the text reply above already went out */
+    }
     return;
   }
   // No local record: ask PHONE FIRST (2026-11-28, cross-platform sync).
@@ -852,7 +869,10 @@ async function handleGetCodeStep(env, chatId, userId, text, user) {
     }
     const entry = await getCodeRegistryEntry(env, canonical);
     if (entry && entry.code) {
-      await saveUser(env, userId, { ...(user ?? {}), getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined, getcodeScreenshotName: entry.name, getcodeScreenshotCode: entry.code, getcodePhone: normalizeGetCodePhone(text) });
+      // A registry hit means an ACTIVATED student (entries are written
+      // only at activation, 2026-11-28) — greet immediately and mark
+      // the local record activated too, so the next /getcode greets.
+      await saveUser(env, userId, { ...(user ?? {}), getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined, getcodeScreenshotName: entry.name, getcodeScreenshotCode: entry.code, getcodePhone: normalizeGetCodePhone(text), getcodeActivated: true });
       await telegram(env, "sendMessage", { chat_id: chatId, text: `مرحباً ${entry.name}، الرقم الكودي الخاص بك هو ${entry.code}` });
       return;
     }
@@ -886,14 +906,15 @@ async function handleGetCodeStep(env, chatId, userId, text, user) {
   const result = await getCodeFromMacro(name, user?.getcodePhone ?? "", drive?.url);
   if (result.code) {
     // Remember the session: the name+code+phone persist (returning users
-    // get their code back without re-asking), and the one-shot screenshot
-    // wait opens — it ends when the photo arrives, or on /cancel,
-    // /menu, /start or another menu tap (same clearing as the other
-    // waits; only the wait flag clears, never the record). The registry
-    // entry is written too, so the other platforms recognize the student
-    // instantly by phone.
-    await saveUser(env, userId, { ...(user ?? {}), getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: true, getcodeScreenshotName: name, getcodeScreenshotCode: result.code, getcodePhone: normalizeGetCodePhone(user?.getcodePhone ?? "") });
-    await setCodeRegistryEntry(env, canonical, name, result.code);
+    // get their code back without re-asking — only AFTER activation),
+    // and the one-shot screenshot wait opens — it ends when the photo
+    // arrives, or on /cancel, /menu, /start or another menu tap (same
+    // clearing as the other waits; only the wait flag clears, never the
+    // record). getcodeActivated starts FALSE: the student is not
+    // activated until the screenshot is accepted (2026-11-28). The
+    // registry entry is written at ACTIVATION time, not here — a
+    // registry hit must always mean an activated student.
+    await saveUser(env, userId, { ...(user ?? {}), getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: true, getcodeScreenshotName: name, getcodeScreenshotCode: result.code, getcodePhone: normalizeGetCodePhone(user?.getcodePhone ?? ""), getcodeActivated: false });
     const reply = buildGetCodeReply(name, result.code);
     // Two messages (2026-11-28, user correction — the captioned-photo
     // design is retired): the notice text as a plain text message
@@ -920,7 +941,7 @@ async function handleGetCodeStep(env, chatId, userId, text, user) {
 // stored get-code record, so /getcode only returns the returning-user
 // greeting and he can never re-test the full flow. This clears the
 // caller's own stored name+code (and any open get-code wait), so the
-// next /getcode asks for name, then phone, and runs the full caption +
+// next /getcode asks for phone, then name, and runs the full caption +
 // screenshot + OCR path again. Same phone → same code (last 8 digits +
 // 1234567); the reset re-opens the FLOW, it never mints a new code.
 async function resetGetCodeRecord(env, chatId, userId) {
@@ -931,7 +952,7 @@ async function resetGetCodeRecord(env, chatId, userId) {
   // instead of re-running the flow. Old records have no phone — those
   // clear locally only, as before.
   const phone = canonicalGetCodePhone(user?.getcodePhone ?? "");
-  await saveUser(env, userId, { ...(user ?? {}), getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined, getcodeScreenshotName: undefined, getcodeScreenshotCode: undefined, getcodePhone: undefined });
+  await saveUser(env, userId, { ...(user ?? {}), getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined, getcodeScreenshotName: undefined, getcodeScreenshotCode: undefined, getcodePhone: undefined, getcodeActivated: undefined });
   if (phone) await deleteCodeRegistryEntry(env, phone);
   await telegram(env, "sendMessage", { chat_id: chatId, text: "تم مسح الرقم الكودي المسجّل — ابعت /getcode من الأول." });
 }
@@ -9420,7 +9441,14 @@ async function handleUpdate(update, env, ctx) {
         await telegram(env, "sendMessage", { chat_id: message.chat.id, text: GET_CODE_SCREENSHOT_REJECT_TEXT });
         return;
       }
-      await saveUser(env, userId, { ...shotUser, getcodeScreenshotAwaiting: undefined });
+      // Activation (2026-11-28): ONLY an accepted screenshot marks the
+      // student activated — the code is revealed from here on (a
+      // fail-open accept counts too: the activation reply is the gate).
+      // The registry entry is written NOW, not at macro-success time,
+      // so a registry hit always means an activated student.
+      await saveUser(env, userId, { ...shotUser, getcodeScreenshotAwaiting: undefined, getcodeActivated: true });
+      const activationCanonical = canonicalGetCodePhone(shotUser.getcodePhone ?? "");
+      if (activationCanonical) await setCodeRegistryEntry(env, activationCanonical, shotUser.getcodeScreenshotName, shotUser.getcodeScreenshotCode);
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: `تم تفعيل اشتراكك عزيزنا ${shotUser.getcodeScreenshotName} والرقم الكودي الخاص بك هو: ${shotUser.getcodeScreenshotCode}` });
       return;
     }
