@@ -39,10 +39,11 @@ import {
 // Frozen manifest (27 lessons from the learn tab) -> Drive download once ->
 // Telegram upload once (file_id stored) -> two level menus. ONE /importlearn
 // run imports EVERYTHING in the background and reports completion; each
-// lesson has ONE button (kind "lesson") and one tap sends the whole lesson,
-// items in manifest order (L1: video → oral → exam; L2: video → summary →
-// exercise → exam). A lesson button appears only once all its items are
-// ready; a media item is never sent without a stored file_id.
+// lesson has ONE button (kind "lesson") and one tap sends the lesson's
+// video only (user 2026-11-28) — the oral paper and the exam link arrive
+// on demand from the "🗣 الشفوي" / "📝 الامتحان الإلكتروني" buttons.
+// A lesson button appears only once all its items are ready; a media item
+// is never sent without a stored file_id.
 // ---------------------------------------------------------------------------
 
 const token = "test-token";
@@ -980,7 +981,7 @@ test("learn-import: /__learn-import merges instead of replacing all menus", asyn
 // One tap sends the whole lesson, in order
 // ---------------------------------------------------------------------------
 
-test("learn-import: plain tap on a lesson sends video, photo, then the exam link", async () => {
+test("learn-import: plain tap on a lesson sends only the video; oral + exam arrive on demand", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   seedMenus(kvEnv);
   await sayMsg(kvEnv, ADMIN, "/importlearn");
@@ -988,21 +989,28 @@ test("learn-import: plain tap on a lesson sends video, photo, then the exam link
   await sayMsg(kvEnv, 57, "/menu");
   await sayMsg(kvEnv, 57, "المستوى الأول");
   const calls = await sayMsg(kvEnv, 57, "الدرس الاول");
-  assert.deepEqual(calls.map((c) => c.method), ["sendVideo", "sendPhoto", "sendMessage"]);
+  // Lesson display restructure (user 2026-11-28): the tap sends the video
+  // only — the oral photo and the exam link are on-demand buttons now.
+  assert.deepEqual(calls.map((c) => c.method), ["sendVideo"]);
   assert.match(String(calls[0].payload?.caption ?? ""), /الدرس الاول/u);
-  assert.match(String(calls[1].payload?.caption ?? ""), /الدرس الاول/u);
   // The lesson list stays visible (user 2026-11-23): the first message
   // carries the level menu's lesson-name keyboard (Previous/Next on top,
   // lesson names, Back/Home at the bottom), so the user can tap another
-  // lesson directly.
+  // lesson directly — plus the on-demand item buttons.
   const firstKb = calls[0].payload?.reply_markup;
   assert.ok(Array.isArray(firstKb?.keyboard), "first lesson message carries a reply keyboard");
   const firstLabels = firstKb.keyboard.flat().map((b) => b.text);
   assert.ok(firstLabels.includes("⏮ السابق") && firstLabels.includes("التالي ⏭"), "lesson list keyboard has Previous/Next on top");
   assert.ok(firstLabels.includes("الدرس الاول"), "lesson list keyboard shows the lesson names");
   assert.ok(firstLabels.includes("🔙 رجوع") && firstLabels.includes("🏠 الرئيسية"), "lesson list keyboard has Back/Home");
-  assert.equal(calls[1].payload?.reply_markup, undefined, "middle messages carry no keyboard");
-  const exam = calls[2].payload;
+  assert.ok(firstLabels.includes("🗣 الشفوي") && firstLabels.includes("📝 الامتحان الإلكتروني"), "lesson keyboard has the on-demand item buttons");
+  assert.ok(!firstLabels.includes("🎙 سجّل الشفوي"), "the admin-only record button stays hidden from students");
+  // On demand: the oral photo, then the exam link.
+  const oralCalls = await sayMsg(kvEnv, 57, "🗣 الشفوي");
+  assert.deepEqual(oralCalls.map((c) => c.method), ["sendPhoto"]);
+  assert.match(String(oralCalls[0].payload?.caption ?? ""), /الدرس الاول/u);
+  const examCalls = await sayMsg(kvEnv, 57, "📝 الامتحان الإلكتروني");
+  const exam = examCalls.find((c) => c.method === "sendMessage")?.payload;
   assert.match(exam.text, /^📝 الامتحان الإلكتروني: https:\/\/docs\.google\.com\/forms\//u);
   // The last lesson message carries the same lesson-list keyboard — no
   // inline, ever. ("الدرس الاول" is the third button in the stored level
@@ -1077,18 +1085,19 @@ test("learn-import: tapping التالي on the lesson nav keyboard opens the ne
   await sayMsg(kvEnv, 57, "الدرس الاول");
   // No inline, ever: Next is a button on the small reply nav keyboard
   // under the lesson, tapped as plain text. "الدرس الاول" (b_learn_l1_03)
-  // is followed by "الدرس الثاني" (b_learn_l1_04).
+  // is followed by "الدرس الثاني" (b_learn_l1_04). The next lesson sends
+  // its video only, like every lesson tap now (user 2026-11-28).
   const calls = await sayMsg(kvEnv, 57, "التالي ⏭");
-  assert.deepEqual(calls.map((c) => c.method), ["sendVideo", "sendPhoto", "sendMessage"]);
+  assert.deepEqual(calls.map((c) => c.method), ["sendVideo"]);
   assert.match(String(calls[0].payload?.caption ?? ""), /الدرس الثاني/u, "the next lesson's video arrives");
 });
 
-test("learn-import: inline tap on an L2 lesson sends video, photo, exercise text, exam link", async () => {
+test("learn-import: inline tap on an L2 lesson sends only the video; exercise + exam arrive on demand", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   seedMenus(kvEnv);
   await sayMsg(kvEnv, ADMIN, "/importlearn");
   const calls = await tapCallback(kvEnv, 57, "mb|btn|m_learn_l2|b_learn_l2_06");
-  assert.deepEqual(calls.map((c) => c.method), ["answerCallbackQuery", "sendVideo", "sendPhoto", "sendMessage", "sendMessage"]);
+  assert.deepEqual(calls.map((c) => c.method), ["answerCallbackQuery", "sendVideo"]);
   assert.match(String(calls[1].payload?.caption ?? ""), /الدرس السادس/u);
   // The lesson list stays visible (user 2026-11-23): the first message
   // carries the level menu's lesson-name keyboard.
@@ -1098,8 +1107,14 @@ test("learn-import: inline tap on an L2 lesson sends video, photo, exercise text
   assert.ok(firstLabels.includes("⏮ السابق") && firstLabels.includes("التالي ⏭"), "lesson list keyboard has Previous/Next on top");
   assert.ok(firstLabels.includes("الدرس السادس"), "lesson list keyboard shows the lesson names");
   assert.ok(firstLabels.includes("🔙 رجوع") && firstLabels.includes("🏠 الرئيسية"), "lesson list keyboard has Back/Home");
-  assert.match(messageTexts(calls).find((t) => /التدريب الثالث/u.test(t)) ?? "", /التدريب الثالث/u);
-  const exam = calls[4].payload;
+  assert.ok(firstLabels.includes("📝 الامتحان الإلكتروني"), "the exam button appears where an exam item exists");
+  assert.ok(!firstLabels.includes("🗣 الشفوي"), "no oral button in L2 (no oral items there)");
+  // Nothing else is auto-sent: no summary photo, no exercise text, no exam link.
+  assert.ok(!messageTexts(calls).some((t) => /التدريب الثالث/u.test(t)), "the exercise text is NOT auto-sent");
+  assert.ok(!messageTexts(calls).some((t) => /docs\.google\.com\/forms/u.test(t)), "the exam link is NOT auto-sent");
+  // On demand: the exam link arrives with the lesson keyboard.
+  const examCalls = await sayMsg(kvEnv, 57, "📝 الامتحان الإلكتروني");
+  const exam = examCalls.find((c) => c.method === "sendMessage")?.payload;
   assert.match(exam.text, /^📝 الامتحان الإلكتروني: https:\/\/docs\.google\.com\/forms\//u);
   const lastKb = exam.reply_markup;
   assert.ok(Array.isArray(lastKb?.keyboard), "exam message carries the lesson-list keyboard");
@@ -1109,14 +1124,15 @@ test("learn-import: inline tap on an L2 lesson sends video, photo, exercise text
   assert.ok(lastLabels.includes("🔙 رجوع") && lastLabels.includes("🏠 الرئيسية"), "last keyboard has Back/Home");
 });
 
-test("learn-import: one failed lesson item does not abort the rest of the lesson", async () => {
+test("learn-import: a failed oral photo does not break the lesson", async () => {
   const kvEnv = { ...env, USERS: fakeKv() };
   seedMenus(kvEnv);
   await sayMsg(kvEnv, ADMIN, "/importlearn");
-  // Telegram rejects the oral photo; the video, the failure message and
-  // the exam link must still arrive, in order. (This test installs its own
-  // fetch stub and calls the worker directly, because sendUpdateMsg would
-  // replace the stub with the standard one.)
+  // Telegram rejects the oral photo when the admin taps "🗣 الشفوي";
+  // the generic failure message (plus the real reason for the admin)
+  // must arrive, with the lesson keyboard re-attached. (This test
+  // installs its own fetch stub and calls the worker directly, because
+  // sendUpdateMsg would replace the stub with the standard one.)
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
     const u = String(url);
@@ -1134,14 +1150,19 @@ test("learn-import: one failed lesson item does not abort the rest of the lesson
     return new Response("Not found", { status: 404 });
   };
   await worker.fetch(updateRequest({ callback_query: { id: "cb1", data: "mb|btn|m_learn_l1|b_learn_l1_03", from: { id: ADMIN }, message: { message_id: 5, chat: { id: ADMIN, type: "private" }, text: "x" } } }), kvEnv);
-  assert.deepEqual(calls.map((c) => c.method), ["answerCallbackQuery", "sendVideo", "sendPhoto", "sendMessage", "sendMessage", "sendMessage"]);
+  // The lesson tap sends the video only now (user 2026-11-28) — the oral
+  // photo is NOT auto-sent, so a failing photo cannot abort the lesson.
+  assert.deepEqual(calls.map((c) => c.method), ["answerCallbackQuery", "sendVideo"]);
+  calls.length = 0;
+  await worker.fetch(updateRequest({ message: { message_id: 6, text: "🗣 الشفوي", chat: { id: ADMIN, type: "private" }, from: { id: ADMIN, first_name: "Admin" } } }), kvEnv);
+  assert.deepEqual(calls.map((c) => c.method), ["sendPhoto", "sendMessage", "sendMessage"]);
   assert.ok(messageTexts(calls).some((t) => /تعذّر إرسال هذا المحتوى/u.test(t)), "generic failure message must be sent");
   assert.ok(messageTexts(calls).some((t) => /wrong file identifier/u.test(t)), "admin sees the real reason");
-  const exam = calls.at(-1).payload;
-  assert.match(exam.text, /^📝 الامتحان الإلكتروني: https:\/\/docs\.google\.com\/forms\//u);
+  assert.ok(!messageTexts(calls).some((t) => /docs\.google\.com\/forms/u.test(t)), "no exam link is sent");
   // The lesson list stays visible (user 2026-11-23) even after a failed item.
-  const lastKb = exam.reply_markup;
-  assert.ok(Array.isArray(lastKb?.keyboard), "exam message carries the lesson-list keyboard even after a failed item");
+  const failed = calls.find((c) => c.method === "sendMessage" && /تعذّر إرسال هذا المحتوى/u.test(String(c.payload?.text ?? "")))?.payload;
+  const lastKb = failed?.reply_markup;
+  assert.ok(Array.isArray(lastKb?.keyboard), "failure message carries the lesson-list keyboard even after a failed item");
   const lastLabels = lastKb.keyboard.flat().map((b) => b.text);
   assert.ok(lastLabels.includes("⏮ السابق") && lastLabels.includes("التالي ⏭"), "last keyboard has Previous/Next");
   assert.ok(lastLabels.includes("🔙 رجوع") && lastLabels.includes("🏠 الرئيسية"), "last keyboard has Back/Home");

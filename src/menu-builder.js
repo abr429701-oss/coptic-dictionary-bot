@@ -101,7 +101,8 @@ function normalizeButton(raw, menuIds) {
     if (!button.command) return null;
   }
   if (kind === "lesson") {
-    // One tap sends the whole lesson (see sendLearnLesson in index.js).
+    // One tap sends the lesson's video only (see sendLearnLesson in
+    // index.js); the oral paper and exam link are on-demand buttons.
     // The lessonId must name a real learn lesson (m_learn_l1_01 …),
     // so a hand-made "lesson" button with no lesson never survives a save.
     button.lessonId = String(raw.lessonId ?? "").trim();

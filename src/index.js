@@ -830,31 +830,53 @@ async function runMenuCommand(env, chatId, userId, command) {
   }
   await telegram(env, "sendMessage", { chat_id: chatId, text: "⚠️ هذا الأمر غير متوفر حاليًا." });
 }
-// One tap on a lesson button sends the WHOLE lesson, items in manifest
-// order (L1: video → oral photo → exam link; L2: video → summary photo →
-// exercise text → exam link). Telegram has no single message that holds a
-// video + a photo + long text + a link, so the lesson arrives as
-// consecutive messages in that order. A failed item reports the generic
-// message (plus the real reason for an admin) and the rest still sends.
-async function sendLearnLesson(env, chatId, userId, lessonId, reactMessageId = undefined) {
-  const lesson = findLearnLesson(lessonId);
-  if (!lesson) {
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "الدرس غير موجود (ربما حُذف). أرسل /learnhere لعرض القوائم الحالية." });
+// Lesson items on demand (user 2026-11-28): the lesson tap sends only
+// the video; the oral paper and the exam link arrive from their own
+// reply-keyboard buttons, using the exact manifest labels.
+const LESSON_ORAL_BUTTON = "🗣 الشفوي";
+const LESSON_EXAM_BUTTON = "📝 الامتحان الإلكتروني";
+
+// One send step of a lesson plan (video/photo/text/url), with the same
+// failure handling the lesson loop always had: the user gets the generic
+// message, the admin also gets Telegram's real reason.
+async function sendLessonPlanStep(env, chatId, userId, step, attachKeyboard) {
+  if (step.kind === "video" || step.kind === "photo") {
+    const method = step.kind === "video" ? "sendVideo" : "sendPhoto";
+    const res = await telegram(env, method, { chat_id: chatId, [step.kind]: step.fileId, caption: step.caption, ...(attachKeyboard ? { reply_markup: attachKeyboard } : {}) });
+    if (!res?.ok) {
+      await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تعذّر إرسال هذا المحتوى حاليًا. جرّب لاحقًا أو أبلغ الإدارة.", ...(attachKeyboard ? { reply_markup: attachKeyboard } : {}) });
+      if (isAdmin(env, userId)) {
+        await telegram(env, "sendMessage", { chat_id: chatId, text: `🛠 سبب الرفض من تيليجرام: ${res?.description ?? `خطأ ${res?.error_code ?? "غير معروف"}`}` });
+      }
+    }
     return;
   }
-  const state = await loadImportState(env);
-  const plan = learnLessonSendPlan(lesson, state);
-  if (!plan) {
-    await telegram(env, "sendMessage", { chat_id: chatId, text: "⚠️ هذا الدرس ليس جاهزًا بعد — جرّب لاحقًا أو أبلغ الإدارة." });
+  if (step.kind === "text") {
+    // sendMenuMessage drops a remove_keyboard markup (it only keeps
+    // markups with rows), so a remove_keyboard fallback goes direct.
+    if (attachKeyboard?.remove_keyboard) await telegram(env, "sendMessage", { chat_id: chatId, text: step.text, reply_markup: attachKeyboard });
+    else await sendMenuMessage(env, chatId, step.text, attachKeyboard);
     return;
   }
+  if (step.kind === "url") {
+    // The exam link goes as plain text (phrase + link in one message) so
+    // the user taps it freely — not as an inline button. No link preview,
+    // so the message stays exactly the phrase and the link.
+    await telegram(env, "sendMessage", { chat_id: chatId, text: `${step.label}: ${step.url}`, disable_web_page_preview: true, ...(attachKeyboard ? { reply_markup: attachKeyboard } : {}) });
+  }
+}
+
+// The keyboards shown with a lesson: the small nav (Previous/Next +
+// Back/Home) and the level-menu lesson list. Both carry the on-demand
+// item buttons and (admin only) the oral-record button. The lesson list
+// stays visible (user 2026-11-23): the level menu's lesson-name keyboard
+// stays on screen while a lesson plays, so the user can tap another
+// lesson directly. No inline, ever. Siblings come from the stored level
+// menu's lesson buttons, in order; if the menu is not stored yet, the
+// nav falls back to the small Previous/Next + Back/Home keyboard.
+async function lessonKeyboards(env, userId, lesson) {
+  const lessonId = lesson.id;
   const levelMenuId = (LEARN_LEVELS.find((l) => l.lessons.some((x) => x.id === lessonId)) ?? {}).id ?? "m_learn_l1";
-  // Lesson list stays visible (user 2026-11-23, reversing the 2026-11-13
-  // full-screen rule): the level menu's lesson-name keyboard stays on
-  // screen while a lesson plays, so the user can tap another lesson
-  // directly. No inline, ever. Siblings come from the stored level
-  // menu's lesson buttons, in order; if the menu is not stored yet, the
-  // nav falls back to the small Previous/Next + Back/Home keyboard.
   const storedMenus = await loadMenus(env);
   const levelMenu = findMenu(storedMenus, levelMenuId);
   const lessonButtons = (levelMenu?.buttons ?? []).filter((b) => b.kind === "lesson");
@@ -867,6 +889,13 @@ async function sendLearnLesson(env, chatId, userId, lessonId, reactMessageId = u
   const navRows = [];
   if (stepRow.length) navRows.push(stepRow);
   navRows.push([{ text: "🔙 رجوع" }, { text: "🏠 الرئيسية" }]);
+  // On-demand item buttons (user 2026-11-28): one row with the buttons
+  // for the items this lesson actually has — shown to everyone, unlike
+  // the admin-only record button below.
+  const itemButtons = [];
+  if (lessonHasOral(lesson)) itemButtons.push({ text: LESSON_ORAL_BUTTON });
+  if (lesson.items.some((item) => item?.key === "exam")) itemButtons.push({ text: LESSON_EXAM_BUTTON });
+  if (itemButtons.length) navRows.push(itemButtons);
   // Oral attendance (إثبات حضور, 2026-11-28): lessons with a ورقة شفوي
   // get a "🎙 سجّل الشفوي" row under the nav — ADMIN ONLY while the user
   // trials the feature (2026-11-28): it must not appear to any student
@@ -883,16 +912,40 @@ async function sendLearnLesson(env, chatId, userId, lessonId, reactMessageId = u
     const menuKb = buildReplyMenuKeyboard(storedMenus, levelMenu, { isAdmin: isAdmin(env, userId) });
     const rows = [...(menuKb?.keyboard ?? [])];
     if (stepRow.length) rows.unshift(stepRow);
+    if (itemButtons.length) rows.push(itemButtons);
     if (hasOral) rows.push([{ text: ORAL_RECORD_BUTTON }]);
     if (rows.length) lessonListKeyboard = { keyboard: rows, resize_keyboard: true };
   }
+  return { lessonListKeyboard, smallNavKeyboard };
+}
+
+// One tap on a lesson button sends the lesson's VIDEO only (user
+// 2026-11-28): the oral paper and the exam link are no longer auto-sent
+// — they arrive on demand from the "🗣 الشفوي" / "📝 الامتحان الإلكتروني"
+// buttons under the lesson. If a lesson somehow has no video step, the
+// whole plan is sent instead (its items), rather than nothing.
+async function sendLearnLesson(env, chatId, userId, lessonId, reactMessageId = undefined) {
+  const lesson = findLearnLesson(lessonId);
+  if (!lesson) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "الدرس غير موجود (ربما حُذف). أرسل /learnhere لعرض القوائم الحالية." });
+    return;
+  }
+  const state = await loadImportState(env);
+  const plan = learnLessonSendPlan(lesson, state);
+  if (!plan) {
+    await telegram(env, "sendMessage", { chat_id: chatId, text: "⚠️ هذا الدرس ليس جاهزًا بعد — جرّب لاحقًا أو أبلغ الإدارة." });
+    return;
+  }
+  const { lessonListKeyboard, smallNavKeyboard } = await lessonKeyboards(env, userId, lesson);
   // Remember the lesson so the nav keyboard's Previous/Next taps (plain
   // text) can find the sibling in the next update.
   const lessonUser = await getUser(env, userId);
   await saveUser(env, userId, { ...(lessonUser ?? {}), lastLessonId: lessonId });
-  for (let i = 0; i < plan.length; i++) {
-    const step = plan[i];
-    const isLast = i === plan.length - 1;
+  const videoSteps = plan.filter((step) => step.kind === "video");
+  const stepsToSend = videoSteps.length ? videoSteps : plan;
+  for (let i = 0; i < stepsToSend.length; i++) {
+    const step = stepsToSend[i];
+    const isLast = i === stepsToSend.length - 1;
     // The lesson list stays visible (user 2026-11-23): the level menu
     // keyboard is attached to the FIRST lesson message and again to the
     // LAST one, so the lesson names stay on screen and the user can pick
@@ -902,30 +955,7 @@ async function sendLearnLesson(env, chatId, userId, lessonId, reactMessageId = u
     const attachKeyboard = i === 0
       ? (lessonListKeyboard ?? { remove_keyboard: true })
       : (isLast ? (lessonListKeyboard ?? smallNavKeyboard) : undefined);
-    if (step.kind === "video" || step.kind === "photo") {
-      const method = step.kind === "video" ? "sendVideo" : "sendPhoto";
-      const res = await telegram(env, method, { chat_id: chatId, [step.kind]: step.fileId, caption: step.caption, ...(attachKeyboard ? { reply_markup: attachKeyboard } : {}) });
-      if (!res?.ok) {
-        await telegram(env, "sendMessage", { chat_id: chatId, text: "❌ تعذّر إرسال هذا المحتوى حاليًا. جرّب لاحقًا أو أبلغ الإدارة.", ...(attachKeyboard ? { reply_markup: attachKeyboard } : {}) });
-        if (isAdmin(env, userId)) {
-          await telegram(env, "sendMessage", { chat_id: chatId, text: `🛠 سبب الرفض من تيليجرام: ${res?.description ?? `خطأ ${res?.error_code ?? "غير معروف"}`}` });
-        }
-      }
-      continue;
-    }
-    if (step.kind === "text") {
-      // sendMenuMessage drops a remove_keyboard markup (it only keeps
-      // markups with rows), so a remove_keyboard fallback goes direct.
-      if (attachKeyboard?.remove_keyboard) await telegram(env, "sendMessage", { chat_id: chatId, text: step.text, reply_markup: attachKeyboard });
-      else await sendMenuMessage(env, chatId, step.text, attachKeyboard);
-      continue;
-    }
-    if (step.kind === "url") {
-      // The exam link goes as plain text (phrase + link in one message) so
-      // the user taps it freely — not as an inline button. No link preview,
-      // so the message stays exactly the phrase and the link.
-      await telegram(env, "sendMessage", { chat_id: chatId, text: `${step.label}: ${step.url}`, disable_web_page_preview: true, ...(attachKeyboard ? { reply_markup: attachKeyboard } : {}) });
-    }
+    await sendLessonPlanStep(env, chatId, userId, step, attachKeyboard);
   }
   // ❤️ on the user's tap, like the word cards (user 2026-11-25): the
   // lesson is always sent first, and a failed reaction never blocks or
@@ -1630,7 +1660,7 @@ import { MENUS_KEY, BUTTON_KINDS, MEDIA_KINDS, KIND_LABELS, ALLOWED_COMMANDS, VI
 import { createMenuStudio, resolveMenuLabel, buildReplyMenuKeyboard, buildRootReplyKeyboard, STUDIO_HOME_LABEL } from "./menu-studio.js";
 import { getHiddenUi, setHiddenUi, toggleHiddenUi, stripHiddenCommands, stripHiddenReplyKeyboard, stripHiddenInlineKeyboard, isHiddenReplyText, isHiddenCommandText } from "./ui-visibility.js";
 import { LEARN_LEVELS } from "./learn-manifest.js";
-import { LEARN_IMPORT_KEY, LEARN_GET_CODE_TEXT, learnUploadItems, emptyImportState, normalizeImportState, importProgress, learnPendingItems, learnManifestHash, isImportStateTrusted, findLearnLesson, learnLessonSendPlan, buildLearnMenus, mergeMenus, uploadLearnFile, runImportUploads, parseImportLearnArg, learnImportStartText, learnProgressText } from "./learn-import.js";
+import { LEARN_IMPORT_KEY, LEARN_GET_CODE_TEXT, learnUploadItems, emptyImportState, normalizeImportState, importProgress, learnPendingItems, learnManifestHash, isImportStateTrusted, learnItemKey, findLearnLesson, learnLessonSendPlan, buildLearnMenus, mergeMenus, uploadLearnFile, runImportUploads, parseImportLearnArg, learnImportStartText, learnProgressText } from "./learn-import.js";
 import { ORAL_RECORD_BUTTON, lessonHasOral, findOralLesson, validateOralVoice, getOralAttendance, markOralAttendance, listOralAttendance, oralPromptText, oralAcceptedText, oralRejectedText, ORAL_ALREADY_TEXT, ORAL_CANCEL_TEXT, ORAL_NO_LESSON_TEXT, ORAL_LESSON_HAS_NO_ORAL_TEXT, oralOwnListText, oralAdminListText } from "./oral-attendance.js";
 
 // ---- reply-keyboard menus (real buttons under the field, no inline) --------
@@ -8174,6 +8204,34 @@ async function handleUpdate(update, env, ctx) {
       await saveUser(env, userId, { ...(u ?? {}), oralAwaiting: lesson.id, voiceRec: undefined, voicePick: undefined, adminFlow: undefined });
       patchRegisteredCache(userId, { oralAwaiting: lesson.id });
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: oralPromptText(lesson.title) });
+      return;
+    }
+    // Lesson items on demand (user 2026-11-28): the lesson tap sends
+    // only the video; "🗣 الشفوي" sends the lesson's oral-paper photo
+    // and "📝 الامتحان الإلكتروني" sends its exam link, each with the
+    // lesson keyboard re-attached. Both resolve the lesson from
+    // lastLessonId, like the record button above. Like other lesson
+    // taps they leave cert/get-code/name/translate waits — but NOT the
+    // oral wait, so the admin can view the paper while a recording wait
+    // is open.
+    if (text === LESSON_ORAL_BUTTON || text === LESSON_EXAM_BUTTON) {
+      const itemUser = await getUser(env, userId);
+      const lesson = findLearnLesson(itemUser?.lastLessonId);
+      if (!lesson) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "افتح درس الأول من القائمة، وبعدين اضغط الزر." }); return; }
+      if (itemUser?.certAwaiting || itemUser?.getcodeStep || itemUser?.copticNameAwaiting || itemUser?.translateAwaiting) await saveUser(env, userId, { ...itemUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined });
+      const keyboards = await lessonKeyboards(env, userId, lesson);
+      const attachKeyboard = keyboards.lessonListKeyboard ?? keyboards.smallNavKeyboard;
+      if (text === LESSON_ORAL_BUTTON) {
+        if (!lessonHasOral(lesson)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: ORAL_LESSON_HAS_NO_ORAL_TEXT, reply_markup: attachKeyboard }); return; }
+        const state = await loadImportState(env);
+        const entry = state.items[learnItemKey(lesson.id, "oral")];
+        if (entry?.status !== "done" || !entry.fileId) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "⚠️ ورقة الشفوي لسه مش جاهزة — جرّب لاحقًا.", reply_markup: attachKeyboard }); return; }
+        await sendLessonPlanStep(env, message.chat.id, userId, { kind: "photo", fileId: entry.fileId, caption: lesson.title }, attachKeyboard);
+        return;
+      }
+      const examItem = lesson.items.find((item) => item?.key === "exam");
+      if (!examItem || !String(examItem.url ?? "").trim()) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "الدرس ده مفيهوش امتحان إلكتروني.", reply_markup: attachKeyboard }); return; }
+      await sendLessonPlanStep(env, message.chat.id, userId, { kind: "url", url: String(examItem.url).trim(), label: cleanButtonLabel(examItem.label) || LESSON_EXAM_BUTTON }, attachKeyboard);
       return;
     }
     const chatMenus = await loadMenus(env);
