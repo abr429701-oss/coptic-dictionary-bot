@@ -473,6 +473,53 @@ test("getcode: the stored record survives the screenshot reply, so /getcode stil
   assert.ok(anyMessage(again, /مرحباً، أحمد محمد علي، الرقم الكودي الخاص بك هو 13580245/));
 });
 
+// ---------------------------------------------------------------------------
+// /resetcode (2026-11-28): hidden admin-only — clears the caller's own
+// stored get-code record so the next /getcode runs the full flow again.
+// Same phone → same code (last 8 digits + 1234567); the reset re-opens
+// the FLOW, it never mints a new code.
+// ---------------------------------------------------------------------------
+
+const ADMIN = 813894692; // DEFAULT_ADMIN_IDS in src/index.js
+
+test("getcode: /resetcode (admin) clears the stored record and the next /getcode asks for the name again", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await completeGetCode(kvEnv, ADMIN);
+  assert.equal(kvEnv.USERS.store.get(`user:${ADMIN}`).getcodeScreenshotCode, "13580245");
+  const reset = await sayMsg(kvEnv, ADMIN, "/resetcode");
+  assert.ok(anyMessage(reset, /تم مسح الرقم الكودي المسجّل — ابعت \/getcode من الأول\./), "the admin gets one confirmation line");
+  const stored = kvEnv.USERS.store.get(`user:${ADMIN}`);
+  assert.equal(stored.getcodeScreenshotName, undefined, "the stored name is gone");
+  assert.equal(stored.getcodeScreenshotCode, undefined, "the stored code is gone");
+  assert.equal(stored.getcodeScreenshotAwaiting, undefined, "any open wait is gone too");
+  const again = await sayMsg(kvEnv, ADMIN, "/getcode");
+  assert.ok(anyMessage(again, /اكتب اسمك الثلاثي/), "the next /getcode asks for the name again");
+  assert.ok(!anyMessage(again, /مرحباً،/), "no returning-user greeting after a reset");
+});
+
+test("getcode: /resetcode (admin) clears an open screenshot wait, so a later photo does not activate", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await completeGetCode(kvEnv, ADMIN);
+  assert.equal(kvEnv.USERS.store.get(`user:${ADMIN}`).getcodeScreenshotAwaiting, true);
+  await sayMsg(kvEnv, ADMIN, "/resetcode");
+  const stored = kvEnv.USERS.store.get(`user:${ADMIN}`);
+  assert.equal(stored.getcodeScreenshotAwaiting, undefined);
+  assert.equal(stored.getcodeScreenshotCode, undefined);
+  const photo = await sendPhotoMsg(kvEnv, ADMIN);
+  assert.ok(!anyMessage(photo, /تم تفعيل اشتراكك عزيزنا/), "a photo after a reset must not activate");
+});
+
+test("getcode: /resetcode from a non-admin gets no reply and the record survives", async () => {
+  const kvEnv = { ...env, USERS: fakeKv() };
+  await completeGetCode(kvEnv, USER);
+  const reset = await sayMsg(kvEnv, USER, "/resetcode");
+  assert.equal(messageTexts(reset).length, 0, "a student typing /resetcode gets no reply at all");
+  const stored = kvEnv.USERS.store.get(`user:${USER}`);
+  assert.equal(stored.getcodeScreenshotCode, "13580245", "the record survives a non-admin /resetcode");
+  const again = await sayMsg(kvEnv, USER, "/getcode");
+  assert.ok(anyMessage(again, /مرحباً، أحمد محمد علي، الرقم الكودي الخاص بك هو 13580245/), "the returning-user greeting still works");
+});
+
 test("getcode: a very long name falls back to text + bare photo (caption cap)", async () => {
   const longName = "أ".repeat(120);
   assert.ok(buildGetCodeReply(longName, "13580245").length > 1024, "the caption would exceed the cap");

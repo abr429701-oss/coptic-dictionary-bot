@@ -851,6 +851,19 @@ async function handleGetCodeStep(env, chatId, userId, text, user) {
   await telegram(env, "sendMessage", { chat_id: chatId, text: `⚠️ تعذّر إحضار الرقم الكودي مباشرة من البوت حاليًا.\n\n${LEARN_GET_CODE_TEXT}`, disable_web_page_preview: true });
 }
 
+// /resetcode — hidden admin-only (2026-11-28): the admin already has a
+// stored get-code record, so /getcode only returns the returning-user
+// greeting and he can never re-test the full flow. This clears the
+// caller's own stored name+code (and any open get-code wait), so the
+// next /getcode asks for name, then phone, and runs the full caption +
+// screenshot + OCR path again. Same phone → same code (last 8 digits +
+// 1234567); the reset re-opens the FLOW, it never mints a new code.
+async function resetGetCodeRecord(env, chatId, userId) {
+  const user = await getUser(env, userId);
+  await saveUser(env, userId, { ...(user ?? {}), getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined, getcodeScreenshotName: undefined, getcodeScreenshotCode: undefined });
+  await telegram(env, "sendMessage", { chat_id: chatId, text: "تم مسح الرقم الكودي المسجّل — ابعت /getcode من الأول." });
+}
+
 // Screenshot OCR verification (2026-11-28): download the photo the
 // student sent back (getFile + file download, same pattern as the voice
 // handling) and OCR it (OCR.space, key from the OCR_SPACE_API_KEY
@@ -9004,6 +9017,11 @@ async function handleUpdate(update, env, ctx) {
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: oralAdminListText(entries) });
       return;
     }
+    // /resetcode — hidden admin-only: clear the caller's own stored
+    // get-code record so the next /getcode runs the full flow again
+    // (re-test). Not in /start, /help or the side menu; a student
+    // typing /resetcode gets no reply at all (general section below).
+    if (text === "/resetcode") { await resetGetCodeRecord(env, message.chat.id, userId); return; }
     // /translate — sentence translator (admin-only, Telegram-only experiment):
     // multi-word input → sentence translation; a single word falls through to
     // the public /translate word view; bare /translate asks for a sentence.
@@ -9274,6 +9292,11 @@ async function handleUpdate(update, env, ctx) {
   // /attendance gets no reply at all. (The student's own list returns
   // when the user opens the feature to students.)
   if (text === "/attendance") {
+    return;
+  }
+  // /resetcode — admin-only (2026-11-28): a student typing it gets no
+  // reply at all.
+  if (text === "/resetcode") {
     return;
   }
   if (text === "/mystats") { await sendMyStats(env, message.chat.id, userId, displayName(message.from)); return; }
