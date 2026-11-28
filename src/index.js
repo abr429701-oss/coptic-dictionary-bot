@@ -905,14 +905,13 @@ async function sendLessonPlanStep(env, chatId, userId, step, attachKeyboard) {
   }
 }
 
-// The keyboards shown with a lesson: the small nav (Previous/Next +
-// Back/Home) and the level-menu lesson list. Both carry the on-demand
-// item buttons and (admin only) the oral-record button. The lesson list
-// stays visible (user 2026-11-23): the level menu's lesson-name keyboard
-// stays on screen while a lesson plays, so the user can tap another
-// lesson directly. No inline, ever. Siblings come from the stored level
-// menu's lesson buttons, in order; if the menu is not stored yet, the
-// nav falls back to the small Previous/Next + Back/Home keyboard.
+// The keyboard shown with a lesson (user 2026-11-28, REVERSING the
+// 2026-11-23 rule): ONLY this lesson's keyboard — the small nav
+// (Previous/Next + Back/Home) plus the on-demand item buttons and
+// (admin only) the oral-record button. The lesson list HIDES while a
+// lesson plays, so the user sees just this lesson's buttons; "🔙 رجوع"
+// brings the level menu (the lesson list) back. No inline, ever.
+// Siblings come from the stored level menu's lesson buttons, in order.
 async function lessonKeyboards(env, userId, lesson) {
   const lessonId = lesson.id;
   const levelMenuId = (LEARN_LEVELS.find((l) => l.lessons.some((x) => x.id === lessonId)) ?? {}).id ?? "m_learn_l1";
@@ -944,20 +943,8 @@ async function lessonKeyboards(env, userId, lesson) {
   // button at all (L1 intro lessons + all of L2).
   const hasOral = lessonHasOral(lesson) && isAdmin(env, userId);
   if (hasOral) navRows.push([{ text: ORAL_RECORD_BUTTON }]);
-  const smallNavKeyboard = { keyboard: navRows, resize_keyboard: true };
-  // The level menu keyboard (lesson names, cert, search, back, home)
-  // with Previous/Next on top when applicable. Null when the level menu
-  // is not stored yet — the caller falls back to the small nav.
-  let lessonListKeyboard = null;
-  if (levelMenu) {
-    const menuKb = buildReplyMenuKeyboard(storedMenus, levelMenu, { isAdmin: isAdmin(env, userId) });
-    const rows = [...(menuKb?.keyboard ?? [])];
-    if (stepRow.length) rows.unshift(stepRow);
-    if (itemButtons.length) rows.push(itemButtons);
-    if (hasOral) rows.push([{ text: ORAL_RECORD_BUTTON }]);
-    if (rows.length) lessonListKeyboard = { keyboard: rows, resize_keyboard: true };
-  }
-  return { lessonListKeyboard, smallNavKeyboard };
+  const lessonKeyboard = { keyboard: navRows, resize_keyboard: true };
+  return { lessonKeyboard };
 }
 
 // One tap on a lesson button sends the lesson's VIDEO only (user
@@ -979,7 +966,7 @@ async function sendLearnLesson(env, chatId, userId, lessonId, reactMessageId = u
     await telegram(env, "sendMessage", { chat_id: chatId, text: "⚠️ هذا الدرس ليس جاهزًا بعد — جرّب لاحقًا أو أبلغ الإدارة." });
     return;
   }
-  const { lessonListKeyboard, smallNavKeyboard } = await lessonKeyboards(env, userId, lesson);
+  const { lessonKeyboard } = await lessonKeyboards(env, userId, lesson);
   // Remember the lesson so the nav keyboard's Previous/Next taps (plain
   // text) can find the sibling in the next update.
   const lessonUser = await getUser(env, userId);
@@ -989,15 +976,12 @@ async function sendLearnLesson(env, chatId, userId, lessonId, reactMessageId = u
   for (let i = 0; i < stepsToSend.length; i++) {
     const step = stepsToSend[i];
     const isLast = i === stepsToSend.length - 1;
-    // The lesson list stays visible (user 2026-11-23): the level menu
-    // keyboard is attached to the FIRST lesson message and again to the
-    // LAST one, so the lesson names stay on screen and the user can pick
-    // another lesson directly. Falls back to the small nav when the level
-    // menu is not stored yet (and to remove_keyboard on the first step
-    // of a single-step lesson in that case, as before).
-    const attachKeyboard = i === 0
-      ? (lessonListKeyboard ?? { remove_keyboard: true })
-      : (isLast ? (lessonListKeyboard ?? smallNavKeyboard) : undefined);
+    // The lesson list hides while a lesson plays (user 2026-11-28,
+    // reversing the 2026-11-23 rule): only this lesson's keyboard —
+    // its item buttons + small nav — is attached to the FIRST and
+    // LAST video steps, so the user sees just this lesson's buttons.
+    // "🔙 رجوع" brings the level menu (the lesson list) back.
+    const attachKeyboard = (i === 0 || isLast) ? lessonKeyboard : undefined;
     await sendLessonPlanStep(env, chatId, userId, step, attachKeyboard);
   }
   // ❤️ on the user's tap, like the word cards (user 2026-11-25): the
@@ -8265,8 +8249,7 @@ async function handleUpdate(update, env, ctx) {
       const lesson = findLearnLesson(itemUser?.lastLessonId);
       if (!lesson) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "افتح درس الأول من القائمة، وبعدين اضغط الزر." }); return; }
       if (itemUser?.certAwaiting || itemUser?.getcodeStep || itemUser?.getcodeScreenshotAwaiting || itemUser?.copticNameAwaiting || itemUser?.translateAwaiting) await saveUser(env, userId, { ...itemUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined });
-      const keyboards = await lessonKeyboards(env, userId, lesson);
-      const attachKeyboard = keyboards.lessonListKeyboard ?? keyboards.smallNavKeyboard;
+      const { lessonKeyboard: attachKeyboard } = await lessonKeyboards(env, userId, lesson);
       if (text === LESSON_ORAL_BUTTON) {
         if (!lessonHasOral(lesson)) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: ORAL_LESSON_HAS_NO_ORAL_TEXT, reply_markup: attachKeyboard }); return; }
         const state = await loadImportState(env);
@@ -8293,6 +8276,26 @@ async function handleUpdate(update, env, ctx) {
       if (!examItem || !String(examItem.url ?? "").trim()) { await telegram(env, "sendMessage", { chat_id: message.chat.id, text: "الدرس ده مفيهوش امتحان إلكتروني.", reply_markup: attachKeyboard }); return; }
       await sendLessonPlanStep(env, message.chat.id, userId, { kind: "url", url: String(examItem.url).trim(), label: cleanButtonLabel(examItem.label) || LESSON_EXAM_BUTTON }, attachKeyboard);
       return;
+    }
+    // "🔙 رجوع" from an open lesson goes back to the LEVEL menu (the
+    // lesson list) — user 2026-11-28. Without this the tap would resolve
+    // to the level menu's own "🔙 رجوع" button (a /menu command) and land
+    // on the level picker instead — that is what Back did before this
+    // change, verified by webhook test 2026-11-28. The intercept fires
+    // only while a lesson is open (lastLessonId set and the nav still on
+    // that lesson's level menu); lastLessonId is dropped, so a second
+    // "🔙 رجوع" inside the level menu keeps its old meaning (the level
+    // picker). The flows are left, like any other menu tap.
+    if (text === "🔙 رجوع") {
+      const backUser = await getUser(env, userId);
+      const backLesson = findLearnLesson(backUser?.lastLessonId);
+      const backLevel = backLesson ? LEARN_LEVELS.find((l) => l.lessons.some((x) => x.id === backLesson.id)) : null;
+      if (backLesson && backLevel && (await menuNavOf(env, userId, known)) === backLevel.id) {
+        if (backUser?.certAwaiting || backUser?.getcodeStep || backUser?.getcodeScreenshotAwaiting || backUser?.copticNameAwaiting || backUser?.translateAwaiting || backUser?.oralAwaiting) await saveUser(env, userId, { ...backUser, certAwaiting: undefined, getcodeStep: undefined, getcodeName: undefined, getcodeScreenshotAwaiting: undefined, copticNameAwaiting: undefined, translateAwaiting: undefined, oralAwaiting: undefined, lastLessonId: undefined });
+        else await saveUser(env, userId, { ...backUser, lastLessonId: undefined });
+        await openReplyMenu(env, message.chat.id, userId, backLevel.id);
+        return;
+      }
     }
     const chatMenus = await loadMenus(env);
     const navId = await menuNavOf(env, userId, known);

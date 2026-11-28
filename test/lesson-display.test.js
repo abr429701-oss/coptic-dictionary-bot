@@ -2,8 +2,11 @@
 // ONLY the video; the oral paper, the exam link, the L2 summary photo
 // and the L2 exercise text arrive on demand from the "🗣 الشفوي" /
 // "📝 الامتحان الإلكتروني" / "🖼 ملخص الدرس" / "📝 التدريب"
-// reply-keyboard buttons. The lesson-list keyboard stays visible, and
-// the admin-only "🎙 سجّل الشفوي" record button is untouched.
+// reply-keyboard buttons. The lesson list HIDES while a lesson plays
+// (user 2026-11-28, reversing the 2026-11-23 rule): the lesson view
+// shows only that lesson's item buttons + small nav, and "🔙 رجوع"
+// brings the level menu (the lesson list) back. The admin-only
+// "🎙 سجّل الشفوي" record button is untouched.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -133,7 +136,8 @@ test("lesson tap sends ONLY the video; keyboard has both item buttons, no record
   const videoCall = videos(calls)[0];
   assert.ok(keyboardHasRow(videoCall, "🗣 الشفوي", "📝 الامتحان الإلكتروني"), "both item buttons are on the keyboard");
   assert.ok(!keyboardHas(videoCall, ORAL_RECORD_BUTTON), "the admin-only record button stays hidden from students");
-  assert.ok(keyboardHas(videoCall, L1_03_LABEL), "the lesson list stays visible");
+  assert.ok(!keyboardHas(videoCall, L1_03_LABEL), "the lesson list hides while a lesson plays");
+  assert.ok(!keyboardHas(videoCall, L1_02_LABEL), "no other lesson button shows either");
 });
 
 test("oral button sends the lesson's oral photo with the lesson keyboard", async () => {
@@ -144,7 +148,8 @@ test("oral button sends the lesson's oral photo with the lesson keyboard", async
   assert.equal(photos(calls).length, 1, "the oral photo is sent on demand");
   assert.equal(photos(calls)[0].payload?.photo, "photo-l1-03-oral");
   assert.equal(photos(calls)[0].payload?.caption, L1_03_LABEL);
-  assert.ok(keyboardHas(photos(calls)[0], L1_03_LABEL), "the lesson keyboard is re-attached");
+  assert.ok(!keyboardHas(photos(calls)[0], L1_03_LABEL), "the lesson list stays hidden on the item reply");
+  assert.ok(!keyboardHas(photos(calls)[0], L1_02_LABEL), "no other lesson button shows either");
   assert.ok(keyboardHas(photos(calls)[0], "📝 الامتحان الإلكتروني"), "the exam button stays on the keyboard");
 });
 
@@ -159,6 +164,7 @@ test("exam button sends the lesson's exam link with no preview", async () => {
   assert.equal(exam.disable_web_page_preview, true, "no link preview");
   const examCall = calls.find((c) => c.url.endsWith("/sendMessage") && String(c.payload?.text ?? "").includes(L1_03_EXAM));
   assert.ok(keyboardHas(examCall, "🗣 الشفوي"), "the lesson keyboard is re-attached");
+  assert.ok(!keyboardHas(examCall, L1_03_LABEL), "the lesson list stays hidden on the exam reply");
 });
 
 test("lesson without oral or exam shows neither button", async () => {
@@ -182,6 +188,7 @@ test("L2 lesson: exam button appears, oral button does not; summary is not auto-
   const videoCall = videos(calls)[0];
   assert.ok(keyboardHas(videoCall, "📝 الامتحان الإلكتروني"), "the exam button appears where an exam item exists");
   assert.ok(!keyboardHas(videoCall, "🗣 الشفوي"), "no oral button in L2 (no oral items there)");
+  assert.ok(!keyboardHas(videoCall, L2_03_LABEL), "the lesson list hides while a lesson plays");
   const examCalls = await say(kvEnv, STUDENT, "📝 الامتحان الإلكتروني", 102);
   assert.ok(messages(examCalls).some((m) => String(m.text ?? "").includes(L2_03_EXAM)), "the L2 exam link is sent on demand");
 });
@@ -229,6 +236,7 @@ test("L2 lesson tap: video only; keyboard has summary + exercise, no oral, no ex
   assert.ok(keyboardHasRow(videoCall, "🖼 ملخص الدرس", "📝 التدريب"), "both new buttons are on the keyboard");
   assert.ok(!keyboardHas(videoCall, "🗣 الشفوي"), "no oral button in L2");
   assert.ok(!keyboardHas(videoCall, "📝 الامتحان الإلكتروني"), "no exam button without an exam item");
+  assert.ok(!keyboardHas(videoCall, L2_02_LABEL), "the lesson list hides while a lesson plays");
 });
 
 test("summary button sends the lesson's summary photo with the lesson keyboard", async () => {
@@ -239,7 +247,7 @@ test("summary button sends the lesson's summary photo with the lesson keyboard",
   assert.equal(photos(calls).length, 1, "the summary photo is sent on demand");
   assert.equal(photos(calls)[0].payload?.photo, "photo-l2-02-summary");
   assert.equal(photos(calls)[0].payload?.caption, L2_02_LABEL);
-  assert.ok(keyboardHas(photos(calls)[0], L2_02_LABEL), "the lesson keyboard is re-attached");
+  assert.ok(!keyboardHas(photos(calls)[0], L2_02_LABEL), "the lesson list stays hidden on the item reply");
   assert.ok(keyboardHas(photos(calls)[0], "📝 التدريب"), "the exercise button stays on the keyboard");
 });
 
@@ -253,6 +261,7 @@ test("exercise button sends the lesson's exercise text", async () => {
   assert.ok(!String(exercise.text).includes("docs.google.com/forms"), "the exercise is not the exam link");
   const exerciseCall = calls.find((c) => c.url.endsWith("/sendMessage") && String(c.payload?.text ?? "").includes("التدريب الأول"));
   assert.ok(keyboardHas(exerciseCall, "🖼 ملخص الدرس"), "the lesson keyboard is re-attached");
+  assert.ok(!keyboardHas(exerciseCall, L2_02_LABEL), "the lesson list stays hidden on the exercise reply");
 });
 
 test("summary/exercise buttons on a lesson without them answer plainly", async () => {
@@ -285,4 +294,60 @@ test("exercise and exam labels never confuse each other (lesson with both)", asy
   const examCalls = await say(kvEnv, STUDENT, "📝 الامتحان الإلكتروني", 103);
   assert.ok(messages(examCalls).some((m) => String(m.text ?? "").includes(L2_06_EXAM)), "exam button sends the exam link");
   assert.ok(!messages(examCalls).some((m) => String(m.text ?? "").includes("التدريب الثالث")), "exam button does NOT send the exercise text");
+});
+
+test("🔙 رجوع from a lesson returns to the level menu (lesson list); a second 🔙 رجوع goes to the level picker", async () => {
+  // Fresh user id (not 66): the module-level registeredCache is keyed by
+  // user id, so reusing 66 would leak another test's nav state here.
+  const USER = 67;
+  const kvEnv = { ...env, USERS: fakeKv() };
+  // Production-shaped level menu (as buildLearnMenus builds it): lesson
+  // buttons plus the explicit "🔙 رجوع" / "🏠 الرئيسية" command buttons.
+  // Without the intercept, Back would follow the level menu's own
+  // "🔙 رجوع" button (a /menu command) straight to the level picker.
+  seedUser(kvEnv, USER, "Tester", { menuNav: "m_learn_l1" });
+  seedMenu(kvEnv, "m_learn_l1", [
+    { id: "b-l1-03", label: L1_03_LABEL, kind: "lesson", lessonId: "m_learn_l1_03" },
+    { id: "b-l1-02", label: L1_02_LABEL, kind: "lesson", lessonId: "m_learn_l1_02" },
+    { id: "b-l1-back", label: "🔙 رجوع", kind: "command", command: "/menu" },
+    { id: "b-l1-home", label: "🏠 الرئيسية", kind: "command", command: "/menu" },
+  ]);
+  seedImportState(kvEnv, { "m_learn_l1_03:video": "vid-l1-03", "m_learn_l1_03:oral": "photo-l1-03-oral", "m_learn_l1_02:video": "vid-l1-02" });
+  await say(kvEnv, USER, L1_03_LABEL, 101);
+  assert.equal(kvEnv.USERS.store.get(`user:${USER}`).lastLessonId, "m_learn_l1_03");
+  const backCalls = await say(kvEnv, USER, "🔙 رجوع", 102);
+  const levelMenuCall = messages(backCalls).find((m) => (m.reply_markup?.keyboard ?? []).flat().some((b) => b.text === L1_03_LABEL));
+  assert.ok(levelMenuCall, "Back re-opens the level menu with the lesson list");
+  assert.ok(messages(backCalls).some((m) => (m.reply_markup?.keyboard ?? []).flat().some((b) => b.text === L1_02_LABEL)), "the level menu shows all lessons again");
+  assert.equal(kvEnv.USERS.store.get(`user:${USER}`).lastLessonId, undefined, "Back clears the open-lesson state");
+  assert.equal(kvEnv.USERS.store.get(`user:${USER}`).menuNav, "m_learn_l1", "the nav stays on the level menu");
+  // A second Back inside the level menu keeps its old meaning: the level picker.
+  const back2Calls = await say(kvEnv, USER, "🔙 رجوع", 103);
+  assert.ok(messages(back2Calls).some((m) => String(m.text ?? "").includes("أختر المستوى لبدء تعلم اللغة القبطية")), "second Back goes to the level picker");
+});
+
+test("التالي keeps the new keyboard: next lesson's video has item buttons and no lesson list", async () => {
+  // Fresh user id (not 66): the module-level registeredCache is keyed by
+  // user id, so reusing 66 would leak another test's nav state here.
+  const USER = 68;
+  const kvEnv = { ...env, USERS: fakeKv() };
+  // Seeded menu in manifest order: Next from 03 opens 04 ("الدرس الثاني").
+  seedUser(kvEnv, USER, "Tester", { menuNav: "m_learn_l1" });
+  seedMenu(kvEnv, "m_learn_l1", [
+    { id: "b-l1-02", label: L1_02_LABEL, kind: "lesson", lessonId: "m_learn_l1_02" },
+    { id: "b-l1-03", label: L1_03_LABEL, kind: "lesson", lessonId: "m_learn_l1_03" },
+    { id: "b-l1-04", label: "الدرس الثاني", kind: "lesson", lessonId: "m_learn_l1_04" },
+  ]);
+  seedImportState(kvEnv, { "m_learn_l1_02:video": "vid-l1-02", "m_learn_l1_03:video": "vid-l1-03", "m_learn_l1_03:oral": "photo-l1-03-oral", "m_learn_l1_04:video": "vid-l1-04", "m_learn_l1_04:oral": "photo-l1-04-oral" });
+  await say(kvEnv, USER, L1_03_LABEL, 101);
+  const calls = await say(kvEnv, USER, "التالي ⏭", 102);
+  assert.equal(videos(calls).length, 1, "the next lesson's video is sent");
+  assert.match(String(videos(calls)[0].payload?.caption ?? ""), /الدرس الثاني/u);
+  const videoCall = videos(calls)[0];
+  assert.ok(!keyboardHas(videoCall, L1_03_LABEL), "no lesson list on the next lesson either");
+  assert.ok(!keyboardHas(videoCall, L1_02_LABEL), "no other lesson button shows either");
+  assert.ok(!keyboardHas(videoCall, "الدرس الثاني"), "the next lesson's own name is not a button either");
+  assert.ok(keyboardHas(videoCall, "⏮ السابق"), "Previous is on the keyboard");
+  assert.ok(keyboardHasRow(videoCall, "🗣 الشفوي", "📝 الامتحان الإلكتروني"), "the next lesson's item buttons are on the keyboard");
+  assert.ok(keyboardHas(videoCall, "🔙 رجوع"), "Back is on the keyboard");
 });

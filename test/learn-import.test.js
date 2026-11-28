@@ -978,7 +978,7 @@ test("learn-import: /__learn-import merges instead of replacing all menus", asyn
 });
 
 // ---------------------------------------------------------------------------
-// One tap sends the whole lesson, in order
+// One tap sends the lesson's video only; the rest arrives on demand
 // ---------------------------------------------------------------------------
 
 test("learn-import: plain tap on a lesson sends only the video; oral + exam arrive on demand", async () => {
@@ -993,16 +993,16 @@ test("learn-import: plain tap on a lesson sends only the video; oral + exam arri
   // only — the oral photo and the exam link are on-demand buttons now.
   assert.deepEqual(calls.map((c) => c.method), ["sendVideo"]);
   assert.match(String(calls[0].payload?.caption ?? ""), /الدرس الاول/u);
-  // The lesson list stays visible (user 2026-11-23): the first message
-  // carries the level menu's lesson-name keyboard (Previous/Next on top,
-  // lesson names, Back/Home at the bottom), so the user can tap another
-  // lesson directly — plus the on-demand item buttons.
+  // Lesson display restructure (user 2026-11-28, reversing the
+  // 2026-11-23 rule): the lesson list HIDES while a lesson plays — the
+  // first message carries only this lesson's keyboard (Previous/Next on
+  // top, Back/Home, plus the on-demand item buttons), no lesson names.
   const firstKb = calls[0].payload?.reply_markup;
   assert.ok(Array.isArray(firstKb?.keyboard), "first lesson message carries a reply keyboard");
   const firstLabels = firstKb.keyboard.flat().map((b) => b.text);
-  assert.ok(firstLabels.includes("⏮ السابق") && firstLabels.includes("التالي ⏭"), "lesson list keyboard has Previous/Next on top");
-  assert.ok(firstLabels.includes("الدرس الاول"), "lesson list keyboard shows the lesson names");
-  assert.ok(firstLabels.includes("🔙 رجوع") && firstLabels.includes("🏠 الرئيسية"), "lesson list keyboard has Back/Home");
+  assert.ok(firstLabels.includes("⏮ السابق") && firstLabels.includes("التالي ⏭"), "lesson keyboard has Previous/Next on top");
+  assert.ok(!firstLabels.includes("الدرس الاول"), "lesson keyboard hides the lesson names");
+  assert.ok(firstLabels.includes("🔙 رجوع") && firstLabels.includes("🏠 الرئيسية"), "lesson keyboard has Back/Home");
   assert.ok(firstLabels.includes("🗣 الشفوي") && firstLabels.includes("📝 الامتحان الإلكتروني"), "lesson keyboard has the on-demand item buttons");
   assert.ok(!firstLabels.includes("🎙 سجّل الشفوي"), "the admin-only record button stays hidden from students");
   // On demand: the oral photo, then the exam link.
@@ -1012,15 +1012,15 @@ test("learn-import: plain tap on a lesson sends only the video; oral + exam arri
   const examCalls = await sayMsg(kvEnv, 57, "📝 الامتحان الإلكتروني");
   const exam = examCalls.find((c) => c.method === "sendMessage")?.payload;
   assert.match(exam.text, /^📝 الامتحان الإلكتروني: https:\/\/docs\.google\.com\/forms\//u);
-  // The last lesson message carries the same lesson-list keyboard — no
-  // inline, ever. ("الدرس الاول" is the third button in the stored level
+  // The last lesson message carries the same lesson keyboard — no
+  // inline, ever, and no lesson names. ("الدرس الاول" is the third button in the stored level
   // menu — the manifest titles do not follow the id order — so it has
   // both a Previous and a Next.)
   const lastKb = exam.reply_markup;
-  assert.ok(Array.isArray(lastKb?.keyboard), "exam message carries the lesson-list keyboard");
+  assert.ok(Array.isArray(lastKb?.keyboard), "exam message carries the lesson keyboard");
   const lastLabels = lastKb.keyboard.flat().map((b) => b.text);
   assert.ok(lastLabels.includes("⏮ السابق") && lastLabels.includes("التالي ⏭"), "last keyboard has Previous/Next");
-  assert.ok(lastLabels.includes("الدرس الاول"), "last keyboard shows the lesson names");
+  assert.ok(!lastLabels.includes("الدرس الاول"), "last keyboard hides the lesson names");
   assert.ok(lastLabels.includes("🔙 رجوع") && lastLabels.includes("🏠 الرئيسية"), "last keyboard has Back/Home");
 });
 
@@ -1099,14 +1099,15 @@ test("learn-import: inline tap on an L2 lesson sends only the video; exercise + 
   const calls = await tapCallback(kvEnv, 57, "mb|btn|m_learn_l2|b_learn_l2_06");
   assert.deepEqual(calls.map((c) => c.method), ["answerCallbackQuery", "sendVideo"]);
   assert.match(String(calls[1].payload?.caption ?? ""), /الدرس السادس/u);
-  // The lesson list stays visible (user 2026-11-23): the first message
-  // carries the level menu's lesson-name keyboard.
+  // The lesson list hides while a lesson plays (user 2026-11-28,
+  // reversing the 2026-11-23 rule): the first message carries only
+  // this lesson's keyboard, no lesson names.
   const firstKb = calls[1].payload?.reply_markup;
   assert.ok(Array.isArray(firstKb?.keyboard), "first lesson message carries a reply keyboard");
   const firstLabels = firstKb.keyboard.flat().map((b) => b.text);
-  assert.ok(firstLabels.includes("⏮ السابق") && firstLabels.includes("التالي ⏭"), "lesson list keyboard has Previous/Next on top");
-  assert.ok(firstLabels.includes("الدرس السادس"), "lesson list keyboard shows the lesson names");
-  assert.ok(firstLabels.includes("🔙 رجوع") && firstLabels.includes("🏠 الرئيسية"), "lesson list keyboard has Back/Home");
+  assert.ok(firstLabels.includes("⏮ السابق") && firstLabels.includes("التالي ⏭"), "lesson keyboard has Previous/Next on top");
+  assert.ok(!firstLabels.includes("الدرس السادس"), "lesson keyboard hides the lesson names");
+  assert.ok(firstLabels.includes("🔙 رجوع") && firstLabels.includes("🏠 الرئيسية"), "lesson keyboard has Back/Home");
   assert.ok(firstLabels.includes("📝 الامتحان الإلكتروني"), "the exam button appears where an exam item exists");
   assert.ok(!firstLabels.includes("🗣 الشفوي"), "no oral button in L2 (no oral items there)");
   // Nothing else is auto-sent: no summary photo, no exercise text, no exam link.
@@ -1117,10 +1118,10 @@ test("learn-import: inline tap on an L2 lesson sends only the video; exercise + 
   const exam = examCalls.find((c) => c.method === "sendMessage")?.payload;
   assert.match(exam.text, /^📝 الامتحان الإلكتروني: https:\/\/docs\.google\.com\/forms\//u);
   const lastKb = exam.reply_markup;
-  assert.ok(Array.isArray(lastKb?.keyboard), "exam message carries the lesson-list keyboard");
+  assert.ok(Array.isArray(lastKb?.keyboard), "exam message carries the lesson keyboard");
   const lastLabels = lastKb.keyboard.flat().map((b) => b.text);
   assert.ok(lastLabels.includes("⏮ السابق") && lastLabels.includes("التالي ⏭"), "last keyboard has Previous/Next");
-  assert.ok(lastLabels.includes("الدرس السادس"), "last keyboard shows the lesson names");
+  assert.ok(!lastLabels.includes("الدرس السادس"), "last keyboard hides the lesson names");
   assert.ok(lastLabels.includes("🔙 رجوع") && lastLabels.includes("🏠 الرئيسية"), "last keyboard has Back/Home");
 });
 
@@ -1159,10 +1160,11 @@ test("learn-import: a failed oral photo does not break the lesson", async () => 
   assert.ok(messageTexts(calls).some((t) => /تعذّر إرسال هذا المحتوى/u.test(t)), "generic failure message must be sent");
   assert.ok(messageTexts(calls).some((t) => /wrong file identifier/u.test(t)), "admin sees the real reason");
   assert.ok(!messageTexts(calls).some((t) => /docs\.google\.com\/forms/u.test(t)), "no exam link is sent");
-  // The lesson list stays visible (user 2026-11-23) even after a failed item.
+  // The lesson list hides while a lesson plays (user 2026-11-28,
+  // reversing the 2026-11-23 rule) even after a failed item.
   const failed = calls.find((c) => c.method === "sendMessage" && /تعذّر إرسال هذا المحتوى/u.test(String(c.payload?.text ?? "")))?.payload;
   const lastKb = failed?.reply_markup;
-  assert.ok(Array.isArray(lastKb?.keyboard), "failure message carries the lesson-list keyboard even after a failed item");
+  assert.ok(Array.isArray(lastKb?.keyboard), "failure message carries the lesson keyboard even after a failed item");
   const lastLabels = lastKb.keyboard.flat().map((b) => b.text);
   assert.ok(lastLabels.includes("⏮ السابق") && lastLabels.includes("التالي ⏭"), "last keyboard has Previous/Next");
   assert.ok(lastLabels.includes("🔙 رجوع") && lastLabels.includes("🏠 الرئيسية"), "last keyboard has Back/Home");
