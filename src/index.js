@@ -10015,6 +10015,14 @@ export default {
       const name = String(body.name ?? "").trim();
       const phone = String(body.phone ?? "");
       if (!name || !getCodePhoneValid(phone)) return Response.json({ ok: false, error: "bad-input" }, { status: 400 });
+      // Returning student (2026-11-28): already activated — the registry
+      // has their code, so return it immediately with NO macro call and
+      // NO screenshot step (same greeting as the bots). A registry-read
+      // failure falls through to the macro path (the old flow).
+      const entry = await getCodeRegistryEntry(env, resolveGetCodeRegistryKey(phone));
+      if (entry) {
+        return Response.json({ ok: true, code: entry.code, name: entry.name, whatsapp: buildGetCodeWhatsAppUrl(entry.code, entry.name), activated: true });
+      }
       const cfg = await driveConfig(env).catch(() => null);
       const result = await getCodeFromMacro(name, phone, cfg?.url ?? null);
       if (!result.code) return Response.json({ ok: false, error: result.error || "macro-unreadable" }, { status: 502 });
@@ -10038,6 +10046,17 @@ export default {
       const code = String(body.code ?? "").trim();
       const imageBase64 = String(body.imageBase64 ?? "").replace(/\s/gu, "").replace(/^data:image\/[a-zA-Z]+;base64,/, "");
       if (!name || name.length > 60 || !getCodePhoneValid(phone) || !/^\d{6,10}$/u.test(code) || !imageBase64) {
+        return Response.json({ ok: false, error: "bad-input" }, { status: 400 });
+      }
+      // The code must be the macro's deterministic code for this phone
+      // (1234567 + last-8-digits — see src/getcode.js): /getcode-verify
+      // trusts a client-sent code, so without this anyone could write an
+      // arbitrary (phone, code) pair into the shared registry with a
+      // blank image (fail-open accept). The legitimate app flow always
+      // sends the code /getcode got from the macro, so it always matches.
+      const foldedPhone = normalizeGetCodePhone(phone);
+      const expectedCode = String(Number(foldedPhone.slice(-8)) + 1234567);
+      if (code !== expectedCode) {
         return Response.json({ ok: false, error: "bad-input" }, { status: 400 });
       }
       // ~1.4M base64 chars ≈ 1 MB decoded — over the OCR limit, so

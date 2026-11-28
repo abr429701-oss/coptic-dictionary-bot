@@ -789,6 +789,9 @@
         body: JSON.stringify({ name: name, phone: phone }),
       }).then(function (r) { return r.json(); }).then(function (data) {
         if (!data || !data.ok || !data.code) throw new Error("lookup failed");
+        // Already activated (2026-11-28): the registry has this student's
+        // code, so show it immediately — no screenshot step.
+        if (data.activated) { showGetCodeResult({ code: data.code, whatsapp: data.whatsapp || "" }); return; }
         showGetCodeScreenshot(name, phone, data.code, data.whatsapp || "");
       }).catch(function () {
         btn.disabled = false;

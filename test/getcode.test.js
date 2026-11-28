@@ -76,9 +76,11 @@ let macroUrls = [];
 // another student's screenshot; activates since 28 Nov ~05:21, when
 // the name check was removed — only the code is checked), "error"
 let ocrMode = "ok";
+let ocrText = null; // when set, the stub returns this OCR text verbatim
 let ocrCalls = [];
 const fakeImageBytes = new Uint8Array(64).fill(7);
 function ocrStubResponse() {
+  if (ocrText) return Response.json({ ParsedResults: [{ ParsedText: ocrText }], OCRExitCode: 1, IsErroredOnProcessing: false });
   const okText = "Coptic\nتم التسجيل، الرقم الكودي الخاص بي: 13580245، اسمي: أحمد محمد علي\n3:12";
   if (ocrMode === "error") return new Response("error", { status: 500 });
   if (ocrMode === "empty") return Response.json({ ParsedResults: [{ ParsedText: "" }], OCRExitCode: 1, IsErroredOnProcessing: false });
@@ -1192,12 +1194,56 @@ test("getcode-verify: bad input → 400 and nothing is written", async () => {
   assert.deepEqual(hit.json, { found: false }, "bad input writes nothing");
 });
 
+test("getcode-verify: a forged code (not the macro formula for the phone) → 400 and nothing is written", async () => {
+  const kvEnv = verifyKvEnv();
+  makeGetCodeFetchStub([]);
+  ocrMode = "ok";
+  ocrCalls = [];
+  // 01012345678 → last 8 digits 12345678 + 1234567 = 13580245; any other
+  // code is forged — the client must send the code /getcode got from the
+  // macro, otherwise anyone could poison the registry with a blank image.
+  const res = await registryFetch(kvEnv, "POST", "/getcode-verify", { body: verifyBody({ code: "99999999" }) });
+  assert.equal(res.status, 400);
+  assert.equal(ocrCalls.length, 0, "a forged code never reaches OCR");
+  const hit = await registryLookup(kvEnv, "201012345678");
+  assert.deepEqual(hit.json, { found: false }, "a forged code writes nothing");
+});
+
 test("getcode-verify: a non-Egyptian phone syncs under its folded digits", async () => {
   const kvEnv = verifyKvEnv();
   makeGetCodeFetchStub([]);
   ocrMode = "ok";
-  const res = await registryFetch(kvEnv, "POST", "/getcode-verify", { body: verifyBody({ phone: "6565666666" }) });
+  // 6565666666 → last 8 digits 65666666 + 1234567 = 66901233 (the macro
+  // formula — /getcode-verify requires the code to match the phone).
+  // The stub OCR text must carry THIS code, or the no-code check rejects.
+  ocrText = "Coptic\nتم التسجيل، الرقم الكودي الخاص بي: 66901233، اسمي: أحمد محمد علي\n3:12";
+  const res = await registryFetch(kvEnv, "POST", "/getcode-verify", { body: verifyBody({ phone: "6565666666", code: "66901233" }) });
   assert.deepEqual(res.json, { ok: true });
   const hit = await registryLookup(kvEnv, "6565666666");
-  assert.deepEqual(hit.json, { found: true, name: "أحمد محمد علي", code: "13580245" });
+  assert.deepEqual(hit.json, { found: true, name: "أحمد محمد علي", code: "66901233" });
+  ocrText = null;
+});
+
+test("getcode: /getcode returns the stored code immediately for an already-activated phone (no macro call, no screenshot)", async () => {
+  const kvEnv = verifyKvEnv();
+  makeGetCodeFetchStub([]);
+  macroBodies.length = 0;
+  // Seed the registry entry exactly as /getcode-verify writes it on
+  // activation, then ask for the code again.
+  const seeded = await registryFetch(kvEnv, "POST", "/getcode-registry", { secret: REGISTRY_SECRET, body: { phone: "01012345678", name: "أحمد محمد علي", code: "13580245" } });
+  assert.deepEqual(seeded.json, { ok: true });
+  const res = await registryFetch(kvEnv, "POST", "/getcode", { body: { name: "أحمد محمد علي", phone: "01012345678" } });
+  assert.deepEqual(res.json, { ok: true, code: "13580245", name: "أحمد محمد علي", whatsapp: buildGetCodeWhatsAppUrl("13580245", "أحمد محمد علي"), activated: true });
+  assert.equal(macroBodies.length, 0, "a registry hit never calls the macro");
+});
+
+test("getcode: /getcode calls the macro for a phone with no registry entry", async () => {
+  const kvEnv = verifyKvEnv();
+  makeGetCodeFetchStub([]);
+  macroBodies.length = 0;
+  const res = await registryFetch(kvEnv, "POST", "/getcode", { body: { name: "أحمد محمد علي", phone: "01012345678" } });
+  assert.equal(res.json.ok, true);
+  assert.equal(res.json.code, "13580245");
+  assert.equal(res.json.activated, undefined, "a first-timer gets no activated flag");
+  assert.equal(macroBodies.length, 1, "a first-timer goes through the macro");
 });
