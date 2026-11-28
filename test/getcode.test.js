@@ -1085,3 +1085,119 @@ test("getcode registry: /resetcode on an old record without a phone clears local
   assert.equal(stored.getcodeScreenshotName, undefined, "the local record is cleared");
   assert.equal(stored.getcodeScreenshotCode, undefined);
 });
+
+// ---------------------------------------------------------------------------
+// Get-code screenshot verification inside the web app (2026-11-28, same
+// as the bots): POST /getcode-verify {name, phone, code, imageBase64} —
+// the app calls it after the student uploads a screenshot of their
+// WhatsApp chat. Same OCR rules as the bots (no name check): reject
+// when the admin number shows as raw digits or the student's own code
+// is absent; fail-open (no key / OCR error / oversize) → accept. On
+// accept the registry entry is written so the bots recognize the
+// student instantly; on reject nothing is written and the app lets the
+// student retry. Fake phones/codes only.
+// ---------------------------------------------------------------------------
+
+function verifyKvEnv(withOcrKey = true) {
+  const base = { ...env, USERS: fakeKv(), GETCODE_REGISTRY_SECRET: REGISTRY_SECRET };
+  return withOcrKey ? { ...base, OCR_SPACE_API_KEY: "test-ocr-key" } : base;
+}
+const verifyImageB64 = Buffer.from(fakeImageBytes).toString("base64");
+function verifyBody(overrides = {}) {
+  return { name: "أحمد محمد علي", phone: "01012345678", code: "13580245", imageBase64: verifyImageB64, ...overrides };
+}
+async function registryLookup(kvEnv, phone) {
+  return registryFetch(kvEnv, "GET", `/getcode-registry?phone=${phone}`, { secret: REGISTRY_SECRET });
+}
+
+test("getcode-verify: an accepted screenshot writes the registry entry", async () => {
+  const kvEnv = verifyKvEnv();
+  makeGetCodeFetchStub([]);
+  ocrMode = "ok";
+  ocrCalls = [];
+  const res = await registryFetch(kvEnv, "POST", "/getcode-verify", { body: verifyBody() });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.json, { ok: true });
+  assert.equal(ocrCalls.length, 1, "the screenshot is OCRed once");
+  const hit = await registryLookup(kvEnv, "201012345678");
+  assert.deepEqual(hit.json, { found: true, name: "أحمد محمد علي", code: "13580245" }, "accept writes the entry under the resolved key");
+});
+
+test("getcode-verify: an unsaved number is rejected and nothing is written", async () => {
+  const kvEnv = verifyKvEnv();
+  makeGetCodeFetchStub([]);
+  ocrMode = "unsaved";
+  const res = await registryFetch(kvEnv, "POST", "/getcode-verify", { body: verifyBody() });
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.json, { ok: false, error: "rejected" });
+  const hit = await registryLookup(kvEnv, "201012345678");
+  assert.deepEqual(hit.json, { found: false }, "a rejection writes nothing");
+});
+
+test("getcode-verify: a screenshot without the code is rejected and nothing is written", async () => {
+  const kvEnv = verifyKvEnv();
+  makeGetCodeFetchStub([]);
+  ocrMode = "nocode";
+  const res = await registryFetch(kvEnv, "POST", "/getcode-verify", { body: verifyBody() });
+  assert.deepEqual(res.json, { ok: false, error: "rejected" });
+  const hit = await registryLookup(kvEnv, "201012345678");
+  assert.deepEqual(hit.json, { found: false });
+});
+
+test("getcode-verify: an OCR error fails open and writes the entry", async () => {
+  const kvEnv = verifyKvEnv();
+  makeGetCodeFetchStub([]);
+  ocrMode = "error";
+  const res = await registryFetch(kvEnv, "POST", "/getcode-verify", { body: verifyBody() });
+  assert.deepEqual(res.json, { ok: true }, "an OCR error must not strand the student");
+  const hit = await registryLookup(kvEnv, "201012345678");
+  assert.equal(hit.json.found, true);
+});
+
+test("getcode-verify: without an OCR key the screenshot is accepted without any OCR call", async () => {
+  const kvEnv = verifyKvEnv(false);
+  makeGetCodeFetchStub([]);
+  ocrMode = "ok";
+  ocrCalls = [];
+  const res = await registryFetch(kvEnv, "POST", "/getcode-verify", { body: verifyBody() });
+  assert.deepEqual(res.json, { ok: true });
+  assert.equal(ocrCalls.length, 0, "no key → no OCR call at all");
+  const hit = await registryLookup(kvEnv, "201012345678");
+  assert.equal(hit.json.found, true);
+});
+
+test("getcode-verify: an oversize image fails open without any OCR call", async () => {
+  const kvEnv = verifyKvEnv();
+  makeGetCodeFetchStub([]);
+  ocrMode = "ok";
+  ocrCalls = [];
+  const big = "A".repeat(1400001);
+  const res = await registryFetch(kvEnv, "POST", "/getcode-verify", { body: verifyBody({ imageBase64: big }) });
+  assert.deepEqual(res.json, { ok: true }, "over the OCR limit → accept");
+  assert.equal(ocrCalls.length, 0, "no OCR call for an oversize image");
+  const hit = await registryLookup(kvEnv, "201012345678");
+  assert.equal(hit.json.found, true);
+});
+
+test("getcode-verify: bad input → 400 and nothing is written", async () => {
+  const kvEnv = verifyKvEnv();
+  makeGetCodeFetchStub([]);
+  ocrMode = "ok";
+  assert.equal((await registryFetch(kvEnv, "POST", "/getcode-verify", { body: verifyBody({ code: "abc" }) })).status, 400, "a non-digit code → 400");
+  assert.equal((await registryFetch(kvEnv, "POST", "/getcode-verify", { body: verifyBody({ phone: "12" }) })).status, 400, "a too-short phone → 400");
+  assert.equal((await registryFetch(kvEnv, "POST", "/getcode-verify", { body: verifyBody({ imageBase64: "" }) })).status, 400, "a missing image → 400");
+  assert.equal((await registryFetch(kvEnv, "POST", "/getcode-verify", { body: verifyBody({ name: "  " }) })).status, 400, "an empty name → 400");
+  assert.equal((await registryFetch(kvEnv, "POST", "/getcode-verify", { rawBody: "{not json" })).status, 400, "malformed JSON → 400");
+  const hit = await registryLookup(kvEnv, "201012345678");
+  assert.deepEqual(hit.json, { found: false }, "bad input writes nothing");
+});
+
+test("getcode-verify: a non-Egyptian phone syncs under its folded digits", async () => {
+  const kvEnv = verifyKvEnv();
+  makeGetCodeFetchStub([]);
+  ocrMode = "ok";
+  const res = await registryFetch(kvEnv, "POST", "/getcode-verify", { body: verifyBody({ phone: "6565666666" }) });
+  assert.deepEqual(res.json, { ok: true });
+  const hit = await registryLookup(kvEnv, "6565666666");
+  assert.deepEqual(hit.json, { found: true, name: "أحمد محمد علي", code: "13580245" });
+});

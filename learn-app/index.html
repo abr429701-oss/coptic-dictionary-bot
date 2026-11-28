@@ -388,6 +388,12 @@
   // in-app code lookup cannot reach the macro.
   var GET_CODE_FORM_URL = "https://script.google.com/macros/s/AKfycbz68tq_KXu_1ZV0pB1s0NidWhnTli3zG0k_8rjFQWhp/exec";
 
+  // Screenshot verification in the app (2026-11-28, same as the bots):
+  // the example photo shown with the activation notice, and the single
+  // rejection text shown when the uploaded screenshot is rejected.
+  var GET_CODE_EXAMPLE_PHOTO_URL = "https://pub-e39b5be260724e0ea1bbf6a7db089987.r2.dev/getcode-example.jpg";
+  var GET_CODE_SCREENSHOT_REJECT_TEXT = "قم برفع صورة مضبوطة تُوضح أن الرقم مسجل في جهات اتصالك، وتُوضح اسمك ورقمك الكودي في شات الواتساب.";
+
   function formIdFromUrl(url) {
     var m = String(url || "").match(/\/forms\/d\/([A-Za-z0-9_-]+)\//);
     return m ? m[1] : null;
@@ -783,28 +789,7 @@
         body: JSON.stringify({ name: name, phone: phone }),
       }).then(function (r) { return r.json(); }).then(function (data) {
         if (!data || !data.ok || !data.code) throw new Error("lookup failed");
-        view.innerHTML = "<div class='gateCard'><div class='gateIcon'>✓</div>" +
-          "<h2>الرقم الكودي الخاص بك</h2>" +
-          "<div class='codeBig' id='gcCode'>" + esc(data.code) + "</div>" +
-          "<p class='muted'>احفظ الرقم ده — هتحتاجه لدخول كل الامتحانات.</p>" +
-          "<button class='examBtn' type='button' id='gcCopy'>نسخ الرقم</button>" +
-          "<a class='examBtn' style='background: #25d366; box-shadow: 0 6px 18px rgba(37, 211, 102, .30);' href='" + esc(data.whatsapp || "") + "' target='_blank' rel='noopener'>إرساله على واتساب لتفعيل الاشتراك ←</a>" +
-          "<button class='linkBtn' type='button' id='gcBack'>رجوع</button></div>";
-        document.getElementById("gcCopy").addEventListener("click", function () {
-          var done = function () { this.textContent = "تم النسخ ✓"; }.bind(this);
-          if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(data.code).then(done).catch(function () {});
-          } else {
-            var tmp = document.createElement("input");
-            tmp.value = data.code;
-            document.body.appendChild(tmp);
-            tmp.select();
-            try { document.execCommand("copy"); done(); } catch (e) {}
-            document.body.removeChild(tmp);
-          }
-        });
-        document.getElementById("gcBack").addEventListener("click", goBack);
-        window.scrollTo(0, 0);
+        showGetCodeScreenshot(name, phone, data.code, data.whatsapp || "");
       }).catch(function () {
         btn.disabled = false;
         btn.textContent = "احصل على الرقم الكودي";
@@ -816,6 +801,111 @@
         showTopError(view, err);
         window.scrollTo(0, 0);
       });
+    });
+    window.scrollTo(0, 0);
+  }
+
+  // The code screen — shown ONLY after the screenshot is accepted:
+  // the code, a copy button, and the WhatsApp activation link.
+  function showGetCodeResult(data) {
+    view.innerHTML = "<div class='gateCard'><div class='gateIcon'>✓</div>" +
+      "<h2>الرقم الكودي الخاص بك</h2>" +
+      "<div class='codeBig' id='gcCode'>" + esc(data.code) + "</div>" +
+      "<p class='muted'>احفظ الرقم ده — هتحتاجه لدخول كل الامتحانات.</p>" +
+      "<button class='examBtn' type='button' id='gcCopy'>نسخ الرقم</button>" +
+      "<a class='examBtn' style='background: #25d366; box-shadow: 0 6px 18px rgba(37, 211, 102, .30);' href='" + esc(data.whatsapp || "") + "' target='_blank' rel='noopener'>إرساله على واتساب لتفعيل الاشتراك ←</a>" +
+      "<button class='linkBtn' type='button' id='gcBack'>رجوع</button></div>";
+    document.getElementById("gcCopy").addEventListener("click", function () {
+      var done = function () { this.textContent = "تم النسخ ✓"; }.bind(this);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(data.code).then(done).catch(function () {});
+      } else {
+        var tmp = document.createElement("input");
+        tmp.value = data.code;
+        document.body.appendChild(tmp);
+        tmp.select();
+        try { document.execCommand("copy"); done(); } catch (e) {}
+        document.body.removeChild(tmp);
+      }
+    });
+    document.getElementById("gcBack").addEventListener("click", goBack);
+    window.scrollTo(0, 0);
+  }
+
+  // Screenshot verification inside the app (2026-11-28, same as the
+  // bots): after /getcode returns the code, the code is NOT shown yet.
+  // The student registers the admin number, opens the WhatsApp link,
+  // and uploads a screenshot of the chat here; the Worker OCRs it and
+  // only then reveals the code (and writes the shared registry entry,
+  // so the bots recognize the student instantly).
+  function showGetCodeScreenshot(name, phone, code, whatsapp) {
+    current = "getcode";
+    titleEl.textContent = "الحصول على الرقم الكودي";
+    backBtn.style.display = "";
+    if (tg && tg.BackButton) { try { tg.BackButton.show(); } catch (e) {} }
+    view.innerHTML = "<div class='gateCard'><div class='gateIcon'>📸</div>" +
+      "<h2>تفعيل الاشتراك</h2>" +
+      "<p>لتفعيل اشتراكك، سجّل هذا الرقم +201207829388 في جهات اتصالك أولاً، ثم اضغط على رابط الواتساب التالي: <a href='" + esc(whatsapp) + "' target='_blank' rel='noopener'>رابط الواتساب</a> لفتح المحادثة مع الرقم على الواتساب، ثم التقط Screenshot للشاشة على سبيل المثال مثل الشكل الموضح في الصورة المرفقة، ثم ارفعها هنا لإتمام التفعيل.</p>" +
+      "<img src='" + esc(GET_CODE_EXAMPLE_PHOTO_URL) + "' alt='مثال للسكرين' style='max-width:100%;border-radius:12px;margin:10px 0;'>" +
+      "<label class='fieldLabel' for='gcShot'>ارفع سكرين شوت شات الواتساب</label>" +
+      "<input class='qText' id='gcShot' type='file' accept='image/*'>" +
+      "<div class='qErr' id='gcShotErr'></div>" +
+      "<button class='examBtn' type='button' id='gcUpload'>رفع السكرين</button>" +
+      "<button class='linkBtn' type='button' id='gcShotBack'>رجوع</button></div>";
+    var fileEl = document.getElementById("gcShot");
+    var errEl = document.getElementById("gcShotErr");
+    var btn = document.getElementById("gcUpload");
+    document.getElementById("gcShotBack").addEventListener("click", goBack);
+    btn.addEventListener("click", function () {
+      var file = fileEl.files && fileEl.files[0];
+      if (!file) { errEl.textContent = "اختار صورة السكرين الأول."; errEl.style.display = "block"; return; }
+      errEl.style.display = "none";
+      btn.disabled = true;
+      btn.textContent = "جارٍ فحص الصورة…";
+      var reader = new FileReader();
+      var fail = function (msg) {
+        btn.disabled = false;
+        btn.textContent = "رفع السكرين";
+        errEl.textContent = msg;
+        errEl.style.display = "block";
+      };
+      reader.onerror = function () { fail("تعذّرت قراءة الصورة — جرّب صورة تانية."); };
+      reader.onload = function () {
+        var img = new Image();
+        img.onerror = function () { fail("تعذّرت قراءة الصورة — جرّب صورة تانية."); };
+        img.onload = function () {
+          // Downscale in the browser first (max ~1600px on the long
+          // side, JPEG) so the upload stays under the 1 MB OCR limit.
+          var maxSide = 1600;
+          var scale = Math.min(1, maxSide / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
+          var cw = Math.max(1, Math.round((img.naturalWidth || 1) * scale));
+          var ch = Math.max(1, Math.round((img.naturalHeight || 1) * scale));
+          var canvas = document.createElement("canvas");
+          canvas.width = cw;
+          canvas.height = ch;
+          canvas.getContext("2d").drawImage(img, 0, 0, cw, ch);
+          var dataUrl = "";
+          try { dataUrl = canvas.toDataURL("image/jpeg", 0.85); } catch (e) { dataUrl = ""; }
+          var b64 = dataUrl.indexOf(",") >= 0 ? dataUrl.split(",")[1] : "";
+          if (!b64) { fail("تعذّرت قراءة الصورة — جرّب صورة تانية."); return; }
+          fetch("/getcode-verify", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ name: name, phone: phone, code: code, imageBase64: b64 }),
+          }).then(function (r) { return r.json(); }).then(function (data) {
+            if (data && data.ok) {
+              showGetCodeResult({ code: code, whatsapp: whatsapp });
+              return;
+            }
+            fail(GET_CODE_SCREENSHOT_REJECT_TEXT);
+            window.scrollTo(0, 0);
+          }).catch(function () {
+            fail("تعذّر فحص الصورة دلوقتي — جرّب تاني.");
+          });
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
     });
     window.scrollTo(0, 0);
   }

@@ -5611,6 +5611,7 @@ function usageKindForPath(pathname) {
   if (path === "/exam-pattern") return "exam";
   if (path === "/checkcode") return "checkcode";
   if (path === "/getcode") return "getcode";
+  if (path === "/getcode-verify") return "getcode";
   if (path === "/getcode-registry") return "getcode";
   if (path === "/health") return "health";
   if (path.startsWith("/media/") || path.startsWith("/video/")) return "media";
@@ -10018,6 +10019,46 @@ export default {
       const result = await getCodeFromMacro(name, phone, cfg?.url ?? null);
       if (!result.code) return Response.json({ ok: false, error: result.error || "macro-unreadable" }, { status: 502 });
       return Response.json({ ok: true, code: result.code, whatsapp: buildGetCodeWhatsAppUrl(result.code, name) });
+    }
+    // Get-code screenshot verification inside the web app (2026-11-28):
+    // the app POSTs {name, phone, code, imageBase64} after the student
+    // uploads a screenshot of their WhatsApp chat. Same OCR rules as
+    // the bots (verifyScreenshotOcr): reject when the admin number
+    // shows as raw digits (unsaved) or the student's own code is
+    // absent; no name check at all. Fail-open (no key / OCR error /
+    // empty text / oversize) → accept. On accept the registry entry
+    // is written (resolved key) so the bots recognize the student
+    // instantly; on reject the app shows the single rejection text
+    // and lets the student retry. Phones and codes are never logged.
+    if (request.method === "POST" && url.pathname === "/getcode-verify") {
+      let body = {};
+      try { body = await request.json(); } catch { return Response.json({ ok: false, error: "bad-request" }, { status: 400 }); }
+      const name = String(body.name ?? "").trim();
+      const phone = String(body.phone ?? "");
+      const code = String(body.code ?? "").trim();
+      const imageBase64 = String(body.imageBase64 ?? "").replace(/\s/gu, "").replace(/^data:image\/[a-zA-Z]+;base64,/, "");
+      if (!name || name.length > 60 || !getCodePhoneValid(phone) || !/^\d{6,10}$/u.test(code) || !imageBase64) {
+        return Response.json({ ok: false, error: "bad-input" }, { status: 400 });
+      }
+      // ~1.4M base64 chars ≈ 1 MB decoded — over the OCR limit, so
+      // fail open without running OCR (same as verifyScreenshotOcr's
+      // "skipped" for oversize).
+      let verdict = "skipped";
+      if (imageBase64.length <= 1400000) {
+        try {
+          const binary = atob(imageBase64);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          verdict = (await verifyScreenshotOcr(bytes, code, String(env?.OCR_SPACE_API_KEY ?? "").trim())).verdict;
+        } catch {
+          verdict = "skipped";
+        }
+      }
+      if (verdict === "unsaved-number" || verdict === "no-code") {
+        return Response.json({ ok: false, error: "rejected" });
+      }
+      await setCodeRegistryEntry(env, resolveGetCodeRegistryKey(phone), name, code);
+      return Response.json({ ok: true });
     }
     // Shared get-code registry (2026-11-28, cross-platform sync): the
     // other bots (WhatsApp, Messenger) read/write the same DO entries
